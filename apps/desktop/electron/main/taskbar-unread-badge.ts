@@ -6,9 +6,9 @@ import {
 import type { HostProcess } from "./host-process";
 import type { Logger } from "./logger";
 import {
+  TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
   buildTaskbarUnreadOverlayPng,
   formatTaskbarUnreadOverlayLabel,
-  renderTaskbarUnreadOverlayPng,
 } from "./taskbar-unread-overlay";
 
 const REFRESH_AFTER_INVOKE = new Set<string>([
@@ -27,9 +27,9 @@ const REFRESH_AFTER_INVOKE = new Set<string>([
  * applied — otherwise a later refresh with the same count early-returns and the
  * overlay never appears.
  *
- * On win32, painting prefers renderer Canvas (executeJavaScript → fillText PNG)
- * and falls back to the sync main-process SDF PNG when webContents is missing
- * or Canvas fails. Paint is async with a revision token so stale paints drop.
+ * On win32, painting uses the deterministic main-process SDF/bitmap PNG
+ * (64×64 + scaleFactor 4 → 16×16 logical). No Canvas fillText, no intermediate
+ * resize — Windows setOverlayIcon already slots into a fixed ~16×16 overlay.
  */
 export function createTaskbarUnreadBadge({
   getHost,
@@ -95,23 +95,7 @@ export function createTaskbarUnreadBadge({
         return;
       }
 
-      let png: Buffer | null = null;
-      const contents = window.webContents;
-      if (contents && !contents.isDestroyed()) {
-        try {
-          png = await renderTaskbarUnreadOverlayPng(contents, next);
-        } catch (error) {
-          logger.app(
-            "diagnostics",
-            "warn",
-            "taskbar overlay canvas render failed; using sync fallback",
-            { data: String(error) },
-          );
-        }
-      }
-      if (!png) {
-        png = buildTaskbarUnreadOverlayPng(next);
-      }
+      const png = buildTaskbarUnreadOverlayPng(next);
 
       if (myRevision !== paintRevision) return;
       if (window.isDestroyed()) return;
@@ -122,8 +106,10 @@ export function createTaskbarUnreadBadge({
         return;
       }
 
-      // scaleFactor: 1 so DPI metadata does not imply non-square density.
-      let image = nativeImage.createFromBuffer(png, { scaleFactor: 1 });
+      // 64×64 raster + scaleFactor 4 → 16×16 logical DIP for the overlay slot.
+      let image = nativeImage.createFromBuffer(png, {
+        scaleFactor: TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
+      });
       if (image.isEmpty() && typeof nativeImage.createFromDataURL === "function") {
         image = nativeImage.createFromDataURL(
           `data:image/png;base64,${png.toString("base64")}`,
@@ -134,17 +120,8 @@ export function createTaskbarUnreadBadge({
         appliedCount = 0;
         return;
       }
-      // Square-resize for Windows setOverlayIcon: 48×48 keeps the badge
-      // clearer than a 32px shrink while still forcing uniform scaling
-      // (canvas source stays 96×96, scaleFactor 1).
-      const overlayIconSize = 48;
-      if (typeof image.resize === "function") {
-        image = image.resize({
-          width: overlayIconSize,
-          height: overlayIconSize,
-          quality: "best",
-        });
-      }
+      // Do NOT resize: intermediate downscales (e.g. 96→48) do not enlarge the
+      // badge in the fixed Windows overlay slot; design is already 16×16 logical.
       window.setOverlayIcon(image, label);
       appliedCount = next;
     } catch (error) {

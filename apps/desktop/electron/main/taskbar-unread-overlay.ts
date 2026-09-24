@@ -1,5 +1,4 @@
 import { deflateSync } from "node:zlib";
-import type { WebContents } from "electron";
 
 /**
  * OS shell badge for durable task outcomes.
@@ -12,23 +11,85 @@ import type { WebContents } from "electron";
  * Display policy: counts 1–99 show the real digit string; counts ≥100 show
  * "99+" so a Windows overlay stays readable.
  *
- * Primary paint path: renderer Canvas via `webContents.executeJavaScript`
- * (Segoe UI fillText, system anti-aliasing) → PNG → setOverlayIcon.
- * Sync main-process SDF PNG is kept for unit tests and as a fallback when
- * webContents is unavailable.
+ * Raster: deterministic main-process SDF/bitmap PNG at 64×64. Paired with
+ * `nativeImage.createFromBuffer(png, { scaleFactor: 4 })` so the logical
+ * Windows overlay slot is 16×16 DIP (crisp on HiDPI). No device-dependent Canvas font rendering —
+ * fonts vary across machines and must not drive the badge.
  *
- * Shape: always a perfect black circle (ctx.arc / circle SDF). Multi-digit
- * and "99+" fit by shrinking font size inside the circle — never a pill,
- * capsule, roundRect, or ellipse. Black (#000) fill, white (#fff) text.
+ * Shape: always a perfect black circle (circle SDF). Multi-digit and "99+"
+ * fit by shrinking the custom glyph layout inside the circle — never a pill,
+ * capsule, roundRect, or ellipse. Black (#000) fill, white (#fff) glyphs.
  */
 
-/** Canvas / sync overlay raster size (px). Prefer ≥96 for taskbar scaling. */
-export const TASKBAR_UNREAD_OVERLAY_SIZE = 96;
+/** Physical PNG edge length (px). Logical DIP size = SIZE / SCALE_FACTOR. */
+export const TASKBAR_UNREAD_OVERLAY_SIZE = 64;
+
+/**
+ * Electron `nativeImage` scaleFactor so 64px raster → 16×16 logical DIP.
+ * Windows `setOverlayIcon` slot is ~16×16; do not rely on a second OS scale
+ * to enlarge a smaller intermediate bitmap.
+ */
+export const TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR = 4;
 
 const OVERLAY_SIZE = TASKBAR_UNREAD_OVERLAY_SIZE;
 
-/** 5×7 bitmap glyphs; bit 0 is the leftmost pixel of each row. */
-const GLYPHS: Record<string, number[]> = {
+/**
+ * Circle inset from canvas edge (physical px). At 64px → ≤2px so diameter
+ * ≈60px (15px logical). Transparent margin ≤0.5px logical.
+ */
+const CIRCLE_INSET = 2;
+
+/** Single-digit bold bitmaps: 7×9. Digit "1" has widened top bar + base. */
+const SINGLE_GLYPH_W = 7;
+const SINGLE_GLYPH_H = 9;
+const SINGLE_GLYPHS: Record<string, number[]> = {
+  // bit 6 = leftmost pixel
+  "0": [
+    0b0111110, 0b1100011, 0b1100011, 0b1100011, 0b1100011, 0b1100011, 0b1100011,
+    0b1100011, 0b0111110,
+  ],
+  "1": [
+    0b0111000, 0b1111100, 0b0011000, 0b0011000, 0b0011000, 0b0011000, 0b0011000,
+    0b0011000, 0b1111111,
+  ],
+  "2": [
+    0b0111110, 0b1100011, 0b0000011, 0b0000110, 0b0001100, 0b0011000, 0b0110000,
+    0b1100000, 0b1111111,
+  ],
+  "3": [
+    0b0111110, 0b1100011, 0b0000011, 0b0000011, 0b0011110, 0b0000011, 0b0000011,
+    0b1100011, 0b0111110,
+  ],
+  "4": [
+    0b0000110, 0b0001110, 0b0011010, 0b0110010, 0b1100010, 0b1111111, 0b0000010,
+    0b0000010, 0b0000010,
+  ],
+  "5": [
+    0b1111111, 0b1100000, 0b1100000, 0b1111110, 0b0000011, 0b0000011, 0b0000011,
+    0b1100011, 0b0111110,
+  ],
+  "6": [
+    0b0111110, 0b1100011, 0b1100000, 0b1100000, 0b1111110, 0b1100011, 0b1100011,
+    0b1100011, 0b0111110,
+  ],
+  "7": [
+    0b1111111, 0b0000011, 0b0000010, 0b0000110, 0b0001100, 0b0011000, 0b0011000,
+    0b0110000, 0b0110000,
+  ],
+  "8": [
+    0b0111110, 0b1100011, 0b1100011, 0b1100011, 0b0111110, 0b1100011, 0b1100011,
+    0b1100011, 0b0111110,
+  ],
+  "9": [
+    0b0111110, 0b1100011, 0b1100011, 0b1100011, 0b0111111, 0b0000011, 0b0000011,
+    0b1100011, 0b0111110,
+  ],
+};
+
+/** Multi-digit / "99+" bitmaps: 5×7 (separate, smaller layout than singles). */
+const MULTI_GLYPH_W = 5;
+const MULTI_GLYPH_H = 7;
+const MULTI_GLYPHS: Record<string, number[]> = {
   "0": [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
   "1": [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
   "2": [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
@@ -42,9 +103,6 @@ const GLYPHS: Record<string, number[]> = {
   "+": [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
 };
 
-const GLYPH_W = 5;
-const GLYPH_H = 7;
-
 /**
  * Format the overlay accessibility label / drawn text for an unread count.
  * Returns null when the overlay should be cleared.
@@ -57,86 +115,11 @@ export function formatTaskbarUnreadOverlayLabel(count: number): string | null {
 }
 
 /**
- * Self-contained renderer script: draws the badge with Canvas fillText and
- * returns a PNG data URL (or null). Safe to pass to executeJavaScript.
- */
-export function buildTaskbarUnreadOverlayCanvasScript(
-  count: number,
-): string | null {
-  const label = formatTaskbarUnreadOverlayLabel(count);
-  if (!label) return null;
-  const size = OVERLAY_SIZE;
-  const labelLit = JSON.stringify(label);
-  // IIFE evaluates to a PNG data URL string (or null).
-  return `(() => {
-  const size = ${size};
-  const label = ${labelLit};
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-  ctx.clearRect(0, 0, size, size);
-  const cx = size / 2;
-  const cy = size / 2;
-  const inset = size * 0.015;
-  const r = size / 2 - inset;
-  ctx.fillStyle = "#000";
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  let fontSize;
-  if (label.length <= 1) fontSize = size * 0.65;
-  else if (label.length === 2) fontSize = size * 0.48;
-  else fontSize = size * 0.36;
-  const fontFamily = "\\"Segoe UI Semibold\\", \\"Segoe UI\\", sans-serif";
-  const maxTextW = r * 2 * 0.85;
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  for (;;) {
-    ctx.font = "700 " + fontSize + "px " + fontFamily;
-    if (ctx.measureText(label).width <= maxTextW || fontSize <= size * 0.18) break;
-    fontSize -= size * 0.01;
-  }
-  ctx.fillText(label, cx, cy + fontSize * 0.03);
-  return canvas.toDataURL("image/png");
-})()`;
-}
-
-/**
- * Render the overlay PNG via renderer Canvas (executeJavaScript).
- * Returns null when count clears the overlay or webContents cannot paint.
- */
-export async function renderTaskbarUnreadOverlayPng(
-  webContents: Pick<WebContents, "isDestroyed" | "executeJavaScript"> | null | undefined,
-  count: number,
-): Promise<Buffer | null> {
-  const label = formatTaskbarUnreadOverlayLabel(count);
-  if (!label) return null;
-  if (!webContents || webContents.isDestroyed()) return null;
-  const script = buildTaskbarUnreadOverlayCanvasScript(count);
-  if (!script) return null;
-  const result = await webContents.executeJavaScript(script, true);
-  if (typeof result !== "string" || result.length === 0) return null;
-  if (result.startsWith("data:image/png;base64,")) {
-    return Buffer.from(result.slice("data:image/png;base64,".length), "base64");
-  }
-  // Bare base64 fallback
-  if (/^[A-Za-z0-9+/=\r\n]+$/.test(result.slice(0, 64))) {
-    try {
-      return Buffer.from(result, "base64");
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-/**
- * Build a deterministic sync PNG (SDF anti-aliased black circle, white
- * bitmap digits) for unit tests and as a fallback when Canvas is unavailable.
- * Returns null when count clears the overlay.
+ * Build a deterministic 64×64 PNG (SDF anti-aliased black circle, white
+ * custom bitmap glyphs) for `BrowserWindow.setOverlayIcon`. Returns null when
+ * count clears the overlay.
+ *
+ * Pair with `nativeImage.createFromBuffer(png, { scaleFactor: 4 })`.
  */
 export function buildTaskbarUnreadOverlayPng(count: number): Buffer | null {
   const label = formatTaskbarUnreadOverlayLabel(count);
@@ -158,13 +141,15 @@ function coverageFromSdf(dist: number): number {
   return clamp01(0.5 + dist);
 }
 
+function circleRadius(): number {
+  return OVERLAY_SIZE / 2 - CIRCLE_INSET;
+}
+
 function paintBadgeShape(rgba: Uint8Array): void {
   const size = OVERLAY_SIZE;
   const cx = (size - 1) / 2;
   const cy = (size - 1) / 2;
-  // Match Canvas recipe: circle inset ~1.5% of SIZE (near edge-to-edge).
-  const inset = size * 0.015;
-  const radius = size / 2 - inset;
+  const radius = circleRadius();
 
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
@@ -182,38 +167,75 @@ function paintBadgeShape(rgba: Uint8Array): void {
   }
 }
 
-/** Pixel scale and gap so the label fits inside the badge with padding. */
-function layoutForLabel(label: string): { scale: number; gap: number } {
-  const n = label.length;
-  // Max usable content width ~82% of circle diameter (match Canvas maxTextW).
-  const diameter = OVERLAY_SIZE - 2 * (OVERLAY_SIZE * 0.015);
-  const maxW = diameter * 0.85;
-  // Prefer larger glyphs when few characters.
-  const preferred = n <= 1 ? 10 : n === 2 ? 7 : 5;
-  const gapPreferred = n <= 1 ? 0 : n === 2 ? 4 : 2;
-  for (let scale = preferred; scale >= 2; scale -= 0.5) {
-    const gap = scale >= 4 ? gapPreferred : Math.max(1, Math.floor(scale / 2));
-    const totalW = n * GLYPH_W * scale + (n - 1) * gap;
-    if (totalW <= maxW) return { scale, gap };
+type GlyphLayout = {
+  glyphs: Record<string, number[]>;
+  glyphW: number;
+  glyphH: number;
+  scale: number;
+  gap: number;
+};
+
+/**
+ * Single-digit layout: large bold glyphs (~44–48px tall ≈ 11–12 logical).
+ * Multi-digit / "99+" use a separate smaller layout and must not share these
+ * proportions.
+ */
+function layoutForLabel(label: string): GlyphLayout {
+  const diameter = circleRadius() * 2;
+  if (label.length <= 1) {
+    // Target glyph height ≈ 46px (≈11.5 logical) → ~77% of 60px diameter;
+    // white ink still reads as ~65–70% of the disc at taskbar scale.
+    const scale = 46 / SINGLE_GLYPH_H;
+    return {
+      glyphs: SINGLE_GLYPHS,
+      glyphW: SINGLE_GLYPH_W,
+      glyphH: SINGLE_GLYPH_H,
+      scale,
+      gap: 0,
+    };
   }
-  return { scale: 2, gap: 1 };
+
+  const n = label.length;
+  const maxW = diameter * 0.82;
+  const preferred = n === 2 ? 4.2 : 2.8;
+  const gapPreferred = n === 2 ? 3 : 2;
+  for (let scale = preferred; scale >= 1.5; scale -= 0.1) {
+    const gap = scale >= 3 ? gapPreferred : Math.max(1, Math.floor(scale / 2));
+    const totalW = n * MULTI_GLYPH_W * scale + (n - 1) * gap;
+    if (totalW <= maxW) {
+      return {
+        glyphs: MULTI_GLYPHS,
+        glyphW: MULTI_GLYPH_W,
+        glyphH: MULTI_GLYPH_H,
+        scale,
+        gap,
+      };
+    }
+  }
+  return {
+    glyphs: MULTI_GLYPHS,
+    glyphW: MULTI_GLYPH_W,
+    glyphH: MULTI_GLYPH_H,
+    scale: 1.5,
+    gap: 1,
+  };
 }
 
 function paintLabel(rgba: Uint8Array, label: string): void {
   const size = OVERLAY_SIZE;
-  const { scale, gap } = layoutForLabel(label);
-  const totalW = label.length * GLYPH_W * scale + (label.length - 1) * gap;
-  const totalH = GLYPH_H * scale;
+  const { glyphs, glyphW, glyphH, scale, gap } = layoutForLabel(label);
+  const totalW = label.length * glyphW * scale + (label.length - 1) * gap;
+  const totalH = glyphH * scale;
   let originX = (size - totalW) / 2;
   const originY = (size - totalH) / 2;
 
   for (const ch of label) {
-    const rows = GLYPHS[ch];
+    const rows = glyphs[ch];
     if (!rows) continue;
-    for (let gy = 0; gy < GLYPH_H; gy += 1) {
+    for (let gy = 0; gy < glyphH; gy += 1) {
       const row = rows[gy] ?? 0;
-      for (let gx = 0; gx < GLYPH_W; gx += 1) {
-        if (((row >> (GLYPH_W - 1 - gx)) & 1) !== 1) continue;
+      for (let gx = 0; gx < glyphW; gx += 1) {
+        if (((row >> (glyphW - 1 - gx)) & 1) !== 1) continue;
         paintSoftBlock(
           rgba,
           originX + gx * scale,
@@ -222,7 +244,7 @@ function paintLabel(rgba: Uint8Array, label: string): void {
         );
       }
     }
-    originX += GLYPH_W * scale + gap;
+    originX += glyphW * scale + gap;
   }
 }
 
@@ -238,7 +260,7 @@ function paintSoftBlock(
 ): void {
   const size = OVERLAY_SIZE;
   // Inset slightly so adjacent cells don't fuse into a blob; AA on the rim.
-  const pad = Math.min(0.4, cell * 0.08);
+  const pad = Math.min(0.35, cell * 0.06);
   const x0 = ox + pad;
   const y0 = oy + pad;
   const x1 = ox + cell - pad;

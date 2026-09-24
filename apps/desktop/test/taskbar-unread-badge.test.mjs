@@ -67,26 +67,17 @@ function loadBadgeModule() {
     },
   };
 
-  const canvasCalls = [];
+  const syncPngCalls = [];
   const overlay = {
+    TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR: 4,
     buildTaskbarUnreadOverlayPng(count) {
+      syncPngCalls.push(count);
       if (count <= 0) return null;
       return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, count & 0xff]);
     },
     formatTaskbarUnreadOverlayLabel(count) {
       if (count <= 0) return null;
       return count >= 100 ? "99+" : String(count);
-    },
-    async renderTaskbarUnreadOverlayPng(webContents, count) {
-      canvasCalls.push({ count, hasWebContents: Boolean(webContents) });
-      if (!webContents || (typeof webContents.isDestroyed === "function" && webContents.isDestroyed())) {
-        return null;
-      }
-      if (typeof webContents.executeJavaScript === "function") {
-        await webContents.executeJavaScript("/* canvas badge */", true);
-      }
-      if (count <= 0) return null;
-      return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, count & 0xff, 0xca]);
     },
   };
 
@@ -105,14 +96,13 @@ function loadBadgeModule() {
   return {
     createTaskbarUnreadBadge: module.exports.createTaskbarUnreadBadge,
     badgeCounts,
-    canvasCalls,
+    syncPngCalls,
     resizeCalls,
     createFromBufferCalls,
   };
 }
 
 function makeWindow(overlayIcons) {
-  const executeJavaScriptCalls = [];
   return {
     isDestroyed: () => false,
     setOverlayIcon(image, description) {
@@ -120,12 +110,10 @@ function makeWindow(overlayIcons) {
     },
     webContents: {
       isDestroyed: () => false,
-      async executeJavaScript(code, userGesture) {
-        executeJavaScriptCalls.push({ code, userGesture });
+      async executeJavaScript() {
         return null;
       },
     },
-    executeJavaScriptCalls,
   };
 }
 
@@ -160,7 +148,7 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
     badge,
     listCalls,
     badgeCounts: loaded.badgeCounts,
-    canvasCalls: loaded.canvasCalls,
+    syncPngCalls: loaded.syncPngCalls,
     resizeCalls: loaded.resizeCalls,
     createFromBufferCalls: loaded.createFromBufferCalls,
     overlayIcons,
@@ -280,7 +268,7 @@ test("refresh with unreadCount 0 clears the Windows overlay icon", async () => {
     assert.ok(h.overlayIcons.length >= 1);
     assert.notEqual(h.overlayIcons.at(-1).image, null);
     assert.equal(h.overlayIcons.at(-1).description, "2");
-    assert.ok(h.canvasCalls.some((c) => c.count === 2));
+    assert.ok(h.syncPngCalls.includes(2));
 
     h.setUnreadCount(0);
     await h.badge.refresh();
@@ -333,27 +321,30 @@ test("Windows: createTray-style replay paints after late window readiness", asyn
   }
 });
 
-test("Windows: prefers canvas render path when webContents is available", async () => {
+test("Windows: uses sync SDF PNG with scaleFactor 4 and no resize", async () => {
   const h = harness({ platform: "win32", unreadCount: 9 });
   try {
     await h.badge.refresh();
-    assert.ok(h.canvasCalls.length >= 1);
-    assert.equal(h.canvasCalls.at(-1).count, 9);
-    assert.equal(h.canvasCalls.at(-1).hasWebContents, true);
+    assert.ok(h.syncPngCalls.includes(9));
     assert.equal(h.overlayIcons.at(-1).description, "9");
-    // Canvas path marker byte 0xca present in mock buffer
-    assert.equal(h.overlayIcons.at(-1).image.buffer.at(-1), 0xca);
     assert.ok(h.createFromBufferCalls.length >= 1);
-    assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 1);
-    assert.ok(h.resizeCalls.length >= 1);
-    const resize = h.resizeCalls.at(-1);
-    assert.equal(resize.width, 48);
-    assert.equal(resize.height, 48);
-    assert.equal(resize.quality, "best");
-    assert.equal(resize.width, resize.height);
+    assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 4);
+    assert.equal(h.resizeCalls.length, 0, "must not intermediate-resize overlay");
   } finally {
     h.dispose();
   }
+});
+
+test("badge source has no image.resize and no canvas render import", () => {
+  const source = readFileSync(
+    new URL("../electron/main/taskbar-unread-badge.ts", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /image\.resize/);
+  assert.doesNotMatch(source, /resize\s*\(/);
+  assert.doesNotMatch(source, /renderTaskbarUnreadOverlayPng/);
+  assert.match(source, /scaleFactor:\s*TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR/);
+  assert.match(source, /buildTaskbarUnreadOverlayPng/);
 });
 
 test("D295 inbox still counts failures only while shell uses full unreadCount", () => {
