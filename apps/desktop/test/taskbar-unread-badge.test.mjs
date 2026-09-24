@@ -347,8 +347,8 @@ test("Windows: prefers canvas render path when webContents is available", async 
     assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 1);
     assert.ok(h.resizeCalls.length >= 1);
     const resize = h.resizeCalls.at(-1);
-    assert.equal(resize.width, 32);
-    assert.equal(resize.height, 32);
+    assert.equal(resize.width, 48);
+    assert.equal(resize.height, 48);
     assert.equal(resize.quality, "best");
     assert.equal(resize.width, resize.height);
   } finally {

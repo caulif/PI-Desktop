@@ -102,6 +102,19 @@ test("canvas script uses circle arc for all labels and never roundRect", () => {
   assert.match(capped, /measureText/);
 });
 
+test("canvas script uses near edge-to-edge circle and heavy single-digit font", () => {
+  const script = buildTaskbarUnreadOverlayCanvasScript(1);
+  assert.match(script, /size \* 0\.015/);
+  assert.match(script, /size \* 0\.65/);
+  assert.match(script, /r \* 2 \* 0\.85/);
+  assert.match(script, /"700 "/);
+  assert.doesNotMatch(script, /size \* 0\.06/);
+  const multi = buildTaskbarUnreadOverlayCanvasScript(36);
+  assert.match(multi, /size \* 0\.48/);
+  const capped = buildTaskbarUnreadOverlayCanvasScript(100);
+  assert.match(capped, /size \* 0\.36/);
+});
+
 test("renderTaskbarUnreadOverlayPng uses executeJavaScript and decodes data URL", async () => {
   const tinyPng = buildTaskbarUnreadOverlayPng(1);
   assert.ok(tinyPng);

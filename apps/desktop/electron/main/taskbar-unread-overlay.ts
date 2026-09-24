@@ -79,23 +79,23 @@ export function buildTaskbarUnreadOverlayCanvasScript(
   ctx.clearRect(0, 0, size, size);
   const cx = size / 2;
   const cy = size / 2;
-  const inset = size * 0.06;
+  const inset = size * 0.015;
   const r = size / 2 - inset;
   ctx.fillStyle = "#000";
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fill();
   let fontSize;
-  if (label.length <= 1) fontSize = size * 0.55;
-  else if (label.length === 2) fontSize = size * 0.40;
-  else fontSize = size * 0.30;
+  if (label.length <= 1) fontSize = size * 0.65;
+  else if (label.length === 2) fontSize = size * 0.48;
+  else fontSize = size * 0.36;
   const fontFamily = "\\"Segoe UI Semibold\\", \\"Segoe UI\\", sans-serif";
-  const maxTextW = r * 2 * 0.78;
+  const maxTextW = r * 2 * 0.85;
   ctx.fillStyle = "#fff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   for (;;) {
-    ctx.font = "600 " + fontSize + "px " + fontFamily;
+    ctx.font = "700 " + fontSize + "px " + fontFamily;
     if (ctx.measureText(label).width <= maxTextW || fontSize <= size * 0.18) break;
     fontSize -= size * 0.01;
   }
@@ -162,8 +162,8 @@ function paintBadgeShape(rgba: Uint8Array): void {
   const size = OVERLAY_SIZE;
   const cx = (size - 1) / 2;
   const cy = (size - 1) / 2;
-  // Match Canvas recipe: circle inset ~6% of SIZE.
-  const inset = size * 0.06;
+  // Match Canvas recipe: circle inset ~1.5% of SIZE (near edge-to-edge).
+  const inset = size * 0.015;
   const radius = size / 2 - inset;
 
   for (let y = 0; y < size; y += 1) {
@@ -185,10 +185,11 @@ function paintBadgeShape(rgba: Uint8Array): void {
 /** Pixel scale and gap so the label fits inside the badge with padding. */
 function layoutForLabel(label: string): { scale: number; gap: number } {
   const n = label.length;
-  // Max usable content width inside the circle diameter with side padding.
-  const maxW = OVERLAY_SIZE * 0.78;
+  // Max usable content width ~82% of circle diameter (match Canvas maxTextW).
+  const diameter = OVERLAY_SIZE - 2 * (OVERLAY_SIZE * 0.015);
+  const maxW = diameter * 0.85;
   // Prefer larger glyphs when few characters.
-  const preferred = n <= 1 ? 8 : n === 2 ? 6 : 4;
+  const preferred = n <= 1 ? 10 : n === 2 ? 7 : 5;
   const gapPreferred = n <= 1 ? 0 : n === 2 ? 4 : 2;
   for (let scale = preferred; scale >= 2; scale -= 0.5) {
     const gap = scale >= 4 ? gapPreferred : Math.max(1, Math.floor(scale / 2));

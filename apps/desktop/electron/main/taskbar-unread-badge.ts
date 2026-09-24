@@ -134,9 +134,10 @@ export function createTaskbarUnreadBadge({
         appliedCount = 0;
         return;
       }
-      // Force a square nativeImage before setOverlayIcon so Windows/Electron
-      // cannot apply non-uniform scaling (canvas source stays 96×96).
-      const overlayIconSize = 32;
+      // Square-resize for Windows setOverlayIcon: 48×48 keeps the badge
+      // clearer than a 32px shrink while still forcing uniform scaling
+      // (canvas source stays 96×96, scaleFactor 1).
+      const overlayIconSize = 48;
       if (typeof image.resize === "function") {
         image = image.resize({
           width: overlayIconSize,
