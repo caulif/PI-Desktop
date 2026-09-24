@@ -17,8 +17,9 @@ import type { WebContents } from "electron";
  * Sync main-process SDF PNG is kept for unit tests and as a fallback when
  * webContents is unavailable.
  *
- * Shape: single character → black circle; multi-character → black horizontal
- * rounded capsule (pill). Black (#000) fill, white (#fff) text.
+ * Shape: always a perfect black circle (ctx.arc / circle SDF). Multi-digit
+ * and "99+" fit by shrinking font size inside the circle — never a pill,
+ * capsule, roundRect, or ellipse. Black (#000) fill, white (#fff) text.
  */
 
 /** Canvas / sync overlay raster size (px). Prefer ≥96 for taskbar scaling. */
@@ -78,40 +79,26 @@ export function buildTaskbarUnreadOverlayCanvasScript(
   ctx.clearRect(0, 0, size, size);
   const cx = size / 2;
   const cy = size / 2;
+  const inset = size * 0.06;
+  const r = size / 2 - inset;
   ctx.fillStyle = "#000";
-  if (label.length <= 1) {
-    const inset = size * 0.06;
-    const r = size / 2 - inset;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-  } else {
-    const w = size * 0.92;
-    const h = size * 0.72;
-    const x = (size - w) / 2;
-    const y = (size - h) / 2;
-    const rr = h / 2;
-    ctx.beginPath();
-    if (typeof ctx.roundRect === "function") {
-      ctx.roundRect(x, y, w, h, rr);
-    } else {
-      ctx.moveTo(x + rr, y);
-      ctx.arcTo(x + w, y, x + w, y + h, rr);
-      ctx.arcTo(x + w, y + h, x, y + h, rr);
-      ctx.arcTo(x, y + h, x, y, rr);
-      ctx.arcTo(x, y, x + w, y, rr);
-      ctx.closePath();
-    }
-    ctx.fill();
-  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
   let fontSize;
   if (label.length <= 1) fontSize = size * 0.55;
-  else if (label.length === 2) fontSize = size * 0.42;
-  else fontSize = size * 0.34;
+  else if (label.length === 2) fontSize = size * 0.40;
+  else fontSize = size * 0.30;
+  const fontFamily = "\\"Segoe UI Semibold\\", \\"Segoe UI\\", sans-serif";
+  const maxTextW = r * 2 * 0.78;
   ctx.fillStyle = "#fff";
-  ctx.font = "600 " + fontSize + "px \\"Segoe UI Semibold\\", \\"Segoe UI\\", sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
+  for (;;) {
+    ctx.font = "600 " + fontSize + "px " + fontFamily;
+    if (ctx.measureText(label).width <= maxTextW || fontSize <= size * 0.18) break;
+    fontSize -= size * 0.01;
+  }
   ctx.fillText(label, cx, cy + fontSize * 0.03);
   return canvas.toDataURL("image/png");
 })()`;
@@ -147,7 +134,7 @@ export async function renderTaskbarUnreadOverlayPng(
 }
 
 /**
- * Build a deterministic sync PNG (SDF anti-aliased black circle/pill, white
+ * Build a deterministic sync PNG (SDF anti-aliased black circle, white
  * bitmap digits) for unit tests and as a fallback when Canvas is unavailable.
  * Returns null when count clears the overlay.
  */
@@ -155,7 +142,7 @@ export function buildTaskbarUnreadOverlayPng(count: number): Buffer | null {
   const label = formatTaskbarUnreadOverlayLabel(count);
   if (!label) return null;
   const rgba = new Uint8Array(OVERLAY_SIZE * OVERLAY_SIZE * 4);
-  paintBadgeShape(rgba, label.length > 1);
+  paintBadgeShape(rgba);
   paintLabel(rgba, label);
   return encodeRgbaPng(OVERLAY_SIZE, OVERLAY_SIZE, rgba);
 }
@@ -171,42 +158,19 @@ function coverageFromSdf(dist: number): number {
   return clamp01(0.5 + dist);
 }
 
-function paintBadgeShape(rgba: Uint8Array, pill: boolean): void {
+function paintBadgeShape(rgba: Uint8Array): void {
   const size = OVERLAY_SIZE;
   const cx = (size - 1) / 2;
   const cy = (size - 1) / 2;
-
-  // Match Canvas recipe: circle inset ~6%; pill ~0.92×0.72 of SIZE.
-  let radius: number;
-  let halfWidth: number;
-  if (!pill) {
-    const inset = size * 0.06;
-    radius = size / 2 - inset;
-    halfWidth = radius;
-  } else {
-    const shapeH = size * 0.72;
-    radius = shapeH / 2;
-    halfWidth = (size * 0.92) / 2;
-  }
+  // Match Canvas recipe: circle inset ~6% of SIZE.
+  const inset = size * 0.06;
+  const radius = size / 2 - inset;
 
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
       const px = x - cx;
       const py = y - cy;
-      let dist: number;
-      if (!pill) {
-        dist = radius - Math.sqrt(px * px + py * py);
-      } else {
-        // Stadium / capsule SDF: horizontal segment with semicircle caps.
-        const halfSeg = Math.max(0, halfWidth - radius);
-        const qx = Math.abs(px) - halfSeg;
-        const qy = Math.abs(py);
-        if (qx > 0) {
-          dist = radius - Math.sqrt(qx * qx + qy * qy);
-        } else {
-          dist = radius - qy;
-        }
-      }
+      const dist = radius - Math.sqrt(px * px + py * py);
       const alpha = coverageFromSdf(dist);
       if (alpha <= 0) continue;
       const i = (y * size + x) * 4;
@@ -221,7 +185,7 @@ function paintBadgeShape(rgba: Uint8Array, pill: boolean): void {
 /** Pixel scale and gap so the label fits inside the badge with padding. */
 function layoutForLabel(label: string): { scale: number; gap: number } {
   const n = label.length;
-  // Max usable content width inside pill (~0.92 SIZE) with side padding.
+  // Max usable content width inside the circle diameter with side padding.
   const maxW = OVERLAY_SIZE * 0.78;
   // Prefer larger glyphs when few characters.
   const preferred = n <= 1 ? 8 : n === 2 ? 6 : 4;

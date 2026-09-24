@@ -86,16 +86,20 @@ test("single-digit, two-digit, and 99+ overlays produce different PNG buffers", 
   assert.notDeepEqual(five, hundred);
 });
 
-test("canvas script contains fillText and arc for positive counts", () => {
-  const script = buildTaskbarUnreadOverlayCanvasScript(36);
-  assert.equal(typeof script, "string");
-  assert.match(script, /fillText/);
-  assert.match(script, /\.arc\(/);
-  assert.match(script, /toDataURL/);
-  assert.match(script, /99\+|Segoe UI|#000|#fff/);
+test("canvas script uses circle arc for all labels and never roundRect", () => {
+  for (const count of [1, 9, 10, 36, 99, 100]) {
+    const script = buildTaskbarUnreadOverlayCanvasScript(count);
+    assert.equal(typeof script, "string");
+    assert.match(script, /fillText/);
+    assert.match(script, /\.arc\(/);
+    assert.match(script, /toDataURL/);
+    assert.match(script, /Segoe UI|#000|#fff/);
+    assert.doesNotMatch(script, /roundRect/);
+    assert.doesNotMatch(script, /ellipse\s*\(/);
+  }
   const capped = buildTaskbarUnreadOverlayCanvasScript(100);
   assert.match(capped, /99\+/);
-  assert.match(capped, /fillText/);
+  assert.match(capped, /measureText/);
 });
 
 test("renderTaskbarUnreadOverlayPng uses executeJavaScript and decodes data URL", async () => {
