@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import {
   TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
   TASKBAR_UNREAD_OVERLAY_SIZE,
+  buildTaskbarUnreadOverlayCanvasScript,
   buildTaskbarUnreadOverlayPng,
   formatTaskbarUnreadOverlayLabel,
+  renderTaskbarUnreadOverlayPng,
 } from "../electron/main/taskbar-unread-overlay.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -148,12 +150,12 @@ test("caps overlay text at 99+ for counts of 100 or more", () => {
   assert.equal(formatTaskbarUnreadOverlayLabel(999), "99+");
 });
 
-test("exports 64px raster with scaleFactor 4 (16px logical)", () => {
+test("exports 64px raster with scaleFactor 3 (~21px logical)", () => {
   assert.equal(TASKBAR_UNREAD_OVERLAY_SIZE, 64);
-  assert.equal(TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR, 4);
+  assert.equal(TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR, 3);
   assert.equal(
     TASKBAR_UNREAD_OVERLAY_SIZE / TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
-    16,
+    64 / 3,
   );
 });
 
@@ -190,19 +192,43 @@ test("single-digit, two-digit, and 99+ overlays produce different PNG buffers", 
   assert.notDeepEqual(five, hundred);
 });
 
-test("circle nearly fills 64px canvas (diameter ≈60, inset ≤2)", () => {
+test("fallback circle fills the complete 64px canvas", () => {
   const png = buildTaskbarUnreadOverlayPng(8);
   const { width, height, rgba } = decodeRgbaPng(png);
   assert.equal(width, 64);
   assert.equal(height, 64);
   const cov = circleCoverage(rgba, width, height);
-  // Diameter ≈ 60px (±2 for AA), transparent margin ≤ 2px physical (0.5 logical).
-  assert.ok(cov.diameter >= 58, `diameter ${cov.diameter}`);
-  assert.ok(cov.diameter <= 62, `diameter ${cov.diameter}`);
-  assert.ok(cov.margin <= 2, `margin ${cov.margin}`);
+  assert.ok(cov.diameter >= 63, `diameter ${cov.diameter}`);
+  assert.ok(cov.margin <= 1, `margin ${cov.margin}`);
   assert.ok(cov.ratio >= 0.65, `opaque ratio ${cov.ratio}`);
   // Perfect circle: bbox roughly square.
   assert.ok(Math.abs(cov.bboxW - cov.bboxH) <= 2);
+});
+
+test("Canvas path uses the full badge area and a prominent single digit", () => {
+  const one = buildTaskbarUnreadOverlayCanvasScript(1);
+  assert.ok(one);
+  assert.match(one, /const radius = 32/);
+  assert.match(one, /let fontSize = singleDigit \? 50/);
+  assert.match(one, /ctx\.font = "600 "/);
+  assert.match(one, /ctx\.scale\(1\.1, 1\.03\)/);
+});
+
+test("Canvas PNG decoding rejects invalid renderer output", async () => {
+  const valid = buildTaskbarUnreadOverlayPng(7);
+  const contents = (result) => ({
+    isDestroyed: () => false,
+    executeJavaScript: async () => result,
+  });
+  assert.deepEqual(
+    await renderTaskbarUnreadOverlayPng(contents(`data:image/png;base64,${valid.toString("base64")}`), 7),
+    valid,
+  );
+  assert.equal(
+    await renderTaskbarUnreadOverlayPng(contents("data:image/png;base64,bm90IGEgcG5n"), 7),
+    null,
+  );
+  assert.equal(await renderTaskbarUnreadOverlayPng(contents(null), 7), null);
 });
 
 test("single-digit white glyph height ≈44–48px and ~65–80% of circle diameter", () => {
@@ -297,17 +323,17 @@ test("two-digit / 99+ use smaller glyph layout than single-digit", () => {
   assert.ok(two.height <= 36);
 });
 
-test("source uses custom bitmap glyphs and has no Segoe/fillText canvas path", () => {
+test("source uses a Segoe UI Canvas path for smooth Windows badge glyphs", () => {
   const overlaySource = readFileSync(
     join(root, "electron/main/taskbar-unread-overlay.ts"),
     "utf8",
   );
-  assert.match(overlaySource, /SINGLE_GLYPHS|SINGLE_GLYPH_H/);
-  assert.match(overlaySource, /MULTI_GLYPHS|MULTI_GLYPH_H/);
-  assert.doesNotMatch(overlaySource, /\.fillText\s*\(/);
-  assert.doesNotMatch(overlaySource, /ctx\.font/);
-  assert.doesNotMatch(overlaySource, /Segoe/);
-  assert.doesNotMatch(overlaySource, /executeJavaScript/);
+  assert.match(overlaySource, /buildTaskbarUnreadOverlayCanvasScript/);
+  assert.match(overlaySource, /renderTaskbarUnreadOverlayPng/);
+  assert.match(overlaySource, /\.fillText\s*\(/);
+  assert.match(overlaySource, /ctx\.font/);
+  assert.match(overlaySource, /Segoe UI/);
+  assert.match(overlaySource, /executeJavaScript/);
   assert.doesNotMatch(overlaySource, /\.roundRect\s*\(/);
   assert.doesNotMatch(overlaySource, /ctx\.ellipse\s*\(/);
   assert.match(overlaySource, /D295/);

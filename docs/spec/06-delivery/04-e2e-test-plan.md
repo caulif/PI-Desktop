@@ -4222,7 +4222,11 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   eligible terminal turns. 10) Use Mark all read, then Clear. 11) While a
   native task banner and a renderer refresh are still in flight, deliver a
   delayed `notification.changed` payload for a cleared/read durable id and a
-  duplicate payload for an id that is already present.
+  duplicate payload for an id that is already present. 12) On Windows, create
+  one unread successful outcome while the bell has no failure rows. Open the
+  empty bell popover, use Mark all read, then create another success and use
+  Clear. 13) Create enough unread outcomes for a two-digit count and inspect
+  the taskbar overlay before and after marking all outcomes read.
 - **Expected**: A's visible-current completion creates no row or terminal sidebar mark. Exactly two rows
   exist, newest first: the unfocused A completion and background B failure,
   with localized labels, snapshotted session titles, and B's stable code.
@@ -4239,7 +4243,14 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   outstanding task-native object, a repeated durable id produces no second
   banner or row, and a delayed pre-clear event cannot resurrect the cleared
   item; a genuinely new post-clear turn still produces exactly one row and
-  banner.
+  banner. On Windows, the taskbar overlay is a smooth black circular badge
+  with a centered white system-font numeral. Its visual weight matches common
+  Windows taskbar badges for both single- and two-digit counts. A success-only
+  outcome increments the taskbar badge without adding a bell row or bell
+  count; both toolbar actions remain enabled when relevant and clear the
+  taskbar badge. The badge also clears when no unread outcomes remain. The
+  underlying taskbar button keeps the
+  PI-Desktop `P` icon and PI-Desktop name while the overlay is present.
 - **Specs linked**: `03-runtime/04-data-storage.md`,
   `03-runtime/06-host-rpc-protocol.md`, `03-runtime/01-ipc-protocol.md`,
   `04-ux/07-ui-design-system.md`, `04-ux/08-component-spec.md`,

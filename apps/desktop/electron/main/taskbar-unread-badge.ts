@@ -9,6 +9,7 @@ import {
   TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
   buildTaskbarUnreadOverlayPng,
   formatTaskbarUnreadOverlayLabel,
+  renderTaskbarUnreadOverlayPng,
 } from "./taskbar-unread-overlay";
 
 const REFRESH_AFTER_INVOKE = new Set<string>([
@@ -27,9 +28,9 @@ const REFRESH_AFTER_INVOKE = new Set<string>([
  * applied — otherwise a later refresh with the same count early-returns and the
  * overlay never appears.
  *
- * On win32, painting uses the deterministic main-process SDF/bitmap PNG
- * (64×64 + scaleFactor 4 → 16×16 logical). No Canvas fillText, no intermediate
- * resize — Windows setOverlayIcon already slots into a fixed ~16×16 overlay.
+ * On win32, painting prefers a smooth renderer Canvas PNG. The deterministic
+ * main-process bitmap remains a fallback before the renderer is ready. Both
+ * paths are 64×64 + scaleFactor 3 → ~21×21 logical, with no intermediate resize.
  */
 export function createTaskbarUnreadBadge({
   getHost,
@@ -95,7 +96,21 @@ export function createTaskbarUnreadBadge({
         return;
       }
 
-      const png = buildTaskbarUnreadOverlayPng(next);
+      let png: Buffer | null = null;
+      const contents = window.webContents;
+      if (contents && !contents.isDestroyed()) {
+        try {
+          png = await renderTaskbarUnreadOverlayPng(contents, next);
+        } catch (error) {
+          logger.app(
+            "diagnostics",
+            "warn",
+            "taskbar overlay canvas render failed; using bitmap fallback",
+            { data: String(error) },
+          );
+        }
+      }
+      if (!png) png = buildTaskbarUnreadOverlayPng(next);
 
       if (myRevision !== paintRevision) return;
       if (window.isDestroyed()) return;
@@ -106,7 +121,7 @@ export function createTaskbarUnreadBadge({
         return;
       }
 
-      // 64×64 raster + scaleFactor 4 → 16×16 logical DIP for the overlay slot.
+      // 64×64 raster + scaleFactor 3 → ~21×21 logical DIP for a readable badge.
       let image = nativeImage.createFromBuffer(png, {
         scaleFactor: TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR,
       });
@@ -120,8 +135,7 @@ export function createTaskbarUnreadBadge({
         appliedCount = 0;
         return;
       }
-      // Do NOT resize: intermediate downscales (e.g. 96→48) do not enlarge the
-      // badge in the fixed Windows overlay slot; design is already 16×16 logical.
+      // The 64px source is already sized for the Windows overlay slot.
       window.setOverlayIcon(image, label);
       appliedCount = next;
     } catch (error) {

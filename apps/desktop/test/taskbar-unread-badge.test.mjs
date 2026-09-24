@@ -19,7 +19,7 @@ const IPC = {
   },
 };
 
-function loadBadgeModule() {
+function loadBadgeModule({ renderPng } = {}) {
   const file = new URL("../electron/main/taskbar-unread-badge.ts", import.meta.url);
   const { outputText } = ts.transpileModule(readFileSync(file, "utf8"), {
     compilerOptions: {
@@ -68,12 +68,19 @@ function loadBadgeModule() {
   };
 
   const syncPngCalls = [];
+  const canvasPngCalls = [];
   const overlay = {
-    TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR: 4,
+    TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR: 3,
     buildTaskbarUnreadOverlayPng(count) {
       syncPngCalls.push(count);
       if (count <= 0) return null;
       return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, count & 0xff]);
+    },
+    async renderTaskbarUnreadOverlayPng(_contents, count) {
+      canvasPngCalls.push(count);
+      if (renderPng) return renderPng(count);
+      if (count <= 0) return null;
+      return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0xca, count & 0xff]);
     },
     formatTaskbarUnreadOverlayLabel(count) {
       if (count <= 0) return null;
@@ -97,6 +104,7 @@ function loadBadgeModule() {
     createTaskbarUnreadBadge: module.exports.createTaskbarUnreadBadge,
     badgeCounts,
     syncPngCalls,
+    canvasPngCalls,
     resizeCalls,
     createFromBufferCalls,
   };
@@ -117,14 +125,14 @@ function makeWindow(overlayIcons) {
   };
 }
 
-function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {}) {
+function harness({ platform = "linux", unreadCount = 0, windowReady = true, renderPng } = {}) {
   const previousPlatform = process.platform;
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: platform,
   });
 
-  const loaded = loadBadgeModule();
+  const loaded = loadBadgeModule({ renderPng });
   const listCalls = [];
   const overlayIcons = [];
   let currentUnread = unreadCount;
@@ -149,6 +157,7 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
     listCalls,
     badgeCounts: loaded.badgeCounts,
     syncPngCalls: loaded.syncPngCalls,
+    canvasPngCalls: loaded.canvasPngCalls,
     resizeCalls: loaded.resizeCalls,
     createFromBufferCalls: loaded.createFromBufferCalls,
     overlayIcons,
@@ -268,7 +277,7 @@ test("refresh with unreadCount 0 clears the Windows overlay icon", async () => {
     assert.ok(h.overlayIcons.length >= 1);
     assert.notEqual(h.overlayIcons.at(-1).image, null);
     assert.equal(h.overlayIcons.at(-1).description, "2");
-    assert.ok(h.syncPngCalls.includes(2));
+    assert.ok(h.canvasPngCalls.includes(2));
 
     h.setUnreadCount(0);
     await h.badge.refresh();
@@ -321,28 +330,69 @@ test("Windows: createTray-style replay paints after late window readiness", asyn
   }
 });
 
-test("Windows: uses sync SDF PNG with scaleFactor 4 and no resize", async () => {
+test("Windows: uses smooth Canvas PNG with scaleFactor 3 and no resize", async () => {
   const h = harness({ platform: "win32", unreadCount: 9 });
   try {
     await h.badge.refresh();
-    assert.ok(h.syncPngCalls.includes(9));
+    assert.ok(h.canvasPngCalls.includes(9));
+    assert.equal(h.syncPngCalls.length, 0);
     assert.equal(h.overlayIcons.at(-1).description, "9");
     assert.ok(h.createFromBufferCalls.length >= 1);
-    assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 4);
+    assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 3);
     assert.equal(h.resizeCalls.length, 0, "must not intermediate-resize overlay");
   } finally {
     h.dispose();
   }
 });
 
-test("badge source has no image.resize and no canvas render import", () => {
+test("Windows: falls back to the bitmap if Canvas rendering fails", async () => {
+  const h = harness({
+    platform: "win32",
+    unreadCount: 4,
+    renderPng: async () => { throw new Error("renderer unavailable"); },
+  });
+  try {
+    await h.badge.refresh();
+    assert.deepEqual(h.canvasPngCalls, [4]);
+    assert.deepEqual(h.syncPngCalls, [4]);
+    assert.equal(h.overlayIcons.at(-1).description, "4");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("Windows: a delayed Canvas result cannot replace a newer paint", async () => {
+  let finishFirst;
+  const firstRender = new Promise((resolve) => { finishFirst = resolve; });
+  let renderCount = 0;
+  const h = harness({
+    platform: "win32",
+    unreadCount: 1,
+    renderPng: () => ++renderCount === 1
+      ? firstRender
+      : Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+  });
+  try {
+    const firstRefresh = h.badge.refresh();
+    await waitFor(() => h.canvasPngCalls.includes(1));
+    h.badge.replay();
+    await waitFor(() => h.overlayIcons.length === 1);
+    finishFirst(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    await firstRefresh;
+    assert.equal(h.overlayIcons.length, 1, "stale first paint must not apply");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("badge source has no image.resize and imports the Canvas renderer", () => {
   const source = readFileSync(
     new URL("../electron/main/taskbar-unread-badge.ts", import.meta.url),
     "utf8",
   );
   assert.doesNotMatch(source, /image\.resize/);
   assert.doesNotMatch(source, /resize\s*\(/);
-  assert.doesNotMatch(source, /renderTaskbarUnreadOverlayPng/);
+  assert.match(source, /renderTaskbarUnreadOverlayPng/);
   assert.match(source, /scaleFactor:\s*TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR/);
   assert.match(source, /buildTaskbarUnreadOverlayPng/);
 });

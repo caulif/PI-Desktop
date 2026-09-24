@@ -1,4 +1,5 @@
 import { deflateSync } from "node:zlib";
+import type { WebContents } from "electron";
 
 /**
  * OS shell badge for durable task outcomes.
@@ -11,33 +12,33 @@ import { deflateSync } from "node:zlib";
  * Display policy: counts 1–99 show the real digit string; counts ≥100 show
  * "99+" so a Windows overlay stays readable.
  *
- * Raster: deterministic main-process SDF/bitmap PNG at 64×64. Paired with
- * `nativeImage.createFromBuffer(png, { scaleFactor: 4 })` so the logical
- * Windows overlay slot is 16×16 DIP (crisp on HiDPI). No device-dependent Canvas font rendering —
- * fonts vary across machines and must not drive the badge.
+ * Primary raster: a renderer Canvas at 64×64 using the Windows system UI font.
+ * Paired with `nativeImage.createFromBuffer(png, { scaleFactor: 3 })`, this
+ * occupies a ~21×21 logical Windows overlay image. The deterministic bitmap PNG
+ * remains the fallback before a renderer exists or if Canvas rendering fails.
  *
- * Shape: always a perfect black circle (circle SDF). Multi-digit and "99+"
- * fit by shrinking the custom glyph layout inside the circle — never a pill,
- * capsule, roundRect, or ellipse. Black (#000) fill, white (#fff) glyphs.
+ * Shape: always a black circle. Multi-digit and "99+" labels fit inside it,
+ * never a pill or capsule. Black (#000) fill, white (#fff) glyphs.
  */
 
 /** Physical PNG edge length (px). Logical DIP size = SIZE / SCALE_FACTOR. */
 export const TASKBAR_UNREAD_OVERLAY_SIZE = 64;
 
 /**
- * Electron `nativeImage` scaleFactor so 64px raster → 16×16 logical DIP.
- * Windows `setOverlayIcon` slot is ~16×16; do not rely on a second OS scale
- * to enlarge a smaller intermediate bitmap.
+ * Electron `nativeImage` scaleFactor so 64px raster → ~21×21 logical DIP.
+ * The larger logical image matches the visual weight of common Windows taskbar
+ * badges; do not rely on a second OS scale to enlarge a smaller bitmap.
  */
-export const TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR = 4;
+export const TASKBAR_UNREAD_OVERLAY_SCALE_FACTOR = 3;
 
 const OVERLAY_SIZE = TASKBAR_UNREAD_OVERLAY_SIZE;
 
 /**
- * Circle inset from canvas edge (physical px). At 64px → ≤2px so diameter
- * ≈60px (15px logical). Transparent margin ≤0.5px logical.
+ * Circle inset from canvas edge (physical px). The Windows shell clamps an
+ * overlay to its own small slot, so use the full supplied raster rather than
+ * surrendering visible area to a transparent safety margin.
  */
-const CIRCLE_INSET = 2;
+const CIRCLE_INSET = 0;
 
 /** Single-digit bold bitmaps: 7×9. Digit "1" has widened top bar + base. */
 const SINGLE_GLYPH_W = 7;
@@ -115,11 +116,74 @@ export function formatTaskbarUnreadOverlayLabel(count: number): string | null {
 }
 
 /**
+ * Build the renderer-side Canvas paint. Segoe UI gives the small numeral the
+ * same smooth, conventional appearance as Windows' common taskbar badges;
+ * custom bitmap glyphs are visibly jagged once the shell downsamples them.
+ */
+export function buildTaskbarUnreadOverlayCanvasScript(count: number): string | null {
+  const label = formatTaskbarUnreadOverlayLabel(count);
+  if (!label) return null;
+
+  const labelLiteral = JSON.stringify(label);
+  return `(() => {
+  const size = ${OVERLAY_SIZE};
+  const label = ${labelLiteral};
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const center = size / 2;
+  const radius = ${circleRadius()};
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = "#000";
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fill();
+  const singleDigit = label.length === 1;
+  let fontSize = singleDigit ? 50 : label.length === 2 ? 31 : 24;
+  const maxWidth = radius * 2 * 0.78;
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  do {
+    ctx.font = "600 " + fontSize + "px \\\"Segoe UI\\\", sans-serif";
+    if (ctx.measureText(label).width <= maxWidth) break;
+    fontSize -= 1;
+  } while (fontSize > 14);
+  ctx.save();
+  ctx.translate(center, center - (singleDigit ? 2 : 0));
+  if (singleDigit) ctx.scale(1.1, 1.03);
+  ctx.fillText(label, 0, 0);
+  ctx.restore();
+  return canvas.toDataURL("image/png");
+})()`;
+}
+
+/** Render the smooth badge PNG in the renderer process. */
+export async function renderTaskbarUnreadOverlayPng(
+  webContents: Pick<WebContents, "isDestroyed" | "executeJavaScript"> | null | undefined,
+  count: number,
+): Promise<Buffer | null> {
+  if (!webContents || webContents.isDestroyed()) return null;
+  const script = buildTaskbarUnreadOverlayCanvasScript(count);
+  if (!script) return null;
+  const result = await webContents.executeJavaScript(script, true);
+  if (typeof result !== "string") return null;
+  const prefix = "data:image/png;base64,";
+  if (!result.startsWith(prefix)) return null;
+  const png = Buffer.from(result.slice(prefix.length), "base64");
+  return png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ? png
+    : null;
+}
+
+/**
  * Build a deterministic 64×64 PNG (SDF anti-aliased black circle, white
  * custom bitmap glyphs) for `BrowserWindow.setOverlayIcon`. Returns null when
  * count clears the overlay.
  *
- * Pair with `nativeImage.createFromBuffer(png, { scaleFactor: 4 })`.
+ * Pair with `nativeImage.createFromBuffer(png, { scaleFactor: 3 })`.
  */
 export function buildTaskbarUnreadOverlayPng(count: number): Buffer | null {
   const label = formatTaskbarUnreadOverlayLabel(count);
