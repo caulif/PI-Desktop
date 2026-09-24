@@ -8,6 +8,7 @@ import type { Logger } from "./logger";
 import {
   buildTaskbarUnreadOverlayPng,
   formatTaskbarUnreadOverlayLabel,
+  renderTaskbarUnreadOverlayPng,
 } from "./taskbar-unread-overlay";
 
 const REFRESH_AFTER_INVOKE = new Set<string>([
@@ -25,6 +26,10 @@ const REFRESH_AFTER_INVOKE = new Set<string>([
  * so a host update that arrives before the window exists must not mark the count as
  * applied — otherwise a later refresh with the same count early-returns and the
  * overlay never appears.
+ *
+ * On win32, painting prefers renderer Canvas (executeJavaScript → fillText PNG)
+ * and falls back to the sync main-process SDF PNG when webContents is missing
+ * or Canvas fails. Paint is async with a revision token so stale paints drop.
  */
 export function createTaskbarUnreadBadge({
   getHost,
@@ -41,45 +46,16 @@ export function createTaskbarUnreadBadge({
   let pending: Promise<void> | null = null;
   let desiredCount: number | null = null;
   let appliedCount: number | null = null;
+  /** Bumped on every win32 paint attempt; stale async paints must no-op. */
+  let paintRevision = 0;
 
-  function apply(count: number, options?: { force?: boolean }): void {
+  function apply(count: number, options?: { force?: boolean }): Promise<void> {
     const next = Math.max(0, Math.floor(count));
     desiredCount = next;
-    if (!options?.force && appliedCount === next) return;
+    if (!options?.force && appliedCount === next) return Promise.resolve();
 
     if (process.platform === "win32") {
-      const window = getMainWindow();
-      if (!window || window.isDestroyed()) {
-        // Remember desiredCount but do not advance appliedCount.
-        return;
-      }
-      try {
-        if (next <= 0) {
-          window.setOverlayIcon(null, "");
-          appliedCount = next;
-          return;
-        }
-        const png = buildTaskbarUnreadOverlayPng(next);
-        const label = formatTaskbarUnreadOverlayLabel(next);
-        if (!png || !label) {
-          window.setOverlayIcon(null, "");
-          appliedCount = 0;
-          return;
-        }
-        const image = nativeImage.createFromBuffer(png);
-        if (image.isEmpty()) {
-          window.setOverlayIcon(null, "");
-          appliedCount = 0;
-          return;
-        }
-        window.setOverlayIcon(image, label);
-        appliedCount = next;
-      } catch (error) {
-        logger.app("diagnostics", "warn", "taskbar overlay icon update failed", {
-          data: String(error),
-        });
-      }
-      return;
+      return paintWin32(next);
     }
 
     try {
@@ -87,6 +63,81 @@ export function createTaskbarUnreadBadge({
       appliedCount = next;
     } catch (error) {
       logger.app("diagnostics", "warn", "shell badge count update failed", {
+        data: String(error),
+      });
+    }
+    return Promise.resolve();
+  }
+
+  async function paintWin32(next: number): Promise<void> {
+    const window = getMainWindow();
+    if (!window || window.isDestroyed()) {
+      // Remember desiredCount but do not advance appliedCount.
+      return;
+    }
+
+    const myRevision = ++paintRevision;
+    try {
+      if (next <= 0) {
+        if (myRevision !== paintRevision) return;
+        if (window.isDestroyed()) return;
+        window.setOverlayIcon(null, "");
+        appliedCount = next;
+        return;
+      }
+
+      const label = formatTaskbarUnreadOverlayLabel(next);
+      if (!label) {
+        if (myRevision !== paintRevision) return;
+        if (window.isDestroyed()) return;
+        window.setOverlayIcon(null, "");
+        appliedCount = 0;
+        return;
+      }
+
+      let png: Buffer | null = null;
+      const contents = window.webContents;
+      if (contents && !contents.isDestroyed()) {
+        try {
+          png = await renderTaskbarUnreadOverlayPng(contents, next);
+        } catch (error) {
+          logger.app(
+            "diagnostics",
+            "warn",
+            "taskbar overlay canvas render failed; using sync fallback",
+            { data: String(error) },
+          );
+        }
+      }
+      if (!png) {
+        png = buildTaskbarUnreadOverlayPng(next);
+      }
+
+      if (myRevision !== paintRevision) return;
+      if (window.isDestroyed()) return;
+
+      if (!png) {
+        window.setOverlayIcon(null, "");
+        appliedCount = 0;
+        return;
+      }
+
+      let image = nativeImage.createFromBuffer(png);
+      if (image.isEmpty() && typeof nativeImage.createFromDataURL === "function") {
+        image = nativeImage.createFromDataURL(
+          `data:image/png;base64,${png.toString("base64")}`,
+        );
+      }
+      if (image.isEmpty()) {
+        window.setOverlayIcon(null, "");
+        appliedCount = 0;
+        return;
+      }
+      window.setOverlayIcon(image, label);
+      appliedCount = next;
+    } catch (error) {
+      if (myRevision !== paintRevision) return;
+      logger.app("diagnostics", "warn", "taskbar overlay icon update failed", {
         data: String(error),
       });
     }
@@ -101,7 +152,7 @@ export function createTaskbarUnreadBadge({
         observed = revision;
         const host = getHost();
         if (!host || isQuitting()) {
-          apply(0);
+          await apply(0);
           return;
         }
         try {
@@ -115,7 +166,7 @@ export function createTaskbarUnreadBadge({
             continue;
           }
           if (observed !== revision) continue;
-          apply(inbox.unreadCount ?? 0);
+          await apply(inbox.unreadCount ?? 0);
         } catch (error) {
           if (host !== getHost()) {
             revision += 1;
@@ -139,7 +190,7 @@ export function createTaskbarUnreadBadge({
       void refresh();
       return;
     }
-    apply(desiredCount, { force: true });
+    void apply(desiredCount, { force: true });
   }
 
   return {

@@ -43,9 +43,21 @@ function loadBadgeModule() {
           buffer,
         };
       },
+      createFromDataURL(url) {
+        const prefix = "data:image/png;base64,";
+        const b64 = typeof url === "string" && url.startsWith(prefix)
+          ? url.slice(prefix.length)
+          : "";
+        const buffer = Buffer.from(b64, "base64");
+        return {
+          isEmpty: () => buffer.length === 0,
+          buffer,
+        };
+      },
     },
   };
 
+  const canvasCalls = [];
   const overlay = {
     buildTaskbarUnreadOverlayPng(count) {
       if (count <= 0) return null;
@@ -54,6 +66,17 @@ function loadBadgeModule() {
     formatTaskbarUnreadOverlayLabel(count) {
       if (count <= 0) return null;
       return count >= 100 ? "99+" : String(count);
+    },
+    async renderTaskbarUnreadOverlayPng(webContents, count) {
+      canvasCalls.push({ count, hasWebContents: Boolean(webContents) });
+      if (!webContents || (typeof webContents.isDestroyed === "function" && webContents.isDestroyed())) {
+        return null;
+      }
+      if (typeof webContents.executeJavaScript === "function") {
+        await webContents.executeJavaScript("/* canvas badge */", true);
+      }
+      if (count <= 0) return null;
+      return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, count & 0xff, 0xca]);
     },
   };
 
@@ -72,6 +95,25 @@ function loadBadgeModule() {
   return {
     createTaskbarUnreadBadge: module.exports.createTaskbarUnreadBadge,
     badgeCounts,
+    canvasCalls,
+  };
+}
+
+function makeWindow(overlayIcons) {
+  const executeJavaScriptCalls = [];
+  return {
+    isDestroyed: () => false,
+    setOverlayIcon(image, description) {
+      overlayIcons.push({ image, description });
+    },
+    webContents: {
+      isDestroyed: () => false,
+      async executeJavaScript(code, userGesture) {
+        executeJavaScriptCalls.push({ code, userGesture });
+        return null;
+      },
+    },
+    executeJavaScriptCalls,
   };
 }
 
@@ -93,14 +135,7 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
       return { notifications: [], unreadCount: currentUnread };
     },
   };
-  let mainWindow = windowReady
-    ? {
-        isDestroyed: () => false,
-        setOverlayIcon(image, description) {
-          overlayIcons.push({ image, description });
-        },
-      }
-    : null;
+  let mainWindow = windowReady ? makeWindow(overlayIcons) : null;
 
   const badge = loaded.createTaskbarUnreadBadge({
     getHost: () => hostRef,
@@ -113,6 +148,7 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
     badge,
     listCalls,
     badgeCounts: loaded.badgeCounts,
+    canvasCalls: loaded.canvasCalls,
     overlayIcons,
     setUnreadCount(next) {
       currentUnread = next;
@@ -121,12 +157,7 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
       mainWindow = next;
     },
     makeWindow() {
-      mainWindow = {
-        isDestroyed: () => false,
-        setOverlayIcon(image, description) {
-          overlayIcons.push({ image, description });
-        },
-      };
+      mainWindow = makeWindow(overlayIcons);
       return mainWindow;
     },
     dispose() {
@@ -235,6 +266,7 @@ test("refresh with unreadCount 0 clears the Windows overlay icon", async () => {
     assert.ok(h.overlayIcons.length >= 1);
     assert.notEqual(h.overlayIcons.at(-1).image, null);
     assert.equal(h.overlayIcons.at(-1).description, "2");
+    assert.ok(h.canvasCalls.some((c) => c.count === 2));
 
     h.setUnreadCount(0);
     await h.badge.refresh();
@@ -258,6 +290,7 @@ test("Windows: refresh before window is ready keeps the update for replay", asyn
 
     h.makeWindow();
     h.badge.replay();
+    await waitFor(() => h.overlayIcons.length >= 1);
     assert.equal(h.overlayIcons.length, 1);
     assert.notEqual(h.overlayIcons[0].image, null);
     assert.equal(h.overlayIcons[0].description, "3");
@@ -278,8 +311,24 @@ test("Windows: createTray-style replay paints after late window readiness", asyn
     // createTray calls refresh() then replay().
     await h.badge.refresh();
     h.badge.replay();
+    await waitFor(() => h.overlayIcons.length >= 1);
     assert.ok(h.overlayIcons.length >= 1);
     assert.equal(h.overlayIcons.at(-1).description, "2");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("Windows: prefers canvas render path when webContents is available", async () => {
+  const h = harness({ platform: "win32", unreadCount: 9 });
+  try {
+    await h.badge.refresh();
+    assert.ok(h.canvasCalls.length >= 1);
+    assert.equal(h.canvasCalls.at(-1).count, 9);
+    assert.equal(h.canvasCalls.at(-1).hasWebContents, true);
+    assert.equal(h.overlayIcons.at(-1).description, "9");
+    // Canvas path marker byte 0xca present in mock buffer
+    assert.equal(h.overlayIcons.at(-1).image.buffer.at(-1), 0xca);
   } finally {
     h.dispose();
   }

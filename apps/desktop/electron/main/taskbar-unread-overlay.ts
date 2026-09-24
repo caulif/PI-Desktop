@@ -1,4 +1,5 @@
 import { deflateSync } from "node:zlib";
+import type { WebContents } from "electron";
 
 /**
  * OS shell badge for durable task outcomes.
@@ -9,14 +10,21 @@ import { deflateSync } from "node:zlib";
  * failures only.
  *
  * Display policy: counts 1–99 show the real digit string; counts ≥100 show
- * "99+" so a Windows overlay stays readable. Drawn at 64×64 with SDF
- * anti-aliasing; `setOverlayIcon` scales the PNG for the taskbar.
+ * "99+" so a Windows overlay stays readable.
+ *
+ * Primary paint path: renderer Canvas via `webContents.executeJavaScript`
+ * (Segoe UI fillText, system anti-aliasing) → PNG → setOverlayIcon.
+ * Sync main-process SDF PNG is kept for unit tests and as a fallback when
+ * webContents is unavailable.
  *
  * Shape: single character → black circle; multi-character → black horizontal
- * rounded capsule (pill).
+ * rounded capsule (pill). Black (#000) fill, white (#fff) text.
  */
 
-const OVERLAY_SIZE = 64;
+/** Canvas / sync overlay raster size (px). Prefer ≥96 for taskbar scaling. */
+export const TASKBAR_UNREAD_OVERLAY_SIZE = 96;
+
+const OVERLAY_SIZE = TASKBAR_UNREAD_OVERLAY_SIZE;
 
 /** 5×7 bitmap glyphs; bit 0 is the leftmost pixel of each row. */
 const GLYPHS: Record<string, number[]> = {
@@ -48,9 +56,100 @@ export function formatTaskbarUnreadOverlayLabel(count: number): string | null {
 }
 
 /**
- * Build a deterministic 64×64 PNG (anti-aliased black circle/pill, white
- * digits) for `BrowserWindow.setOverlayIcon`. Returns null when count clears
- * the overlay.
+ * Self-contained renderer script: draws the badge with Canvas fillText and
+ * returns a PNG data URL (or null). Safe to pass to executeJavaScript.
+ */
+export function buildTaskbarUnreadOverlayCanvasScript(
+  count: number,
+): string | null {
+  const label = formatTaskbarUnreadOverlayLabel(count);
+  if (!label) return null;
+  const size = OVERLAY_SIZE;
+  const labelLit = JSON.stringify(label);
+  // IIFE evaluates to a PNG data URL string (or null).
+  return `(() => {
+  const size = ${size};
+  const label = ${labelLit};
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, size, size);
+  const cx = size / 2;
+  const cy = size / 2;
+  ctx.fillStyle = "#000";
+  if (label.length <= 1) {
+    const inset = size * 0.06;
+    const r = size / 2 - inset;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    const w = size * 0.92;
+    const h = size * 0.72;
+    const x = (size - w) / 2;
+    const y = (size - h) / 2;
+    const rr = h / 2;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === "function") {
+      ctx.roundRect(x, y, w, h, rr);
+    } else {
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rr);
+      ctx.arcTo(x + w, y + h, x, y + h, rr);
+      ctx.arcTo(x, y + h, x, y, rr);
+      ctx.arcTo(x, y, x + w, y, rr);
+      ctx.closePath();
+    }
+    ctx.fill();
+  }
+  let fontSize;
+  if (label.length <= 1) fontSize = size * 0.55;
+  else if (label.length === 2) fontSize = size * 0.42;
+  else fontSize = size * 0.34;
+  ctx.fillStyle = "#fff";
+  ctx.font = "600 " + fontSize + "px \\"Segoe UI Semibold\\", \\"Segoe UI\\", sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, cx, cy + fontSize * 0.03);
+  return canvas.toDataURL("image/png");
+})()`;
+}
+
+/**
+ * Render the overlay PNG via renderer Canvas (executeJavaScript).
+ * Returns null when count clears the overlay or webContents cannot paint.
+ */
+export async function renderTaskbarUnreadOverlayPng(
+  webContents: Pick<WebContents, "isDestroyed" | "executeJavaScript"> | null | undefined,
+  count: number,
+): Promise<Buffer | null> {
+  const label = formatTaskbarUnreadOverlayLabel(count);
+  if (!label) return null;
+  if (!webContents || webContents.isDestroyed()) return null;
+  const script = buildTaskbarUnreadOverlayCanvasScript(count);
+  if (!script) return null;
+  const result = await webContents.executeJavaScript(script, true);
+  if (typeof result !== "string" || result.length === 0) return null;
+  if (result.startsWith("data:image/png;base64,")) {
+    return Buffer.from(result.slice("data:image/png;base64,".length), "base64");
+  }
+  // Bare base64 fallback
+  if (/^[A-Za-z0-9+/=\r\n]+$/.test(result.slice(0, 64))) {
+    try {
+      return Buffer.from(result, "base64");
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a deterministic sync PNG (SDF anti-aliased black circle/pill, white
+ * bitmap digits) for unit tests and as a fallback when Canvas is unavailable.
+ * Returns null when count clears the overlay.
  */
 export function buildTaskbarUnreadOverlayPng(count: number): Buffer | null {
   const label = formatTaskbarUnreadOverlayLabel(count);
@@ -76,14 +175,18 @@ function paintBadgeShape(rgba: Uint8Array, pill: boolean): void {
   const size = OVERLAY_SIZE;
   const cx = (size - 1) / 2;
   const cy = (size - 1) / 2;
-  // Leave room for AA at canvas edge; diameter ~0.88 of SIZE.
-  const shapeH = size * 0.88;
-  const radius = shapeH / 2;
 
-  let halfWidth = radius;
-  if (pill) {
-    // Horizontal capsule ~0.94 of SIZE wide, same height as circle diameter.
-    halfWidth = (size * 0.94) / 2;
+  // Match Canvas recipe: circle inset ~6%; pill ~0.92×0.72 of SIZE.
+  let radius: number;
+  let halfWidth: number;
+  if (!pill) {
+    const inset = size * 0.06;
+    radius = size / 2 - inset;
+    halfWidth = radius;
+  } else {
+    const shapeH = size * 0.72;
+    radius = shapeH / 2;
+    halfWidth = (size * 0.92) / 2;
   }
 
   for (let y = 0; y < size; y += 1) {
@@ -118,12 +221,11 @@ function paintBadgeShape(rgba: Uint8Array, pill: boolean): void {
 /** Pixel scale and gap so the label fits inside the badge with padding. */
 function layoutForLabel(label: string): { scale: number; gap: number } {
   const n = label.length;
-  // Max usable content width inside pill (~0.94 SIZE) with side padding.
+  // Max usable content width inside pill (~0.92 SIZE) with side padding.
   const maxW = OVERLAY_SIZE * 0.78;
   // Prefer larger glyphs when few characters.
-  const preferred =
-    n <= 1 ? 6 : n === 2 ? 5 : 3.5;
-  const gapPreferred = n <= 1 ? 0 : n === 2 ? 3 : 2;
+  const preferred = n <= 1 ? 8 : n === 2 ? 6 : 4;
+  const gapPreferred = n <= 1 ? 0 : n === 2 ? 4 : 2;
   for (let scale = preferred; scale >= 2; scale -= 0.5) {
     const gap = scale >= 4 ? gapPreferred : Math.max(1, Math.floor(scale / 2));
     const totalW = n * GLYPH_W * scale + (n - 1) * gap;
