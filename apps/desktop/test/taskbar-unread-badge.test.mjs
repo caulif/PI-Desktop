@@ -53,7 +53,7 @@ function loadBadgeModule() {
     },
     formatTaskbarUnreadOverlayLabel(count) {
       if (count <= 0) return null;
-      return count >= 10 ? "9+" : String(count);
+      return count >= 100 ? "99+" : String(count);
     },
   };
 
