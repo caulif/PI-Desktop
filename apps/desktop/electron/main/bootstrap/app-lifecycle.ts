@@ -284,6 +284,8 @@ export function createApplicationLifecycle({
     updateTrayMenu();
     void traySessions.refresh();
     void taskbarUnreadBadge.refresh();
+    // Window is live here; force-paint any count learned before the BrowserWindow existed.
+    taskbarUnreadBadge.replay();
   }
 
 

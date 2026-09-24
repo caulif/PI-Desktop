@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import {
+  inboxNotifications,
+  inboxUnreadCount,
+} from "../src/lib/notification-inbox.ts";
 
 const IPC = {
   invoke: {
@@ -71,7 +75,7 @@ function loadBadgeModule() {
   };
 }
 
-function harness({ platform = "linux", unreadCount = 0 } = {}) {
+function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {}) {
   const previousPlatform = process.platform;
   Object.defineProperty(process, "platform", {
     configurable: true,
@@ -89,12 +93,14 @@ function harness({ platform = "linux", unreadCount = 0 } = {}) {
       return { notifications: [], unreadCount: currentUnread };
     },
   };
-  let mainWindow = {
-    isDestroyed: () => false,
-    setOverlayIcon(image, description) {
-      overlayIcons.push({ image, description });
-    },
-  };
+  let mainWindow = windowReady
+    ? {
+        isDestroyed: () => false,
+        setOverlayIcon(image, description) {
+          overlayIcons.push({ image, description });
+        },
+      }
+    : null;
 
   const badge = loaded.createTaskbarUnreadBadge({
     getHost: () => hostRef,
@@ -110,6 +116,18 @@ function harness({ platform = "linux", unreadCount = 0 } = {}) {
     overlayIcons,
     setUnreadCount(next) {
       currentUnread = next;
+    },
+    setMainWindow(next) {
+      mainWindow = next;
+    },
+    makeWindow() {
+      mainWindow = {
+        isDestroyed: () => false,
+        setOverlayIcon(image, description) {
+          overlayIcons.push({ image, description });
+        },
+      };
+      return mainWindow;
     },
     dispose() {
       Object.defineProperty(process, "platform", {
@@ -174,6 +192,18 @@ test("observeInvoke ignores unrelated channels", async () => {
   }
 });
 
+test("observeEvent(notificationChanged) refreshes from host unreadCount", async () => {
+  const h = harness({ platform: "linux", unreadCount: 5 });
+  try {
+    h.badge.observeEvent(IPC.event.notificationChanged, {});
+    await waitFor(() => h.listCalls.length >= 1);
+    await waitFor(() => h.badgeCounts.includes(5));
+    assert.equal(h.badgeCounts.at(-1), 5);
+  } finally {
+    h.dispose();
+  }
+});
+
 test("refresh applies host unreadCount to the shell badge", async () => {
   const h = harness({ platform: "linux", unreadCount: 7 });
   try {
@@ -215,14 +245,81 @@ test("refresh with unreadCount 0 clears the Windows overlay icon", async () => {
   }
 });
 
-test("observeEvent(notificationChanged) refreshes from host unreadCount", async () => {
-  const h = harness({ platform: "linux", unreadCount: 5 });
+test("Windows: refresh before window is ready keeps the update for replay", async () => {
+  const h = harness({ platform: "win32", unreadCount: 3, windowReady: false });
   try {
-    h.badge.observeEvent(IPC.event.notificationChanged, {});
-    await waitFor(() => h.listCalls.length >= 1);
-    await waitFor(() => h.badgeCounts.includes(5));
-    assert.equal(h.badgeCounts.at(-1), 5);
+    await h.badge.refresh();
+    assert.equal(h.listCalls.length, 1);
+    assert.equal(h.overlayIcons.length, 0, "no overlay while window is missing");
+
+    // Same count again must not be treated as already applied.
+    await h.badge.refresh();
+    assert.equal(h.overlayIcons.length, 0);
+
+    h.makeWindow();
+    h.badge.replay();
+    assert.equal(h.overlayIcons.length, 1);
+    assert.notEqual(h.overlayIcons[0].image, null);
+    assert.equal(h.overlayIcons[0].description, "3");
   } finally {
     h.dispose();
   }
+});
+
+test("Windows: createTray-style replay paints after late window readiness", async () => {
+  const h = harness({ platform: "win32", unreadCount: 2, windowReady: false });
+  try {
+    h.badge.observeEvent(IPC.event.notificationChanged, { reason: "insert" });
+    await waitFor(() => h.listCalls.length >= 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.overlayIcons.length, 0);
+
+    h.makeWindow();
+    // createTray calls refresh() then replay().
+    await h.badge.refresh();
+    h.badge.replay();
+    assert.ok(h.overlayIcons.length >= 1);
+    assert.equal(h.overlayIcons.at(-1).description, "2");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("D295 inbox still counts failures only while shell uses full unreadCount", () => {
+  const rows = [
+    {
+      id: "c1",
+      kind: "task.completed",
+      sessionId: "s",
+      sessionTitle: "S",
+      turnId: "t1",
+      createdAt: "2026-09-24T00:00:00.000Z",
+      readAt: null,
+    },
+    {
+      id: "f1",
+      kind: "task.failed",
+      sessionId: "s",
+      sessionTitle: "S",
+      turnId: "t2",
+      createdAt: "2026-09-24T00:00:01.000Z",
+      readAt: null,
+    },
+    {
+      id: "c2",
+      kind: "task.completed",
+      sessionId: "s",
+      sessionTitle: "S",
+      turnId: "t3",
+      createdAt: "2026-09-24T00:00:02.000Z",
+      readAt: null,
+    },
+  ];
+  assert.deepEqual(
+    inboxNotifications(rows).map((row) => row.id),
+    ["f1"],
+  );
+  assert.equal(inboxUnreadCount(rows), 1);
+  // Shell badge path reads host unreadCount (completed + failed) — 3 here.
+  assert.equal(rows.filter((row) => row.readAt == null).length, 3);
 });
