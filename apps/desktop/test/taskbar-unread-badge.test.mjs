@@ -30,6 +30,18 @@ function loadBadgeModule() {
   });
 
   const badgeCounts = [];
+  const resizeCalls = [];
+  const createFromBufferCalls = [];
+  function makeFakeNativeImage(buffer) {
+    return {
+      isEmpty: () => !buffer || buffer.length === 0,
+      buffer,
+      resize(options) {
+        resizeCalls.push(options);
+        return makeFakeNativeImage(buffer);
+      },
+    };
+  }
   const electron = {
     app: {
       setBadgeCount(count) {
@@ -37,11 +49,12 @@ function loadBadgeModule() {
       },
     },
     nativeImage: {
-      createFromBuffer(buffer) {
-        return {
-          isEmpty: () => !buffer || buffer.length === 0,
-          buffer,
-        };
+      createFromBuffer(buffer, options) {
+        createFromBufferCalls.push({
+          bufferLength: buffer?.length ?? 0,
+          scaleFactor: options?.scaleFactor,
+        });
+        return makeFakeNativeImage(buffer);
       },
       createFromDataURL(url) {
         const prefix = "data:image/png;base64,";
@@ -49,10 +62,7 @@ function loadBadgeModule() {
           ? url.slice(prefix.length)
           : "";
         const buffer = Buffer.from(b64, "base64");
-        return {
-          isEmpty: () => buffer.length === 0,
-          buffer,
-        };
+        return makeFakeNativeImage(buffer);
       },
     },
   };
@@ -96,6 +106,8 @@ function loadBadgeModule() {
     createTaskbarUnreadBadge: module.exports.createTaskbarUnreadBadge,
     badgeCounts,
     canvasCalls,
+    resizeCalls,
+    createFromBufferCalls,
   };
 }
 
@@ -149,6 +161,8 @@ function harness({ platform = "linux", unreadCount = 0, windowReady = true } = {
     listCalls,
     badgeCounts: loaded.badgeCounts,
     canvasCalls: loaded.canvasCalls,
+    resizeCalls: loaded.resizeCalls,
+    createFromBufferCalls: loaded.createFromBufferCalls,
     overlayIcons,
     setUnreadCount(next) {
       currentUnread = next;
@@ -329,6 +343,14 @@ test("Windows: prefers canvas render path when webContents is available", async 
     assert.equal(h.overlayIcons.at(-1).description, "9");
     // Canvas path marker byte 0xca present in mock buffer
     assert.equal(h.overlayIcons.at(-1).image.buffer.at(-1), 0xca);
+    assert.ok(h.createFromBufferCalls.length >= 1);
+    assert.equal(h.createFromBufferCalls.at(-1).scaleFactor, 1);
+    assert.ok(h.resizeCalls.length >= 1);
+    const resize = h.resizeCalls.at(-1);
+    assert.equal(resize.width, 32);
+    assert.equal(resize.height, 32);
+    assert.equal(resize.quality, "best");
+    assert.equal(resize.width, resize.height);
   } finally {
     h.dispose();
   }

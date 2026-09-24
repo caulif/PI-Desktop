@@ -122,7 +122,8 @@ export function createTaskbarUnreadBadge({
         return;
       }
 
-      let image = nativeImage.createFromBuffer(png);
+      // scaleFactor: 1 so DPI metadata does not imply non-square density.
+      let image = nativeImage.createFromBuffer(png, { scaleFactor: 1 });
       if (image.isEmpty() && typeof nativeImage.createFromDataURL === "function") {
         image = nativeImage.createFromDataURL(
           `data:image/png;base64,${png.toString("base64")}`,
@@ -132,6 +133,16 @@ export function createTaskbarUnreadBadge({
         window.setOverlayIcon(null, "");
         appliedCount = 0;
         return;
+      }
+      // Force a square nativeImage before setOverlayIcon so Windows/Electron
+      // cannot apply non-uniform scaling (canvas source stays 96×96).
+      const overlayIconSize = 32;
+      if (typeof image.resize === "function") {
+        image = image.resize({
+          width: overlayIconSize,
+          height: overlayIconSize,
+          quality: "best",
+        });
       }
       window.setOverlayIcon(image, label);
       appliedCount = next;
