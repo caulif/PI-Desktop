@@ -195,6 +195,7 @@ pub fn handle(db: &Database, method: &str, input: &Value) -> Result<Value> {
         "session.collaboration.message" => {
             Ok(json!({"message":get(db,string(input,"messageId",256)?)?}))
         }
+        "session.collaboration.lookup" => projections::lookup(db, input),
         "session.collaboration.status" => {
             projections::summary(db, string(input, "sessionId", 256)?)
         }

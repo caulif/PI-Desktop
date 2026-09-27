@@ -11,6 +11,8 @@ mod network_proxy;
 mod notifications;
 mod permissions;
 mod plans;
+mod plugin_prompt;
+mod plugin_scheduled;
 mod plugin_sessions;
 mod plugin_usage;
 mod plugins;

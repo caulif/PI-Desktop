@@ -11,6 +11,7 @@ import {
 import type { Stats } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { writePluginTextAtomically } from "./plugin-atomic-write";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { LoadedSkillDocument } from "./skill-document";
 import {
@@ -432,7 +433,7 @@ export type PluginHostServices = {
     console: (limit?: number) => unknown;
     cdp: (method: string, params?: unknown) => Promise<unknown>;
   };
-  onPluginUnload?: (pluginId: string) => void;
+  onPluginUnload?: (pluginId: string) => void | Promise<void>;
   listModels?: () => Promise<PluginModelInfo[]>;
   getSessionContext?: (sessionId: string, stripToolName?: string) => Promise<PluginLlmContext>;
   complete?: (input: PluginCompleteInput & {
@@ -1309,6 +1310,8 @@ export class PluginRuntime {
   /** Plugins being reloaded by the supervisor; their backoff must survive. */
   private restarting = new Set<string>();
   private loaded = new Map<string, LoadedPlugin>();
+  private manualRoutineAuthorizations = new Map<string, { pluginId: string; requestIntentId: string;
+    routineId: string; sessionId: string; contentHash: string; expiresAt: number }>();
   private toasts: Array<{ message: string; level?: string }> = [];
   private services: PluginHostServices;
   /**
@@ -1692,6 +1695,20 @@ export class PluginRuntime {
     }
   }
 
+  /** Address a durable scheduler occurrence only to its owning loaded plugin. */
+  deliverPluginScheduleDue(pluginId: string, occurrence: unknown): boolean {
+    const loaded = this.loaded.get(pluginId);
+    if (!loaded?.child) return false;
+    try {
+      loaded.child.postMessage({ t: "event", event: "scheduled:pluginDue", args: [occurrence] });
+      return true;
+    } catch (error) {
+      this.services.audit?.({ pluginId, api: "scheduled.pluginDue", ok: false,
+        errorCode: "PLUGIN_UNREACHABLE", message: (error as Error).message, ts: Date.now() });
+      return false;
+    }
+  }
+
   /**
    * Validate the manifest, start a dedicated host process and run `onLoad`
    * inside it. Contribution points arrive over RPC while `onLoad` runs; a
@@ -1828,6 +1845,9 @@ export class PluginRuntime {
 
   /** Deregister contributions, run `onUnload` in the child, then stop it. */
   async unload(pluginId: string): Promise<void> {
+    for (const [token, grant] of this.manualRoutineAuthorizations) {
+      if (grant.pluginId === pluginId) this.manualRoutineAuthorizations.delete(token);
+    }
     const loaded = this.loaded.get(pluginId);
     if (loaded) {
       loaded.disposing = true;
@@ -1863,7 +1883,7 @@ export class PluginRuntime {
       this.devPlugins.delete(pluginId);
     }
     await this.services.closePanel(pluginId);
-    this.services.onPluginUnload?.(pluginId);
+    await this.services.onPluginUnload?.(pluginId);
     if (loaded) {
       this.services.audit?.({ pluginId, api: "plugin.unload", ok: true, ts: Date.now() });
     }
@@ -2037,6 +2057,77 @@ export class PluginRuntime {
   ): Promise<unknown> {
     const loaded = this.loaded.get(pluginId);
     if (!loaded) throw apiError("NOT_FOUND", `plugin not loaded: ${pluginId}`);
+    if (channel === "scheduled.authorizeManual") {
+      const requestIntentId = String(payload?.requestIntentId ?? "").trim();
+      const routineId = String(payload?.routineId ?? "").trim();
+      const sessionId = String(payload?.sessionId ?? "").trim();
+      const contentHash = String(payload?.contentHash ?? "").trim().toLowerCase();
+      const title = String(payload?.title ?? "").trim();
+      if (!requestIntentId || requestIntentId.length > 256 || !routineId || routineId.length > 256 ||
+          !sessionId || sessionId.length > 256 || !/^[a-f0-9]{64}$/.test(contentHash) ||
+          !title || title.length > 200) {
+        throw apiError("INVALID_ARGUMENT", "complete manual Routine request is required");
+      }
+      const consent = this.services.confirmDesktopControl;
+      const granted = consent ? await consent({
+        pluginId,
+        pluginName: resolvePluginLocalizedString(loaded.manifest.name, this.services.getLocale?.(), pluginId),
+        operation: "scheduled/manualRun",
+        description: `Run Routine ${title} now in its Bot session.`,
+        args: [{ routineId, sessionId, contentHash, requestIntentId }],
+      }) : false;
+      if (!granted) throw apiError("PERMISSION_DENIED", "Manual Routine run was not authorized");
+      const token = randomUUID();
+      this.manualRoutineAuthorizations.set(token, { pluginId, requestIntentId, routineId,
+        sessionId, contentHash, expiresAt: Date.now() + 60_000 });
+      return { manualToken: token };
+    }
+    if (channel === "scheduled.authorizeSchedule") {
+      const definition = payload?.definition;
+      if (!definition || typeof definition !== "object" || Array.isArray(definition)) {
+        throw apiError("INVALID_ARGUMENT", "Routine schedule definition is required");
+      }
+      const fields = definition as Record<string, unknown>;
+      if (fields.enabled !== true || typeof fields.title !== "string" ||
+          typeof fields.externalKey !== "string" || typeof fields.sessionId !== "string" ||
+          typeof fields.goalHash !== "string" ||
+          typeof fields.promptTemplateHash !== "string" ||
+          !/^[a-f0-9]{64}$/.test(fields.promptTemplateHash)) {
+        throw apiError("INVALID_ARGUMENT", "complete enabled Routine schedule is required");
+      }
+      const consent = this.services.confirmDesktopControl;
+      const granted = consent ? await consent({
+        pluginId,
+        pluginName: resolvePluginLocalizedString(loaded.manifest.name, this.services.getLocale?.(), pluginId),
+        operation: "scheduled/enableRoutine",
+        description: `Enable recurring Routine ${fields.title} in Bot session ${fields.sessionId}.`,
+        args: [{ externalKey: fields.externalKey, cadence: fields.cadence,
+          schedule: fields.schedule, timezone: fields.timezone, goalHash: fields.goalHash,
+          promptTemplateHash: fields.promptTemplateHash }],
+      }) : false;
+      if (!granted) throw apiError("PERMISSION_DENIED", "Routine schedule was not authorized");
+      const control = this.services.desktopControl;
+      if (!control) throw apiError("UNSUPPORTED", "desktop control is unavailable");
+      return control.invoke({ operation: "scheduled/pluginUpsert", args: [fields],
+        source: "plugin", pluginContext: { pluginId, panelAuthorized: true } });
+    }
+    if (channel === "scheduled.adoptSession") {
+      const sessionId = String(payload?.sessionId ?? "").trim();
+      if (!sessionId || sessionId.length > 256) throw apiError("INVALID_ARGUMENT", "sessionId is required");
+      const consent = this.services.confirmDesktopControl;
+      const granted = consent ? await consent({
+        pluginId,
+        pluginName: resolvePluginLocalizedString(loaded.manifest.name, this.services.getLocale?.(), pluginId),
+        operation: "scheduled/adoptSession",
+        description: "Allow this plugin to run Routines in the named existing Agent session.",
+        args: [{ sessionId }],
+      }) : false;
+      if (!granted) throw apiError("PERMISSION_DENIED", "Session adoption was not authorized");
+      const control = this.services.desktopControl;
+      if (!control) throw apiError("UNSUPPORTED", "desktop control is unavailable");
+      return control.invoke({ operation: "scheduled/pluginAdoptSession", args: [{ sessionId }],
+        source: "plugin", pluginContext: { pluginId, panelAuthorized: true } });
+    }
     if (PANEL_SKILL_CHANNELS.has(channel)) {
       return this.sendToChild(
         loaded,
@@ -2200,6 +2291,17 @@ export class PluginRuntime {
           PLUGIN_PANEL_TIMEOUT_MS,
         );
     }
+  }
+
+  consumeManualRoutineAuthorization(pluginId: string, requestIntentId: string, token: string,
+    routineId: string, sessionId: string, contentHash: string): boolean {
+    const grant = this.manualRoutineAuthorizations.get(token);
+    if (!grant) return false;
+    this.manualRoutineAuthorizations.delete(token);
+    return grant.pluginId === pluginId && grant.requestIntentId === requestIntentId &&
+      grant.routineId === routineId && grant.sessionId === sessionId && grant.contentHash === contentHash &&
+      grant.expiresAt >= Date.now()
+      && this.loaded.has(pluginId);
   }
 
   // --- plugin host process plumbing -------------------------------------
@@ -5294,7 +5396,7 @@ export class PluginRuntime {
             { create: true },
           );
           mkdirSync(dirname(full), { recursive: true });
-          writeFileSync(full, content, "utf8");
+          writePluginTextAtomically(full, content);
           // Recorded so `fs.delete` with `own` can clean up this file later
           // without asking: removing your own output surprises nobody.
           this.recordWrite(loaded, full);

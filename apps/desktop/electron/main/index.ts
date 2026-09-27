@@ -44,6 +44,8 @@ import { withGitBranch } from "./workspace-git";
 import { applyDevelopmentUserData, desktopDataDir } from "./data-paths";
 import { createPlanUiProbe } from "./plan-ui-probe";
 import { registerIpcHandlers } from "./ipc/register";
+import { invokePluginSchedule } from "./plugin-schedule-control";
+import { invokePluginPrompt } from "./plugin-prompt-control";
 import { createVoiceService } from "./voice-service";
 import { MainProcessState } from "./bootstrap/main-state";
 import { registerApplicationActivation } from "./bootstrap/app-activation";
@@ -779,6 +781,7 @@ const { startHost } = createHostRuntime({
   dataDir,
   logger,
   persistenceOutbox,
+  scheduleDisableOutbox: pluginServices.scheduleDisableOutbox,
   activeToolCalls,
   activeToolCallKey,
   sessionProjects,
@@ -958,6 +961,16 @@ registerApplicationStartup({
   bootHostStatus,
   flushPendingApplicationMenuCommands,
   invokeSessionCollaboration: sessionCollaboration.invoke,
+  invokePluginSchedule: (input, invoke) => invokePluginSchedule(input, async (method, params) => {
+    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
+    return host.call(method, params);
+  }, invoke, (pluginId, requestIntentId, token, routineId, sessionId, contentHash) =>
+    plugins.consumeManualRoutineAuthorization(pluginId, requestIntentId, token,
+      routineId, sessionId, contentHash)),
+  invokePluginPrompt: (input, invoke) => invokePluginPrompt(input, async (method, params) => {
+    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
+    return host.call(method, params);
+  }, invoke),
   onSessionQueueChange: () => {
     void sessionCollaboration.drain().catch((error: unknown) => {
       logger.app("runtime", "warn", "session callback drain failed", { data: String(error) });

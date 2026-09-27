@@ -110,6 +110,8 @@ export type StartupDependencies = {
   flushPendingApplicationMenuCommands: () => void;
   getSidecar?: () => unknown;
   invokeSessionCollaboration?: (input: McpControlInvokeInput) => Promise<unknown>;
+  invokePluginSchedule?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
+  invokePluginPrompt?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
   onSessionQueueChange?: () => void;
 };
 
@@ -265,7 +267,23 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
       invoke: invokeIpc,
       channels: IPC.invoke,
       invokeSessionCollaboration: deps.invokeSessionCollaboration,
-      onOperationComplete: async (operation, result, args, source) => {
+      invokePluginSchedule: deps.invokePluginSchedule
+        ? (input) => deps.invokePluginSchedule!(input, invokeIpc)
+        : undefined,
+      invokePluginPrompt: deps.invokePluginPrompt
+        ? (input) => deps.invokePluginPrompt!(input, invokeIpc)
+        : undefined,
+      onOperationComplete: async (operation, result, args, source, input) => {
+        if (operation.id === "session/create" && source === "plugin" && input?.pluginContext?.pluginId) {
+          const sessionId = (result as { session?: { id?: string } })?.session?.id;
+          if (sessionId) {
+            const host = getHost();
+            if (!host) throw new Error("host unavailable while recording plugin session owner");
+            await host.call("scheduled.pluginRegisterCreatedSession", {
+              pluginId: input.pluginContext.pluginId, sessionId,
+            });
+          }
+        }
         const event = mcpControlRendererEvent(operation, result, args, source);
         if (event) sendToRenderer(IPC.event.sessionsChanged, event);
       },
@@ -291,6 +309,7 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
     const scheduledRunner = createScheduledRunner({
       getHost,
       execute: (id) => invokeIpc(IPC.invoke.scheduledExecute, [id, true]),
+      deliverPluginDue: (occurrence) => { plugins.deliverPluginScheduleDue(occurrence.pluginId, occurrence); },
       report: (error) => logger.app("runtime", "warn", "scheduled task dispatch failed", { data: String(error) }),
     });
     scheduledRunner.start();

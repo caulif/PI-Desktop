@@ -13,6 +13,8 @@ pub struct Schedule {
     /// When present, replaces the legacy single weekday. Monday = 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekdays: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u32>,
 }
 
 impl Schedule {
@@ -32,6 +34,12 @@ impl Schedule {
                 bail!("weekdays must contain unique days from 0 to 6");
             }
         }
+        if self
+            .interval_minutes
+            .is_some_and(|minutes| minutes == 0 || minutes > 10_080)
+        {
+            bail!("intervalMinutes must be between 1 and 10080");
+        }
         Ok(())
     }
 
@@ -39,12 +47,39 @@ impl Schedule {
         self.next_in(cadence, after, &Local)
     }
 
-    fn next_in<T: TimeZone>(&self, cadence: &str, after: i64, zone: &T) -> Option<i64> {
-        if self.validate().is_err() || !matches!(cadence, "hourly" | "daily" | "weekly") {
+    pub(crate) fn next_in<T: TimeZone>(&self, cadence: &str, after: i64, zone: &T) -> Option<i64> {
+        if self.validate().is_err()
+            || !matches!(
+                cadence,
+                "hourly" | "hourly_at" | "daily" | "weekly" | "interval"
+            )
+        {
             return None;
+        }
+        if cadence == "interval" {
+            return after.checked_add(i64::from(self.interval_minutes?) * 60_000);
         }
         if cadence == "hourly" {
             return after.checked_add(3_600_000);
+        }
+        if cadence == "hourly_at" {
+            let first = after
+                .div_euclid(60_000)
+                .checked_add(1)?
+                .checked_mul(60_000)?;
+            for offset in 0..(26 * 60) {
+                let timestamp = first.checked_add(offset * 60_000)?;
+                let local = zone.timestamp_millis_opt(timestamp).single()?;
+                if local.minute() == self.minute
+                    && zone
+                        .from_local_datetime(&local.naive_local())
+                        .earliest()
+                        .is_some_and(|earliest| earliest.timestamp_millis() == timestamp)
+                {
+                    return Some(timestamp);
+                }
+            }
+            return None;
         }
         let first = after
             .div_euclid(60_000)
@@ -84,6 +119,7 @@ mod tests {
             minute: 15,
             weekday: 0,
             weekdays: Some(vec![0, 2, 4]),
+            interval_minutes: None,
         };
         let monday = Utc
             .with_ymd_and_hms(2026, 9, 21, 9, 15, 0)
@@ -146,6 +182,7 @@ mod tests {
             minute: 15,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         };
         let start = Utc
             .with_ymd_and_hms(2026, 9, 21, 10, 42, 37)
@@ -161,6 +198,60 @@ mod tests {
             Some(start + 7_200_000)
         );
         assert_eq!(schedule.next_in("hourly", i64::MAX, &Utc), None);
+    }
+
+    #[test]
+    fn interval_uses_bounded_elapsed_minutes() {
+        let schedule: Schedule = serde_json::from_value(serde_json::json!({
+            "hour": 0, "minute": 0, "weekday": 0, "intervalMinutes": 15
+        }))
+        .unwrap();
+        assert_eq!(schedule.next_in("interval", 1_000, &Utc), Some(901_000));
+        let mut invalid = schedule;
+        invalid.interval_minutes = Some(0);
+        assert!(invalid.validate().is_err());
+        invalid.interval_minutes = Some(10_081);
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn iana_zone_skips_missing_time_and_runs_repeated_time_once() {
+        let zone: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let timestamp = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let spring: Schedule = serde_json::from_value(serde_json::json!({
+            "hour": 2, "minute": 30, "weekday": 0
+        }))
+        .unwrap();
+        assert_eq!(
+            spring.next_in("daily", timestamp("2026-03-08T06:00:00Z"), &zone),
+            Some(timestamp("2026-03-09T06:30:00Z"))
+        );
+        let fall: Schedule = serde_json::from_value(serde_json::json!({
+            "hour": 1, "minute": 30, "weekday": 0
+        }))
+        .unwrap();
+        let first = timestamp("2026-11-01T05:30:00Z");
+        assert_eq!(fall.next_in("daily", first - 60_000, &zone), Some(first));
+        assert_eq!(
+            fall.next_in("daily", first, &zone),
+            Some(timestamp("2026-11-02T06:30:00Z"))
+        );
+        let hourly: Schedule = serde_json::from_value(serde_json::json!({
+            "hour": 0, "minute": 30, "weekday": 0
+        }))
+        .unwrap();
+        assert_eq!(
+            hourly.next_in("hourly_at", timestamp("2026-11-01T05:30:00Z"), &zone),
+            Some(timestamp("2026-11-01T07:30:00Z"))
+        );
+        assert_eq!(
+            hourly.next_in("hourly_at", timestamp("2026-03-08T06:30:00Z"), &zone),
+            Some(timestamp("2026-03-08T07:30:00Z"))
+        );
     }
 
     #[cfg(unix)]
@@ -191,6 +282,7 @@ mod tests {
             minute: 30,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         };
         assert_eq!(
             spring.next("daily", timestamp("2026-03-08T06:00:00Z")),
@@ -201,6 +293,7 @@ mod tests {
             minute: 30,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         };
         assert_eq!(
             fall.next("daily", timestamp("2026-11-01T05:30:00Z")),
@@ -219,6 +312,7 @@ mod tests {
             minute: 15,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         };
         let monday = Utc
             .with_ymd_and_hms(2026, 9, 21, 9, 15, 0)
@@ -246,6 +340,7 @@ mod tests {
             minute: 0,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         }
         .validate()
         .is_err());
@@ -254,6 +349,7 @@ mod tests {
             minute: 60,
             weekday: 0,
             weekdays: None,
+            interval_minutes: None,
         }
         .validate()
         .is_err());
@@ -262,6 +358,7 @@ mod tests {
             minute: 0,
             weekday: 7,
             weekdays: None,
+            interval_minutes: None,
         }
         .validate()
         .is_err());
