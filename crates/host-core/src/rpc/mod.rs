@@ -19,6 +19,7 @@ use crate::audit;
 use crate::notifications;
 use crate::permissions::{PermissionDecision, PermissionEvaluationParams, PermissionManager};
 use crate::plans;
+use crate::plugin_prompt;
 use crate::plugin_sessions;
 use crate::plugin_usage;
 use crate::providers::{self, DiscoveredModelInput, ProviderCreateInput, ProviderUpdateInput};
@@ -2820,6 +2821,44 @@ async fn handle_request(
             Ok(page)
         }
 
+        "plugin.promptPrepare" | "plugin.promptLookup" | "plugin.promptSettle" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let intent_id = params
+                .get("requestIntentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "requestIntentId required", "INVALID_PARAMS"))?;
+            let st = state.lock().await;
+            match method {
+                "plugin.promptPrepare" => plugin_prompt::prepare(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    params
+                        .get("contentHash")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                ),
+                "plugin.promptLookup" => plugin_prompt::lookup(&st.db, plugin_id, intent_id),
+                _ => plugin_prompt::settle(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("status").and_then(Value::as_str).unwrap_or(""),
+                    params.get("turnId").and_then(Value::as_str),
+                    params.get("code").and_then(Value::as_str),
+                ),
+            }
+            .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
         "session.beginTurn" => {
             let session_id = params
                 .get("sessionId")

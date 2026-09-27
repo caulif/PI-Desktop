@@ -1,5 +1,13 @@
 type Host = { call<T>(method: string, params?: Record<string, unknown>): Promise<T> };
 export type ScheduledLaunch = { sessionId: string; prompt: string; runId: string };
+export type PluginScheduledDue = {
+  pluginId: string;
+  schedulerTaskId: string;
+  externalKey: string;
+  occurrenceId: string;
+  scheduledFor: string;
+  definitionRevision: number;
+};
 
 /** Runs through the same prompt entry point as an interactive desktop turn. */
 export async function executeScheduledTask(options: {
@@ -36,6 +44,7 @@ export function createScheduledRunner(options: {
   getHost: () => Host | null;
   execute: (id: string) => Promise<unknown>;
   report: (error: unknown) => void;
+  deliverPluginDue?: (occurrence: PluginScheduledDue) => void;
 }) {
   let stopped = false;
   let polling = false;
@@ -47,6 +56,13 @@ export function createScheduledRunner(options: {
     if (!host) return;
     polling = true;
     try {
+      if (options.deliverPluginDue) {
+        const { occurrences } = await host.call<{ occurrences: PluginScheduledDue[] }>("scheduled.pluginDue");
+        for (const occurrence of occurrences) {
+          if (stopped || options.getHost() !== host) break;
+          options.deliverPluginDue(occurrence);
+        }
+      }
       const { ids } = await host.call<{ ids: string[] }>("scheduled.due");
       for (const id of ids) {
         if (stopped || options.getHost() !== host) break;
