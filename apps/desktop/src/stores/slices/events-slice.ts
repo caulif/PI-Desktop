@@ -401,7 +401,6 @@ export function createEventsSlice({
           set((state) => ({
             pendingPermissions: enqueuePermission(state.pendingPermissions, {
               ...event.request,
-              receivedAt: envelope.ts,
             }),
           }));
           notifyInteractivePrompt(envelope.sessionId, "permission", {
@@ -587,7 +586,6 @@ export function createEventsSlice({
           set((state) => ({
             pendingPermissions: enqueuePermission(state.pendingPermissions, {
               ...event.request,
-              receivedAt: envelope.ts,
             }),
           }));
           notifyInteractivePrompt(envelope.sessionId, "permission", {

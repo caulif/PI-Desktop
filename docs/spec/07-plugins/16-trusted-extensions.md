@@ -275,6 +275,11 @@ unsupported ones.
 | Deferred to v2 | `sendMessage`, `appendEntry`, `setLabel`, `sessionManager` read API, `switchSession`, `registerShortcut`, `registerMarkdownTransformer`, `ui.setEditorText`, `ui.getEditorText`, `ui.addAutocompleteProvider`, `registerFlag` value editing |
 | Unsupported | `ui.setWidget`, `ui.setFooter`, `ui.setHeader`, `ui.setTitle`, `ui.custom`, `ui.overlay`, `ui.onTerminalInput`, `ui.setWorkingVisible`, `ui.setWorkingIndicator`, `ui.setHiddenThinkingLabel`, `ui.pasteToEditor`, `ui.editor`, `registerMessageRenderer`, `registerEntryRenderer`, `navigateTree`, `shutdown` |
 
+`getActiveTools` describes the model-facing declarations, not execution grants.
+Plan/Goal can retain denied Write/Edit and configured Task-family declarations;
+the runtime mode gate runs before extension tool-call hooks or handlers. Plugins
+must not infer permission from the presence of a name in this list.
+
 `registerAgent({ id, name?, models, stream? | complete? })` registers a
 session-scoped plugin-owned LLM integration. Each model declares bounded public
 metadata (`id`, display name, API label, modalities, reasoning and limits). The

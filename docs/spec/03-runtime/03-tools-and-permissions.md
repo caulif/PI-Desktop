@@ -1,6 +1,6 @@
 # 03. Tools and Permissions
 
-> Decisions applied: D003, D004, D005, D006, D013, D015, D093, D114, D115, D181, D186,
+> Decisions applied: D003, D004, D006, D013, D015, D093, D114, D115, D181, D186, D636,
 > D189, D190, D195 (ADR 0057), D315, D384 (ADR 0211), ADR 0087
 
 ## 0. Frozen policy summary
@@ -13,7 +13,7 @@
 | Goal tools | Read / Glob / Grep / BrowserPreview / Bash / SubmitGoal + plugin tools that declare plan-safe actions |
 | Plan and Goal hard deny | Write / Edit / plugin tools without `planSafeActions` / unknown tools / the other kind's submit tool |
 | Plugin `planSafeActions` | Non-empty array of `action` strings; runtime hides plugin tools without one in Plan/Goal, host admits listed tools, plugin-runtime rejects any action outside the list (ADR 0211) |
-| Permission timeout | 120s → deny |
+| Local permission approval | No automatic deadline; explicit decision or cancellation required |
 | allow-session scope | toolName |
 | Bash style | non-interactive; selected host catalog shell with streamed output |
 | Edit contract | line-anchored ops + whole-file `tag`; no `old_string`/`new_string` (ADR 0087) |
@@ -158,7 +158,7 @@ low-risk auto-allow decision:
 - `ask` and `accept-edits` emit the ordinary permission card;
 - `allow-once` executes only the current call, while `allow-session` follows
   the existing per-tool session grant scope;
-- denial, timeout, or cancellation never executes the operation;
+- denial or cancellation never executes the operation;
 - relative `..` escapes and symlink escapes use the same rule as absolute
   paths;
 - successful external `Read`/`Write`/`Edit` results carry `root: "external"`
@@ -464,8 +464,10 @@ tool call
  → deny? return tool error result
 ```
 
-Permission confirmation timeout:
-- After 120s, auto-deny (D005: fail closed, do not hang forever)
+Permission confirmation:
+- The local approval remains pending until Allow once, Allow for session, Deny,
+  cancellation, or host/process shutdown. Tool-specific execution timeouts
+  still apply after approval.
 
 ## 8. Tool Result Visibility to the Model
 

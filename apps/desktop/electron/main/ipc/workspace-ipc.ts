@@ -35,7 +35,7 @@ import {
   resolveRealOpenablePath,
 } from "@pi-desktop/host-runtime";
 import { openableMp4Path } from "../open-attachment-video";
-import { resolveChatFileRef } from "../chat-ref-resolve";
+import { isChatRefOutsideRoots, resolveChatFileRef } from "../chat-ref-resolve";
 import { getWorkspaceFileIndex } from "../fs-index";
 import {
   projectFolderPaths,
@@ -916,13 +916,15 @@ export function registerWorkspaceIpc({
       const ref = String(input.ref ?? "").trim();
       if (!ref) return { match: null };
       const workspaceRoot = await optionalWorkspaceRoot();
-      return {
-        match: await resolveChatFileRef(ref, {
-          project: projectRootsFor(workspaceRoot),
-          scratch: await sessionScratchRoot(input.sessionId),
-          attachments: join(dataDir, "attachments"),
-        }),
+      const roots = {
+        project: projectRootsFor(workspaceRoot),
+        scratch: await sessionScratchRoot(input.sessionId),
+        attachments: join(dataDir, "attachments"),
       };
+      if (await isChatRefOutsideRoots(ref, roots)) {
+        return { match: null, reason: "outside-allowed-roots" };
+      }
+      return { match: await resolveChatFileRef(ref, roots) };
     },
   );
 

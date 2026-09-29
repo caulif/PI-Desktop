@@ -25,6 +25,10 @@ const composer = readFileSync(
   new URL("../src/components/Composer.tsx", import.meta.url),
   "utf8",
 );
+const composerToolbar = readFileSync(
+  new URL("../src/features/chat/composer/ComposerToolbar.tsx", import.meta.url),
+  "utf8",
+);
 
 const identity = (key) => key;
 const experimentalIds = ["voice", "sync", "remoteHosts"];
@@ -67,7 +71,7 @@ test("settings search mirrors developer and packaged visibility", () => {
       .some((hit) => hit.tab === "sync"),
   );
 
-  for (const query of ["voiceEnable", "configSync.connectionTitle", "remotehosts"]) {
+  for (const query of ["liveVoice.enable", "configSync.connectionTitle", "remotehosts"]) {
     assert.ok(
       searchSettings(query, identity, { developerMode: true })
         .some((hit) => experimentalIds.includes(hit.tab)),
@@ -91,6 +95,8 @@ test("settings routes, global search, and composer use build visibility", () => 
   assert.match(settingsPage, /tab === "sync" && !tabHidden && <ConfigSyncPage \/>/);
   assert.match(settingsPage, /tab === "remoteHosts" && !tabHidden && <RemoteHostsPage \/>/);
   assert.match(searchDialog, /includeDevelopmentOnly: import\.meta\.env\.DEV/);
-  assert.match(composer, /const voiceEnabled = import\.meta\.env\.DEV && !!settings\?\.voice\?\.enabled/);
-  assert.match(composer, /\{import\.meta\.env\.DEV && \([\s\S]*<VoiceOverlay/);
+  assert.match(composer, /useVoiceInput/);
+  assert.doesNotMatch(composer, /VoiceOverlay|voiceEnabled/);
+  assert.match(composerToolbar, /<LiveVoiceControls t=\{t\} workSessionId=\{workSessionId\} workSessionLabel=\{workSessionLabel\} \/>/);
+  assert.doesNotMatch(composerToolbar, /VoiceMicButton|voicePhase|onVoiceToggle|onVoiceCancel/);
 });

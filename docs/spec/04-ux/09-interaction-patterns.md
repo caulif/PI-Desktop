@@ -23,6 +23,8 @@
 | `Cmd/Ctrl + ]` | Next destination | Global |
 | `Cmd/Ctrl + .` | Abort active turn | Global (same as abort button) |
 | `Cmd/Ctrl + K` | Open command palette | Global |
+| `Cmd/Ctrl + Shift + V` | Start Live Voice when idle; end an active call | Application focused; Live Voice enabled with a selectable binding |
+| `Escape` | Cancel Live Voice startup; never end a connected call | Application focused; startup pending |
 
 ### 1.2 Conversation context shortcuts
 
@@ -916,7 +918,6 @@ may be retained while exactly one workspace supplies the visible shell context.
 Agent calls a permission-gated tool (including Plan/Goal Bash under Ask or Accept edits)
   → PermissionCard inserted inline in transcript
   → Composer disabled (cannot send new prompt)
-  → Countdown starts (120s)
   → User responds: Allow once / Allow session / Deny
   → Card transitions to resolved state
   → Composer re-enabled
@@ -928,8 +929,8 @@ Agent calls a permission-gated tool (including Plan/Goal Bash under Ask or Accep
 - Each session has at most one active permission card because that agent loop
   is paused; multiple sessions may wait independently.
 - Abort cancels only the active session's pending permission.
-- Timeout (120s from original receipt) auto-denies only the matching request;
-  switching sessions never resets the deadline.
+- An unanswered request remains pending; switching sessions does not remove or
+  reset it. Explicit cancellation still clears only the matching request.
 
 ### 5.3 Focus management during permission
 
@@ -1603,7 +1604,8 @@ This does not prevent state changes — it makes them instant.
     finishes the current boundary before releasing its prioritized prompt
 4. Long content (>50 lines for messages, >10 for args, >20 for results) is collapsed by default with expand link
 5. Tool results that were cut short show a truncation marker or chip per D306; a filled Read window of a longer file does not
-6. Permission interrupt inserts inline card, disables composer, shows countdown, and re-enables after resolution
+6. Permission interrupt inserts an inline card, disables the composer, and
+   re-enables it after explicit resolution or cancellation
 7. Toasts used for transient background operations; inline errors used for context-specific failures
 8. Focus returns to composer after session switch, message send, permission resolution, and abort
 9. Background message, tool, completion, and permission events never change

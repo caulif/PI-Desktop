@@ -1,6 +1,6 @@
 {
   "name": "@pi-desktop/agent-runtime",
-  "version": "0.15.9",
+  "version": "0.15.10",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,10 @@
     "./sidecar": {
       "types": "./dist/sidecar.d.ts",
       "import": "./dist/sidecar.js"
+    },
+    "./proxy-tunnel": {
+      "types": "./dist/socks5.d.ts",
+      "import": "./dist/socks5.js"
     }
   },
   "scripts": {

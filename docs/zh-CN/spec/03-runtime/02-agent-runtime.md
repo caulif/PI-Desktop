@@ -695,7 +695,10 @@ Stop / 运行时销毁。主 Agent 用 `TaskStop` 判断要不要取消；运行
 回合打开，等委托完成后再把报告塞回父级。父级收工不会中止它们。
 
 致命的 provider/stream 错误（包括耗尽的 HTTP 429）、父级中止，仍分别保留它们既有的
-`failed` 和 `aborted` 结果。
+`failed` 和 `aborted` 结果。如果助手响应在提供程序输出 token 上限处结束（`stopReason: "length"`
+或 `"max_tokens"`），且已经产生报告文本，该委派会以 `failed`、
+`SUBAGENT_OUTPUT_TRUNCATED` 和 `outputTruncated: true` 结算；有界的部分报告会保留在失败说明
+下，供诊断截断原因。后续以正常原因结束的委派回合会清除该标记并可以成功完成。
 父级终态错误还会中止残留委托、跳过续跑提示，并把会话恢复为空闲，这样
 “继续”不会变成 `AGENT_BUSY`（D352）。
 
@@ -887,6 +890,15 @@ agent 运行时的职责，与官方 Pi 编码 agent 的归属层保持一致；
 会话的 stream 函数，因此 agent 运行时把这次标头合并应用到交给压缩的模型集合
 上。该请求携带会话自己的对话 id，而不是 harness 否则会生成的按次 id，这样摘要
 就与它所压缩的对话落在同一个网关后端。
+
+同一接缝也会补回对话标识本身：pi-agent-core 对摘要请求要求
+`cacheRetention: "none"`，而 Responses 形状的适配器据此不发送
+`prompt_cache_key`，于是只有摘要请求会丢掉其他回合都会携带的身份；对接 Codex
+后端的网关会以 400 `invalid_responses_request` 拒绝这种请求。因此对
+`openai-responses` 与 `openai-codex-responses`，摘要载荷会带上会话 id 作为
+`prompt_cache_key`（按适配器的 64 字符上限截断），除非适配器或调用方已设置过。
+其他线协议的载荷保持适配器构造的原样；该键添加在副本上，因此调用方的载荷钩子仍
+保留自己的对象，其返回值仍然生效。
 
 
 ## 7. 系统提示组成

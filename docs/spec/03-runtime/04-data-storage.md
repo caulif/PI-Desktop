@@ -656,7 +656,7 @@ Serves: mid-session model switches ("next turn only", spec 13 §4), the
 per-message cost chip's session rollup (benchmark §3.2), failed/aborted badges
 (§3.8), and retry lineage.
 
-### 4.6b turn_queue — Host-owned turn queue (schema v15)
+### 4.6b turn_queue — Host-owned turn queue (introduced in schema v15)
 
 ```sql
 CREATE TABLE turn_queue (
@@ -667,9 +667,12 @@ CREATE TABLE turn_queue (
   input_hash       TEXT NOT NULL,
   content          TEXT NOT NULL,
   attachments_json TEXT,
+  session_message_id TEXT,
+  user_message_id TEXT,
   permission_mode  TEXT NOT NULL,
   position         INTEGER NOT NULL,
   priority         INTEGER,
+  voice_origin_json TEXT,
   created_at       INTEGER NOT NULL
 );
 CREATE INDEX idx_turn_queue_session ON turn_queue(session_id, position);
@@ -691,6 +694,9 @@ CREATE UNIQUE INDEX idx_turn_queue_idempotency
   promoted entries are delivered first in click order and the remaining entries
   keep their `position` order. `queueReorder` swaps two adjacent non-promoted
   `position` values and refuses a promoted entry.
+- `user_message_id` and `voice_origin_json` (schema v20) retain the stable
+  user-message identity and optional Live Voice operation provenance across
+  restart. They are metadata only: queue recovery still does not replay work.
   `IDEMPOTENCY_CONFLICT`. A session holds at most eight entries.
 - `attachments_json` keeps the prompt's attachment references; bytes stay in
   the session scratch or project root like any other prompt attachment.
@@ -1369,6 +1375,10 @@ truncating at a guessed position.
   step. The v15→v16 session-collaboration step now stamps `16` (its own version)
   instead of the latest schema constant, so a v15 file can walk both steps in one
   launch.
+- **Schema v20 is additive.** It adds nullable `turn_queue.user_message_id`
+  and `turn_queue.voice_origin_json`; existing queue rows remain valid and
+  unset. The migration keeps a v19 backup, and queue entries remain held until
+  the existing Agent Host controller attaches.
 - **Schema v14 is additive.** It adds nullable `sessions.deleted_at`, the
   partial deletion index, and `session_import_origins`. Existing sessions stay
   active and have no origin rows. The migration runs in the same guarded

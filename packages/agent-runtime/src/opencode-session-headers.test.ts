@@ -249,6 +249,39 @@ describe("completeOneShot OpenCode headers", () => {
     });
   });
 
+  it("honors a caller output-token ceiling without changing the default budget", async () => {
+    const capturedBudgets: number[] = [];
+    await completeOneShot(provider, { systemPrompt: "s", messages: [] }, "off", {
+      maxOutputTokens: 256,
+      stream: (_model, _context, options) => {
+        if (options?.maxTokens !== undefined) capturedBudgets.push(options.maxTokens);
+        return streamFor(assistantOk());
+      },
+    });
+    expect(capturedBudgets[0]).toBe(256);
+
+    await completeOneShot(provider, { systemPrompt: "s", messages: [] }, "off", {
+      stream: (_model, _context, options) => {
+        if (options?.maxTokens !== undefined) capturedBudgets.push(options.maxTokens);
+        return streamFor(assistantOk());
+      },
+    });
+    expect(capturedBudgets[1]).toBeGreaterThan(256);
+  });
+
+  it("forwards caller cancellation to the provider stream", async () => {
+    const controller = new AbortController();
+    let captured: SimpleStreamOptions | undefined;
+    await completeOneShot(provider, { systemPrompt: "s", messages: [] }, "off", {
+      signal: controller.signal,
+      stream: (_model, _context, options) => {
+        captured = options;
+        return streamFor(assistantOk());
+      },
+    });
+    expect(captured?.signal).toBe(controller.signal);
+  });
+
   it("does not attach OpenCode headers to a generic Completions provider", async () => {
     let captured: SimpleStreamOptions | undefined;
     await completeOneShot(

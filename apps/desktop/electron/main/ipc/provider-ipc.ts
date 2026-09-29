@@ -77,6 +77,7 @@ export type ProviderIpcDependencies = {
   listRuntimeProviders: () => Promise<RuntimeProvider[]>;
   enrichProviderList: (result: { providers: RuntimeProvider[] }) => Promise<unknown>;
   bindingForModel: (provider: Pick<RuntimeProvider, "models">, modelId: string) => ModelBinding | undefined;
+  onProviderInvalidated?: (providerId: string) => Promise<void> | void;
 };
 
 /** Register provider catalog, model discovery, OAuth and secret channels. */
@@ -90,6 +91,7 @@ export function registerProviderIpc({
   listRuntimeProviders,
   enrichProviderList,
   bindingForModel,
+  onProviderInvalidated,
 }: ProviderIpcDependencies): void {
   let host: HostProcess | null = null;
   const handle = (channel: string, fn: (...args: any[]) => Promise<any>) => {
@@ -173,10 +175,14 @@ export function registerProviderIpc({
   });
   handle(IPC.invoke.providersUpdate, async (input: unknown) => {
     if (!host) throw new Error("host unavailable");
+    const providerId = input && typeof input === "object" && typeof (input as { id?: unknown }).id === "string"
+      ? (input as { id: string }).id
+      : "";
     const result = await host.call<{ provider?: RuntimeProvider | null }>(
       "providers.update",
       input,
     );
+    if (providerId) await onProviderInvalidated?.(providerId);
     await modelsDevCatalog.ensureLoaded();
     return result.provider
       ? { ...result, provider: enrichProvider(result.provider) }
@@ -190,6 +196,7 @@ export function registerProviderIpc({
         "providers.setSecret",
         input,
       );
+      await onProviderInvalidated?.(input.id);
       await modelsDevCatalog.ensureLoaded();
       return result.provider
         ? { ...result, provider: enrichProvider(result.provider) }
@@ -198,7 +205,9 @@ export function registerProviderIpc({
   );
   handle(IPC.invoke.providersDelete, async (id: string) => {
     if (!host) throw new Error("host unavailable");
-    return host.call("providers.delete", { id });
+    const result = await host.call("providers.delete", { id });
+    await onProviderInvalidated?.(id);
+    return result;
   });
   handle(IPC.invoke.providersTest, async (id: string) => {
     if (!host) throw new Error("host unavailable");

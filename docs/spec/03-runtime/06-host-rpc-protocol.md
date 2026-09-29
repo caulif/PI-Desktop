@@ -799,7 +799,7 @@ Authoritative mode and workspace resolution are session-scoped:
 For `Read`/`Glob`/`Grep`/`Write`/`Edit`, the host classifies an explicit path
 outside the workspace and scratch roots before the low-risk auto-allow rule.
 `auto` executes it, while `ask` and `accept-edits` emit
-`permissions.request`; denial, timeout, or cancellation returns `TOOL_DENIED`
+`permissions.request`; denial or cancellation returns `TOOL_DENIED`
 without executing the operation. Relative `..` and symlink escapes use the
 same classification. Bash's working directory and implicit recursive walks do
 not inherit this exception.
@@ -1061,7 +1061,6 @@ params: {
   risk: "low" | "medium" | "high"
   argsPreview: unknown
   reason: string
-  timeoutMs: 120000
 }
 ```
 
@@ -1075,14 +1074,16 @@ params: {
 }
 ```
 
-Timeout behavior (**D005**): after 120s unresolved → deny.
+Local permission behavior (**D636 / ADR 0310**): an unresolved request remains
+pending until an explicit decision, cancellation, or host/process shutdown.
+The transport does not apply a deadline to `tools.execute`; tool-specific
+execution budgets still apply after approval.
 
 `permissions.pending` returns the open requests as Host state (D374/D375):
 `{ requests: PendingPermission[] }`, oldest first, optionally scoped by
 `sessionId`. Each entry carries the same fields as the `permissions.request`
-notification plus `createdAt`, `expiresAt`, and `remainingMs`. Requests past
-the timeout are omitted. A client that attaches after the notification was
-emitted reads this list and answers through the unchanged
+notification plus `createdAt`. Requests remain listed until settled. A client
+that attaches after the notification was emitted reads this list and answers through the unchanged
 `permissions.resolve`; the notification path itself does not change.
 
 ## 7. Error codes
@@ -1173,7 +1174,7 @@ Tool outcomes (`TOOL_DENIED`, `TOOL_TIMEOUT`, `PATH_OUTSIDE_WORKSPACE`,
 1. Electron spawns host and completes handshake
 2. health method returns ok
 3. denied tool path returns `TOOL_DENIED`
-4. timeout path returns deny decision after 120s
+4. an unresolved permission remains pending until an explicit decision or cancellation
 5. switching the selected workspace from A to B does not change the tool root
    of a call issued by session A
 6. Protocol v4 `session.endTurn` creates/returns exactly one notification for

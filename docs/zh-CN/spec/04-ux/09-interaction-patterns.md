@@ -26,6 +26,8 @@
 | `Cmd/Ctrl + ]` | 下一个目的地 | 全球 |
 | `Cmd/Ctrl + .` | 中止主动回合 | 全局（与中止按钮相同） |
 | `Cmd/Ctrl + K` | 打开命令面板 | 全球 |
+| `Cmd/Ctrl + Shift + V` | 空闲且有可用绑定时开始实时语音；通话中结束通话 | 应用聚焦；实时语音已启用 |
+| `Escape` | 取消实时语音启动；不会结束已连接的通话 | 应用聚焦；启动准备中 |
 
 ### 1. 2 对话上下文快捷方式
 
@@ -737,7 +739,6 @@
 Agent calls a permission-gated tool (including Plan/Goal Bash under Ask or Accept edits)
   → PermissionCard inserted inline in transcript
   → Composer disabled (cannot send new prompt)
-  → Countdown starts (120s)
   → User responds: Allow once / Allow session / Deny
   → Card transitions to resolved state
   → Composer re-enabled
@@ -749,8 +750,8 @@ Agent calls a permission-gated tool (including Plan/Goal Bash under Ask or Accep
 - 每个会话最多有一张活动权限卡，因为该代理会循环
   已暂停；多个会话可以独立等待。
 - 中止仅取消活动会话的待处理权限。
-- 超时（从原始接收开始 120 秒）仅自动拒绝匹配的请求；
-切换会话永远不会重置截止日期。
+- 未回答的请求会一直保持待处理；切换会话不会移除或重置它。
+  明确取消仍只清除匹配的请求。
 
 ### 5. 3 权限期间的焦点管理
 
@@ -1184,7 +1185,7 @@ Mode/provider/model/permission/shell 配置和新提示仍然存在
 3. Abort 立即取消正在运行的回合和挂起的权限，无需确认对话框
 4.长内容（>50行消息，>10行参数，>20行结果）默认通过展开链接折叠
 5. 被切断的工具结果按 D306 显示截断标记或芯片；更长文件上已填满的 Read 窗口不显示
-6.权限中断插入内联卡，禁用composer，显示倒计时，解决后重新启用
+6.权限中断插入内联卡，禁用 composer，明确解决或取消后重新启用
 7. 用于短暂后台操作的Toast；用于特定于上下文的失败的内联错误
 8. 会话切换、消息发送、权限解析、中止后焦点返回到composer
 9.后台消息、工具、完成、权限事件永不改变

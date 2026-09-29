@@ -650,6 +650,16 @@ submitted Markdown bytes in a new immutable
 structured title/question in `plan_approvals`, and moves the live state to
 `awaiting_approval`.
 
+Plan/Goal requests retain Write/Edit declarations and, when subagents are
+configured, the Task/TaskWait/TaskList/TaskStop declarations. They are marked
+unavailable in the active mode. The execution allowlist remains unchanged:
+prohibited calls are blocked before extension call hooks and handlers, and a
+handler retained across a mode change rechecks that mode before executing.
+The model receives an ordinary error tool result with the original call id;
+no editing, delegation, fake user message or transcript deletion occurs.
+Other deferred/plugin tools keep their existing visibility rules. See
+[the declaration/permission decision](../../adr/plan-tool-declarations-and-execution-denials.md).
+
 Approval has only `approve` and `reject`. Approval commits `mode = agent`, the
 explicit permission mode, an execution ID, and `execution_state = queued` on
 the same `plan_approvals` row in one host transaction. The
@@ -949,9 +959,14 @@ they can end the parent turn even if a delegate ignores its abort. Ending the
 parent loop does not otherwise abort delegates.
 
 Fatal provider/stream errors (including exhausted HTTP 429) and parent aborts
-retain their existing `failed` and `aborted` outcomes. A terminal parent error
-also aborts leftover delegates, skips the resume prompt, and returns the
-session to idle so Continue is not `AGENT_BUSY` (D352).
+retain their existing `failed` and `aborted` outcomes. If an assistant response
+ends at the provider's output-token limit (`stopReason: "length"` or
+`"max_tokens"`) after emitting report text, the delegate instead settles as
+`failed` with `SUBAGENT_OUTPUT_TRUNCATED` and `outputTruncated: true`; its
+bounded partial report remains under the failure explanation for diagnosis. A
+later delegate turn that ends normally clears the marker and can complete. A
+terminal parent error also aborts leftover delegates, skips the resume prompt,
+and returns the session to idle so Continue is not `AGENT_BUSY` (D352).
 
 **Resumable delegations (ADR 0279).** `Task` accepts an optional `resume`
 parameter carrying the `delegationId` of a settled delegation in the same
@@ -1238,6 +1253,17 @@ function, so agent-runtime applies the header merge to the model collection it
 hands to compaction. That request carries the session's conversation id rather
 than the per-call id the harness would otherwise mint, so a summary reaches the
 same gateway backend as the conversation it summarizes.
+
+The same seam restores the conversation key itself. pi-agent-core asks for
+`cacheRetention: "none"` on a summary, and the Responses-shaped adapters read
+that as "no `prompt_cache_key`", so the summary alone drops the identity every
+other turn sends; a gateway fronting a Codex backend rejects such a request with
+400 `invalid_responses_request`. For `openai-responses` and
+`openai-codex-responses` the summary payload therefore carries the session id as
+`prompt_cache_key` (clamped to the adapter's 64-character limit) unless the
+adapter or a caller already set one. Every other wire API keeps its payload
+exactly as the adapter built it, and the key is added on a copy, so a caller's
+payload hook keeps its own object and its return value still wins.
 
 
 ## 7. System prompt composition

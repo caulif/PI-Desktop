@@ -1,3 +1,4 @@
+import { modeToolDenial, retainModeToolDeclaration, withModeExecutionGuard } from "./mode-tool-access.js";
 import { restoreHostedSearchReplay } from "./hosted-search-replay.js";
 import { requestExtensionUi } from "./extensions/ui-request.js";
 import { readLocalRequestErrorDetails } from "./local-request-errors.js";
@@ -2324,7 +2325,12 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         reason: `${[...MODE_TRANSITION_TOOL_NAMES].join(", ")} must be the only tool call in the assistant message.`,
       };
     }
-    if (!transition) return this.extensionToolCall(context);
+    if (!transition) {
+      if (!this.isToolAllowedInMode(context.toolCall.name)) {
+        return { block: true, reason: modeToolDenial(context.toolCall.name, this.mode) };
+      }
+      return this.extensionToolCall(context);
+    }
     const enterKind = enterToolKind(context.toolCall.name);
     if (enterKind && this.mode !== "agent") {
       return {
@@ -3385,8 +3391,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
 
     // BrowserPreview is non-mutating (renders an existing workspace file in
     // the work panel browser), so it ships in every mode. PluginCheck only
-    // reads a directory; PluginScaffold and PluginPack write, so they follow
-    // Write/Edit/Bash into agent mode only.
+    // reads a directory; PluginScaffold and PluginPack write and remain
+    // Agent-only. Write/Edit keep guarded declarations in contract modes.
     const tools =
       this.mode === "agent"
         ? [
@@ -3399,7 +3405,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             "BrowserPreview",
             "PluginCheck",
           ]
-        : ["Read", "Glob", "Grep", "BrowserPreview", "Bash"];
+        : ["Read", "Glob", "Grep", "BrowserPreview", "Bash", "Write", "Edit"];
     if (this.mode === "agent") {
       tools.push("PluginScaffold", "PluginPack", "GenerateImages", ...Object.keys(scheduledToolParameters));
     }
@@ -3460,12 +3466,11 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       this.mode === "agent"
         ? [this.buildEnterModeTool("plan"), this.buildEnterModeTool("goal")]
         : [this.buildSubmitTool(this.mode)];
-    // Delegation is an Agent-mode capability: Plan and Goal are read-only
-    // contract negotiations, and a delegate with Bash or Edit would drive
-    // straight through that (ADR 0062). The whole lifecycle rides together:
-    // `Task` starts, `TaskWait`/`TaskList`/`TaskStop` converge (ADR 0089).
+    // Keep configured delegation declarations stable across mode changes.
+    // Contract modes reject execution before handlers can spawn/control a
+    // delegate; publishing a schema never grants delegation permission.
     const subagentTools =
-      this.mode === "agent" && this.subagents.length
+      this.subagents.length
         ? [
             this.buildSubagentTool(),
             this.buildSubagentWaitTool(),
@@ -3499,7 +3504,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   private rebuildToolCatalog(): void {
     const catalog = new Map<string, AgentTool>();
     for (const tool of this.buildToolDefinitions()) {
-      if (!this.isToolAllowedInMode(tool.name)) continue;
+      if (!this.isToolAllowedInMode(tool.name) && !retainModeToolDeclaration(tool.name)) continue;
       // The execution mode is decided here, in one place, so no tool can grow
       // an accidental parallel batch: everything is sequential except `Task`.
       // pi runs a whole batch sequentially when it holds one sequential tool,
@@ -3509,11 +3514,14 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       // same declaration (#864).
       catalog.set(
         tool.name,
-        withExplicitRequired({
-          ...tool,
-          executionMode:
-            tool.name === SUBAGENT_TOOL_NAME ? "parallel" : "sequential",
-        }),
+        withModeExecutionGuard(
+          withExplicitRequired({
+            ...tool,
+            executionMode:
+              tool.name === SUBAGENT_TOOL_NAME ? "parallel" : "sequential",
+          }),
+          () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
+        ),
       );
     }
     this.toolCatalog = catalog;
@@ -3568,6 +3576,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   private isCoreTool(name: string): boolean {
     return (
       name === CONTEXT_COMPACTION_TOOL_NAME ||
+      retainModeToolDeclaration(name) ||
       MODE_TRANSITION_TOOL_NAMES.has(name) ||
       // The whole delegation lifecycle stays in the core set rather than the
       // on-demand catalog: a capability the model has to go looking for is one

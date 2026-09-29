@@ -2,7 +2,10 @@ import { BrowserWindow, ipcMain, Menu, session, systemPreferences } from "electr
 import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import { catalogs, resolveLocale } from "@pi-desktop/i18n";
-import { isNetUrlAllowed, THEME_ASSET_SCHEME } from "@pi-desktop/plugin-sdk";
+import {
+  isNetUrlAllowedWithGrant,
+  THEME_ASSET_SCHEME,
+} from "@pi-desktop/plugin-sdk";
 import { builtinWindowBackground } from "@pi-desktop/shared";
 import { suppressLinuxFramelessSystemMenu } from "./frameless-system-menu";
 import { PanelSenders, pageGoneWithin, resolvePanelInvocation } from "./plugin-panel-senders";
@@ -44,6 +47,12 @@ export type PluginPanelOpenRequest = {
    * an unmetered outbound channel that bypasses the `net.fetch` permission.
    */
   netDomains?: readonly string[];
+  /**
+   * The install-time `net.anyHost` grant. It lifts the same allowlist for the
+   * panel page, so every egress path answers to one decision, except cloud
+   * metadata hosts, which stay refused.
+   */
+  netAnyHost?: boolean;
   /** Allows microphone audio for plugins with the explicit ui.microphone grant. */
   allowMicrophone?: boolean;
   /** Adds a development-only reminder for the non-clickable drag band. */
@@ -82,7 +91,8 @@ export type PluginPanelBlockedRequest = (input: {
 }) => void;
 
 /**
- * Confine everything a plugin's web contents can reach to its declared domains.
+ * Confine everything a plugin's web contents can reach to its declared
+ * domains, lifted by the install-time `net.anyHost` grant when present.
  *
  * Shared by the detached panel window and the docked work-panel view: both are
  * full web pages under the same plugin identity, so one policy governs both.
@@ -95,11 +105,13 @@ export function applyPluginEgressPolicy(
   input: {
     pluginId: string;
     netDomains?: readonly string[];
+    netAnyHost?: boolean;
     allowMicrophone?: boolean;
     onBlockedRequest?: PluginPanelBlockedRequest;
   },
 ): void {
   const domains = input.netDomains ?? [];
+  const grant = { domains, anyHost: input.netAnyHost === true };
   ses.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
     let scheme = "";
     try {
@@ -113,7 +125,7 @@ export function applyPluginEgressPolicy(
       callback({ cancel: false });
       return;
     }
-    if (isNetUrlAllowed(details.url, domains)) {
+    if (isNetUrlAllowedWithGrant(details.url, grant)) {
       callback({ cancel: false });
       return;
     }

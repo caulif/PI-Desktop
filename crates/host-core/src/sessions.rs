@@ -157,6 +157,9 @@ pub struct UiMessage {
     /// Host-authenticated agent-to-agent origin, never a human authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_message: Option<Value>,
+    /// Minimal provenance for an accepted Live Voice work input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_origin: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<MessageAttachment>>,
     /// Accepted input to an existing turn, preserved by Stop after renderer reload.
@@ -306,6 +309,9 @@ pub(crate) fn ui_to_record(message: &UiMessage) -> (MessageRecord, Option<String
     }
     if let Some(origin) = &message.session_message {
         meta_obj.insert("sessionMessage".into(), origin.clone());
+    }
+    if let Some(origin) = &message.voice_origin {
+        meta_obj.insert("voiceOrigin".into(), origin.clone());
     }
     if let Some(steering) = message.steering {
         meta_obj.insert("steering".into(), json!(steering));
@@ -459,6 +465,7 @@ pub(crate) fn record_to_ui(record: MessageRecord) -> UiMessage {
         .get("skillMentions")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
     let session_message = meta.get("sessionMessage").cloned();
+    let voice_origin = meta.get("voiceOrigin").cloned();
     let steering = meta.get("steering").and_then(Value::as_bool);
     let status = meta
         .get("status")
@@ -563,6 +570,7 @@ pub(crate) fn record_to_ui(record: MessageRecord) -> UiMessage {
             command: command.clone(),
             skill_mentions: skill_mentions.clone(),
             session_message,
+            voice_origin: voice_origin.clone(),
             attachments: None,
             steering,
             created_at: record.created_at,
@@ -614,6 +622,7 @@ pub(crate) fn record_to_ui(record: MessageRecord) -> UiMessage {
             command,
             skill_mentions,
             session_message,
+            voice_origin,
             attachments,
             steering,
             created_at: record.created_at,
@@ -3857,6 +3866,7 @@ mod tests {
             command: None,
             skill_mentions: None,
             attachments: None,
+            voice_origin: None,
             steering: None,
             created_at: ts.into(),
             thinking: None,
@@ -4503,6 +4513,7 @@ mod tests {
             command: None,
             skill_mentions: None,
             attachments: None,
+            voice_origin: None,
             steering: None,
             created_at: "2025-05-01T00:00:02Z".into(),
             thinking: None,
@@ -4934,6 +4945,7 @@ mod tests {
             command: None,
             skill_mentions: None,
             attachments: None,
+            voice_origin: None,
             steering: None,
             created_at: "2025-05-01T00:00:01Z".into(),
             thinking: Some("first plan\nsecond plan".into()),
@@ -5019,6 +5031,7 @@ mod tests {
             command: None,
             skill_mentions: None,
             attachments: None,
+            voice_origin: None,
             steering: None,
             created_at: "2025-05-01T00:00:01Z".into(),
             thinking: None,

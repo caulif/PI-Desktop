@@ -89,9 +89,11 @@ The `Task` tool takes `agent`, `task` and an optional short `description`. The
 catalog of available delegates rides in the tool description rather than the
 system prompt, because the two change together.
 
-`Task` is offered only in Agent mode. Plan and Goal are read-only contract
+`Task` executes only in Agent mode. Plan and Goal are read-only contract
 negotiations (D198), and a delegate with Bash or Edit would drive straight
-through one.
+through one. [Contract-mode declaration compatibility](plan-tool-declarations-and-execution-denials.md)
+retains configured Task-family schemas but rejects their execution before any
+delegate is created or controlled; a visible schema is not a permission grant.
 
 Concurrency is expressed through pi's execution modes: the session Agent runs
 with `toolExecution: "parallel"`, every catalog tool carries
