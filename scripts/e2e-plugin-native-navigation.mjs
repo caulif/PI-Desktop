@@ -129,11 +129,11 @@ try {
     for (const theme of ["dark", "light"]) {
       await invoke("settingsSet", { theme });
       await waitFor(() => actual.eval(`document.documentElement.dataset.theme===${JSON.stringify(theme)}`), `actual ${theme} theme`);
-      const screenshot = await actual.send("Page.captureScreenshot", { format: "png" }); writeFileSync(join(artifacts, `actual-plugin-${theme}.png`), Buffer.from(screenshot.data, "base64"));
+      const screenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: false }); writeFileSync(join(artifacts, `actual-plugin-${theme}.png`), Buffer.from(screenshot.data, "base64"));
     }
     await actual.eval("[...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='详情').click()");
     await waitFor(() => actual.eval("document.body.innerText.includes('文件')"), "actual Bot file details");
-    const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png" }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
+    const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: false }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
     await host.eval(`__PI_DESKTOP__.selectSession(${JSON.stringify(created.session.id)})`);
     assert.equal(await host.eval("Boolean(document.querySelector('[data-plugin-main-surface]'))"), false);
     await host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].find(button=>button.textContent.includes('原生验收同伴')).click()`);
