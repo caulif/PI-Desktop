@@ -33,6 +33,10 @@ screenshots are captured separately because CDP does not composite child views.
 Embedded guest capture can return a blank frame even when DOM/context assertions
 pass. Inspect those files before claiming visual acceptance; a blank PNG provides
 no visual evidence. The automated result proves only its interaction assertions.
+The actual guest must also report `active: true` after asynchronous open: a
+rendered DOM in an unattached WebContentsView is insufficient. Focused component
+effects cover delayed open, an overlay arriving before open completes, and a
+development reload replacing a mounted view (`plugin-view-open-visibility.test.mjs`).
 
 Run the probe against the task candidate's
 built Electron app, reusing the host runtime/dependencies and isolating both

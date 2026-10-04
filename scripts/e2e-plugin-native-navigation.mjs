@@ -125,6 +125,7 @@ try {
     await waitFor(() => host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].some(button=>button.textContent.includes('原生验收同伴'))`), "actual persisted Bot row");
     await host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].find(button=>button.textContent.includes('原生验收同伴')).click()`);
     try { await waitFor(() => actual.eval(`pluginBridge.getViewContext().location?.botId===${JSON.stringify(botId)} && Boolean(document.querySelector('.workbench-conv-head'))`), "actual Bot conversation"); } catch (error) { writeFileSync(join(artifacts, "actual-failure-state.json"), JSON.stringify(await actual.eval("({text:document.body.innerText,context:pluginBridge.getViewContext()})"), null, 2)); throw error; }
+    await waitFor(() => actual.eval("pluginBridge.getViewContext().active===true"), "actual guest attached after async open");
     assert.equal(await actual.eval("document.querySelector('.workbench-roster')?.getBoundingClientRect().width || 0"), 0);
     for (const theme of ["dark", "light"]) {
       await invoke("settingsSet", { theme });
