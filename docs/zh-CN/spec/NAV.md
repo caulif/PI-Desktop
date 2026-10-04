@@ -93,6 +93,7 @@
 - [10-plugin-devex.md](/zh-CN/spec/07-plugins/10-plugin-devex)
 - [11-plugin-storage-isolation.md](/zh-CN/spec/07-plugins/11-plugin-storage-isolation)
 - [12-plugin-ipc-and-host-services.md](/zh-CN/spec/07-plugins/12-plugin-ipc-and-host-services)
+- [13-approved-project-verification.md](/zh-CN/spec/07-plugins/13-approved-project-verification)
 - [13-plugin-permissions-matrix.md](/zh-CN/spec/07-plugins/13-plugin-permissions-matrix)
 - [14-plugin-roadmap.md](/zh-CN/spec/07-plugins/14-plugin-roadmap)
 - [15-plugin-center.md](/zh-CN/spec/07-plugins/15-plugin-center)

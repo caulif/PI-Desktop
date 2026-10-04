@@ -24,6 +24,8 @@ Each ADR includes:
 | 0312 | [Development scheduled calendar preview](0312-dev-scheduled-calendar-preview.md) | Implemented candidate |
 | 0313 | [Relay thinking transport](0313-relay-thinking-transport.md) | Implemented candidate |
 | 0314 | [Scoped Bot session tool policy](0314-plugin-bot-session-tool-policy.md) | Implemented candidate |
+| plugin-prompt-intents | [Plugin prompt request identity](plugin-prompt-intents.md) | Implemented candidate |
+| plugin-scheduled-routines | [Plugin-owned scheduled Routines](plugin-scheduled-routines.md) | Implemented candidate |
 | trusted-extension-operation-ownership | [Trusted extension operation ownership](trusted-extension-operation-ownership.md) | Implemented candidate |
 | scheduled-desktop-automations | [Desktop automation scheduling](scheduled-desktop-automations.md) | Accepted for implementation |
 | subagent-model-fallback | [Ordered subagent model fallback](subagent-model-fallback.md) | Accepted for implementation |

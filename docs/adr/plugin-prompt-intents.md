@@ -1,4 +1,17 @@
-# Plugin prompt request identity
+# ADR: Plugin prompt request identity
+
+## Status
+
+Implemented candidate; real Host and model acceptance are recorded separately.
+
+## Context
+
+A plugin can lose the response to a prompt that already started. Session-level
+busy checks alone cannot recover its exact turn or distinguish a delayed old
+request from a new one. Cancellation and follow-up steering also need durable
+identities without granting plugins another session's control.
+
+## Decision
 
 First-party plugins may add `requestIntentId` to `agent/prompt`. Electron main
 binds the authenticated plugin identity, session ID, and SHA-256 of the exact
@@ -55,3 +68,10 @@ for the next turn. The steering receipt binds plugin, intent, session, turn and
 content hash. Repeats return the saved receipt; uncertain steering outcomes
 stay unknown without automatic replay. `panelAuthorized` is an internal main
 process context fact, never a plugin-supplied request boolean.
+
+## Consequences
+
+The ordinary Agent path is reused, with an atomic durable admission binding.
+Legacy unknown intents remain unresolved rather than being guessed safe to
+replay. Prompt admission, actual execution termination, and artifact quality
+remain separate facts; the plugin must reconcile each relevant receipt.

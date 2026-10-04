@@ -1,5 +1,9 @@
 # ADR 0314: Immutable scoped tool policy for Bot sessions
 
+## Status
+
+Implemented candidate; independent phase verification remains separate evidence.
+
 ## Context
 
 pi-bot applies conversation, project and operation permissions in its workbench
@@ -23,7 +27,7 @@ skips old message/compaction restore and does not load trusted extensions.
 Project instructions and configured project memory remain trusted context; this
 policy does not claim a new OS sandbox or remove explicitly configured context.
 
-## Alternatives and consequences
+## Alternatives and Consequences
 
 Prompt-only instructions and catalog-only filtering leave an executable bypass.
 A separate execution engine would duplicate existing task and lifecycle code.

@@ -1,4 +1,18 @@
-# Plugin-owned scheduled Routines
+# ADR: Plugin-owned scheduled Routines
+
+## Status
+
+Implemented candidate; native authorization and actual execution require their
+own acceptance evidence.
+
+## Context
+
+Companion Routines need the existing desktop scheduler to retain ownership,
+definition changes and execution receipts across restarts. Plugin-provided
+enable flags or changed prompts cannot serve as user authorization, and missed
+occurrences must not become unbounded duplicate execution.
+
+## Decision
 
 The isolated native development RPC `scheduled.devCalendarPreview` (ADR 0312)
 projects an exact owned stored revision with the production calendar algorithm.
@@ -118,3 +132,12 @@ status, result and turn ID plus `replyToMessageId`, `completionMessageId`,
 `completionStatus`, `completionTurnId`, and `completionSessionId` when a callback
 exists. A queued callback has no turn ID yet. This query remains available
 after restart and lets a plugin reconcile without starting a second wake.
+
+## Consequences
+
+Routine execution reuses the desktop scheduler and ordinary Agent path. The
+stored definition and native authorization constrain each admission; neither
+calendar preview nor a plugin enable flag grants execution rights. Restart
+reconciliation queries stable occurrence and intent identities instead of
+creating new runs, while unload and application shutdown retain their distinct
+disable and catch-up behavior.

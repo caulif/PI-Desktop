@@ -20,6 +20,7 @@ this directory define the normative contracts and implementation boundaries.
 | [10-plugin-devex.md](10-plugin-devex.md) | Developer experience |
 | [11-plugin-storage-isolation.md](11-plugin-storage-isolation.md) | Storage isolation |
 | [12-plugin-ipc-and-host-services.md](12-plugin-ipc-and-host-services.md) | Host services & IPC |
+| [13-approved-project-verification.md](13-approved-project-verification.md) | Native-approved project verification |
 | [13-plugin-permissions-matrix.md](13-plugin-permissions-matrix.md) | Permissions matrix |
 | [14-plugin-roadmap.md](14-plugin-roadmap.md) | Plugin roadmap |
 | [15-plugin-center.md](15-plugin-center.md) | Plugin center (publishing side) |

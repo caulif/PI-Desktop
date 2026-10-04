@@ -1,6 +1,8 @@
 # ADR 0311: Native-approved fixed-command engineering verification
 
-Status: Implemented candidate; native GUI acceptance pending
+## Status
+
+Implemented candidate; native GUI acceptance pending.
 
 ## Context
 
@@ -82,3 +84,10 @@ Phase-end validation must cover proof replay, expired/revoked grants, foreign
 session/project access, changed pins, repeated and conflicting execution IDs,
 cold lookup, cancellation and output/timeout cleanup. Real Host execution and
 native consent are separate acceptance evidence from fixtures and module tests.
+
+## Consequences
+
+Verification reuses the Host runner and persistent scope instead of exposing a
+general shell. Execution receipts are recoverable facts; neither a successful
+exit nor a native command grant substitutes for human content review. Unix
+input mutability and fixed-command transitive code remain explicit limitations.
