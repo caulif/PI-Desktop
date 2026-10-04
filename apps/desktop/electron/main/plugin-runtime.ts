@@ -4452,7 +4452,9 @@ export class PluginRuntime {
       // with a typo that they tried to escape the workspace is a lie that costs
       // them an afternoon.
       const lexical = !options.create && resolveWithinRoot(root, requestPath);
-      const missing = Boolean(lexical) && !existsSync(lexical as string);
+      // The relative-path helper strips leading separators. Its missing-path
+      // spelling cannot classify an absolute path refused by containment.
+      const missing = !isAbsolute(requestPath) && Boolean(lexical) && !existsSync(lexical as string);
       const code = missing ? "NOT_FOUND" : "INVALID_ARGUMENT";
       this.auditFs(loaded, mode, requestPath, code);
       throw apiError(

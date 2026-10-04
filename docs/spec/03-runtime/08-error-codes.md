@@ -53,6 +53,8 @@ registered; reserved codes in §3.7 remain intentionally absent from
 | `INVALID_ARGUMENT` | no | request schema/args invalid, including a native-tool path of the wrong file/directory kind |
 | `INVALID_PARAMS` | no | host-core RPC parameter validation failed (numeric `1002`); the sidecar and renderer surface it unchanged |
 | `UNAUTHORIZED` | no | capability/auth boundary rejected call |
+| `PERMISSION_DENIED` | no | session tool policy or exact plugin authority refuses this operation |
+| `STALE_PROMPT_CLAIM` | no | a prompt claim belongs to an older Host epoch or was invalidated; query the saved outcome rather than resend |
 | `NOT_FOUND` | no | entity not found |
 | `SESSION_NOT_FOUND` | no | a session-scoped RPC (including `tools.execute`) named a session the host does not have; an unknown id never inherits the global workspace |
 | `CONFLICT` | maybe | state conflict / busy resource |
