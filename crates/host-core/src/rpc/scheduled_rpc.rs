@@ -32,6 +32,31 @@ fn handle_with_workspace_policy(
     allow_workspace_override: bool,
 ) -> Result<Value, JsonRpcError> {
     match method {
+        "scheduled.devCalendarPreview" => {
+            scheduled::preview::require_development_profile(&st.db)
+                .map_err(|e| rpc_err(1003, e.to_string(), "PERMISSION_DENIED"))?;
+            let mut params = params;
+            let object = params
+                .as_object_mut()
+                .ok_or_else(|| rpc_err(1002, "object required", "INVALID_PARAMS"))?;
+            let plugin_id = object
+                .remove("pluginId")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .ok_or_else(|| {
+                    rpc_err(
+                        1003,
+                        "native diagnostic pluginId required",
+                        "PERMISSION_DENIED",
+                    )
+                })?;
+            let request =
+                serde_json::from_value::<scheduled::preview::CalendarPreviewRequest>(params)
+                    .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            let preview = scheduled::preview::calendar_preview(&st.db, &plugin_id, &request)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            serde_json::to_value(preview).map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
         "scheduled.list" => {
             let tasks = scheduled::list_tasks(&st.db)
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
@@ -197,6 +222,7 @@ fn handle_with_workspace_policy(
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
                 .unwrap_or_else(|| json!({}));
             let options = sessions::SessionCreateOptions {
+                tool_policy: None,
                 title: Some(task.title.clone()),
                 mode: Some("agent".into()),
                 thinking_level: task.thinking_level.clone(),

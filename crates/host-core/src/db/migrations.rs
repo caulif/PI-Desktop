@@ -6,6 +6,14 @@ const TASK_RUNS_KEEP: i64 = 100;
 impl Database {
     pub(crate) fn boot_maintenance(&self) -> Result<()> {
         let now = now_ms();
+        // Existing pi-bot ownership remains a ceiling even for a profile
+        // created by an older development Host with an unrestricted default.
+        self.conn.execute(
+            "UPDATE sessions SET tool_policy='plugin-bot-scoped'
+             WHERE tool_policy!='plugin-bot-scoped' AND id IN
+             (SELECT session_id FROM plugin_automation_sessions WHERE plugin_id='local.pi-bot')",
+            [],
+        )?;
         let _ = self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_turns_ended_at ON turns(ended_at DESC)",
             [],
@@ -991,6 +999,43 @@ pub(crate) fn migrate_v21_to_v22(conn: &Connection, path: &Path) -> Result<()> {
     tx.commit().with_context(|| {
         format!(
             "commit schema v21 to v22 migration; backup {} remains",
+            backup.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn migrate_v22_to_v23(conn: &Connection, path: &Path) -> Result<()> {
+    let backup = create_migration_backup(conn, path, 22)?;
+    let tx = conn.unchecked_transaction()?;
+    let has_policy: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='tool_policy')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_policy {
+        tx.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN tool_policy TEXT NOT NULL DEFAULT 'unrestricted'
+             CHECK (tool_policy IN ('unrestricted', 'plugin-bot-scoped'));",
+        )?;
+    }
+    let invalid_policy: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE tool_policy IS NULL
+         OR tool_policy NOT IN ('unrestricted', 'plugin-bot-scoped'))",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_policy {
+        return Err(anyhow!("invalid persisted session tool policy"));
+    }
+    tx.execute_batch(
+        "UPDATE sessions SET tool_policy='plugin-bot-scoped' WHERE id IN
+         (SELECT session_id FROM plugin_automation_sessions WHERE plugin_id='local.pi-bot');",
+    )?;
+    tx.pragma_update(None, "user_version", 23i64)?;
+    tx.commit().with_context(|| {
+        format!(
+            "commit schema v22 to v23 migration; backup {} remains",
             backup.display()
         )
     })?;

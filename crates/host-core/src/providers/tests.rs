@@ -10,6 +10,113 @@ fn test_context() -> (tempfile::TempDir, Database, SecretStore) {
 }
 
 #[test]
+fn relay_thinking_protocol_roundtrips_preserves_absent_and_clears_null() {
+    let (_dir, db, secrets) = test_context();
+    let input: ProviderCreateInput = serde_json::from_value(json!({
+        "name": "Relay", "authKind": "none", "apiStyle": "chat_completions",
+        "supportsReasoning": false, "thinkingRequestProtocol": "deepseek"
+    }))
+    .unwrap();
+    let provider = create_provider(&db, &secrets, input).unwrap();
+    assert_eq!(
+        provider.thinking_request_protocol.as_deref(),
+        Some("deepseek")
+    );
+    assert_eq!(provider.supports_reasoning, Some(false));
+    let update: ProviderUpdateInput =
+        serde_json::from_value(json!({ "id": provider.id, "name": "Relay renamed" })).unwrap();
+    assert_eq!(update.thinking_request_protocol, None);
+    let updated = update_provider(&db, &secrets, update).unwrap().unwrap();
+    assert_eq!(
+        updated.thinking_request_protocol.as_deref(),
+        Some("deepseek")
+    );
+    let reloaded = get_provider(&db, &secrets, &provider.id).unwrap().unwrap();
+    assert_eq!(
+        reloaded.thinking_request_protocol.as_deref(),
+        Some("deepseek")
+    );
+    let update: ProviderUpdateInput =
+        serde_json::from_value(json!({ "id": provider.id, "thinkingRequestProtocol": null }))
+            .unwrap();
+    assert_eq!(update.thinking_request_protocol, Some(None));
+    let cleared = update_provider(&db, &secrets, update).unwrap().unwrap();
+    assert_eq!(cleared.thinking_request_protocol, None);
+    assert_eq!(cleared.supports_reasoning, Some(false));
+    let raw: String = db
+        .conn()
+        .query_row(
+            "SELECT config_json FROM providers WHERE id = ?1",
+            params![provider.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(config_value(&raw).unwrap()["compatibility"]
+        .get("thinkingRequestProtocol")
+        .is_none());
+}
+
+#[test]
+fn relay_thinking_protocol_rejects_invalid_dialects_and_api_changes_before_writing() {
+    let (_dir, db, secrets) = test_context();
+    for payload in [
+        json!({ "name": "Bad dialect", "thinkingRequestProtocol": "arbitrary" }),
+        json!({ "name": "Bad API", "thinkingRequestProtocol": "deepseek", "apiStyle": "responses" }),
+    ] {
+        let input = serde_json::from_value(payload).unwrap();
+        assert!(create_provider(&db, &secrets, input)
+            .unwrap_err()
+            .to_string()
+            .contains("PROVIDER_INVALID"));
+    }
+    assert!(list_providers(&db, &secrets, true).unwrap().is_empty());
+    let input =
+        serde_json::from_value(json!({ "name": "Relay", "thinkingRequestProtocol": "deepseek" }))
+            .unwrap();
+    let provider = create_provider(&db, &secrets, input).unwrap();
+    let update =
+        serde_json::from_value(json!({ "id": provider.id, "apiStyle": "anthropic_messages" }))
+            .unwrap();
+    assert!(update_provider(&db, &secrets, update)
+        .unwrap_err()
+        .to_string()
+        .contains("requires Chat Completions"));
+    assert_eq!(
+        get_provider(&db, &secrets, &provider.id)
+            .unwrap()
+            .unwrap()
+            .api_style,
+        None
+    );
+    let update = serde_json::from_value(
+        json!({ "id": provider.id, "apiStyle": "responses", "thinkingRequestProtocol": null }),
+    )
+    .unwrap();
+    assert_eq!(
+        update_provider(&db, &secrets, update)
+            .unwrap()
+            .unwrap()
+            .thinking_request_protocol,
+        None
+    );
+}
+
+#[test]
+fn relay_thinking_protocol_config_merge_preserves_unrelated_fields() {
+    let raw = json!({ "compatibility": { "supportsReasoning": false, "customFlag": true }, "custom": { "nested": 42 } }).to_string();
+    let set = config_with_thinking_request_protocol(&raw, Some("deepseek")).unwrap();
+    assert_eq!(
+        config_thinking_request_protocol(&set).as_deref(),
+        Some("deepseek")
+    );
+    let cleared =
+        config_value(&config_with_thinking_request_protocol(&set, None).unwrap()).unwrap();
+    assert_eq!(cleared["custom"]["nested"], 42);
+    assert_eq!(cleared["compatibility"]["customFlag"], true);
+    assert_eq!(cleared["compatibility"]["supportsReasoning"], false);
+}
+
+#[test]
 fn reasoning_override_roundtrips_and_preserves_provider_config() {
     let (_dir, db, secrets) = test_context();
     let provider = create_provider(
@@ -32,6 +139,7 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(true),
+            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec!["off".into(), "high".into()]),
         },
     )
@@ -80,6 +188,7 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(false),
+            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec!["off".into(), "low".into()]),
             enabled: None,
         },
@@ -132,6 +241,7 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -199,6 +309,7 @@ fn model_bindings_roundtrip_and_legacy_model_migrates_on_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -261,6 +372,7 @@ fn model_bindings_roundtrip_and_legacy_model_migrates_on_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -378,6 +490,7 @@ fn alias_survives_provider_create_and_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -405,6 +518,7 @@ fn alias_survives_provider_create_and_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -473,6 +587,7 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -502,6 +617,7 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -530,6 +646,7 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             oauth_account_label: None,
             headers: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             context_window: None,
             max_output_tokens: None,
@@ -571,6 +688,7 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -598,6 +716,7 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -623,6 +742,7 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -655,6 +775,7 @@ fn limit_overrides_roundtrip_and_clear_with_zero() {
             max_output_tokens: Some(32_000),
             temperature: Some(0.7),
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -685,6 +806,7 @@ fn limit_overrides_roundtrip_and_clear_with_zero() {
             max_output_tokens: None,
             temperature: Some(0.0),
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -719,6 +841,7 @@ fn provider_without_override_omits_reasoning_capability() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -753,6 +876,7 @@ fn thinking_levels_override_normalizes_and_can_clear() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(true),
+            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec![
                 "high".into(),
                 "off".into(),
@@ -789,6 +913,7 @@ fn thinking_levels_override_normalizes_and_can_clear() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec![]),
             enabled: None,
         },
@@ -834,6 +959,7 @@ fn discovered_models_are_cached_without_overwriting_user_rows() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -931,6 +1057,7 @@ fn an_oauth_credential_alone_makes_the_provider_ready() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -974,6 +1101,7 @@ fn an_oauth_credential_alone_makes_the_provider_ready() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -1031,6 +1159,7 @@ fn a_provider_can_hold_both_an_api_key_and_a_vendor_account() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1076,6 +1205,7 @@ fn blank_update(id: String) -> ProviderUpdateInput {
         max_output_tokens: None,
         temperature: None,
         supports_reasoning: None,
+        thinking_request_protocol: None,
         supported_thinking_levels: None,
         enabled: None,
     }
@@ -1107,6 +1237,7 @@ fn headers_roundtrip_migrate_user_agent_clear_and_reject() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1247,6 +1378,7 @@ fn a_stored_array_survives_an_entry_that_lost_a_field() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1329,6 +1461,7 @@ fn degraded_model_array_cannot_be_overwritten_by_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1416,6 +1549,7 @@ fn header_values_fold_fullwidth_and_reject_non_latin1() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1449,6 +1583,7 @@ fn header_values_fold_fullwidth_and_reject_non_latin1() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1548,6 +1683,7 @@ fn provider_api_keys_fold_fullwidth_on_write_and_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )

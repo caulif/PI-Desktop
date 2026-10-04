@@ -65,6 +65,8 @@ CREATE TABLE sessions (
                                           'high', 'xhigh', 'max', 'omit')),
   permission_mode TEXT NOT NULL DEFAULT 'inherit'
                 CHECK (permission_mode IN ('inherit', 'ask', 'accept-edits', 'auto')),
+  tool_policy TEXT NOT NULL DEFAULT 'unrestricted'
+                CHECK (tool_policy IN ('unrestricted', 'plugin-bot-scoped')),
   source      TEXT,
   deleted_at  INTEGER,
   pinned      INTEGER NOT NULL DEFAULT 0,

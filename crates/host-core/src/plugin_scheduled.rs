@@ -368,11 +368,12 @@ pub fn register_created_session(db: &Database, plugin_id: &str, session_id: &str
     if !exists {
         bail!("created session missing");
     }
-    db.conn().execute(
+    let tx = db.conn().unchecked_transaction()?;
+    tx.execute(
         "INSERT OR IGNORE INTO plugin_automation_sessions(session_id,plugin_id,created_at) VALUES(?1,?2,?3)",
         params![session_id, plugin_id, now_ms()],
     )?;
-    let owner: String = db.conn().query_row(
+    let owner: String = tx.query_row(
         "SELECT plugin_id FROM plugin_automation_sessions WHERE session_id=?1",
         [session_id],
         |row| row.get(0),
@@ -380,6 +381,13 @@ pub fn register_created_session(db: &Database, plugin_id: &str, session_id: &str
     if owner != plugin_id {
         bail!("session belongs to another plugin");
     }
+    if plugin_id == "local.pi-bot" {
+        tx.execute(
+            "UPDATE sessions SET tool_policy='plugin-bot-scoped' WHERE id=?1 AND tool_policy!='plugin-bot-scoped'",
+            [session_id],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1026,6 +1034,76 @@ pub fn due(db: &Database, now: i64) -> Result<Vec<Value>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn owned_bot_policy_tightens_on_registration_upgrade_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_in_dir(dir.path()).unwrap();
+        let bot = crate::sessions::create_session(&db, None, None, None, None, None).unwrap();
+        let generic = crate::sessions::create_session(&db, None, None, None, None, None).unwrap();
+        register_created_session(&db, "local.pi-bot", &bot.id).unwrap();
+        register_created_session(&db, "other-plugin", &generic.id).unwrap();
+        assert_eq!(
+            crate::sessions::session_tool_policy(&db, &bot.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        assert_eq!(
+            crate::sessions::session_tool_policy(&db, &generic.id)
+                .unwrap()
+                .as_deref(),
+            Some("unrestricted")
+        );
+        assert!(register_created_session(&db, "other-plugin", &bot.id).is_err());
+        db.conn()
+            .execute_batch("ALTER TABLE sessions DROP COLUMN tool_policy; PRAGMA user_version=22;")
+            .unwrap();
+        drop(db);
+        let upgraded = Database::open_in_dir(dir.path()).unwrap();
+        assert_eq!(
+            upgraded
+                .conn()
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            23
+        );
+        assert!(crate::db::migration_backup_path(&dir.path().join("pi.sqlite"), 22).exists());
+        assert_eq!(
+            crate::sessions::session_tool_policy(&upgraded, &bot.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        assert_eq!(
+            crate::sessions::session_tool_policy(&upgraded, &generic.id)
+                .unwrap()
+                .as_deref(),
+            Some("unrestricted")
+        );
+        // Simulate a legacy development v23 profile with an unrestricted Bot.
+        upgraded
+            .conn()
+            .execute(
+                "UPDATE sessions SET tool_policy='unrestricted' WHERE id=?1",
+                [&bot.id],
+            )
+            .unwrap();
+        drop(upgraded);
+        let reopened = Database::open_in_dir(dir.path()).unwrap();
+        assert_eq!(
+            crate::sessions::session_tool_policy(&reopened, &bot.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        assert_eq!(
+            crate::sessions::session_tool_policy(&reopened, &generic.id)
+                .unwrap()
+                .as_deref(),
+            Some("unrestricted")
+        );
+    }
+
     fn input(revision: i64) -> Value {
         let template = format!("Do work\n\nWork ID: work_{}{}", "0".repeat(64), WORK_SUFFIX);
         json!({
@@ -1107,6 +1185,7 @@ mod tests {
                  ALTER TABLE plugin_schedule_bindings DROP COLUMN authorized_session_id;
                  ALTER TABLE plugin_schedule_bindings DROP COLUMN goal_hash;
                  ALTER TABLE plugin_schedule_bindings DROP COLUMN prompt_template_hash;
+                 ALTER TABLE sessions DROP COLUMN tool_policy;
                  PRAGMA user_version=21;",
                 )
                 .unwrap();
@@ -1121,7 +1200,7 @@ mod tests {
             db.conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            22
+            23
         );
     }
 

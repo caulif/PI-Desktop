@@ -1,5 +1,12 @@
 # Plugin-owned scheduled Routines
 
+The isolated native development RPC `scheduled.devCalendarPreview` (ADR 0312)
+projects an exact owned stored revision with the production calendar algorithm.
+It is not a plugin service and never enables a binding or creates occurrences.
+See the plugin Host-service specification for its strict temporary-profile guard
+and bounded explicit-time request. Calendar prediction does not establish actual
+timer delivery, authorized Work execution, or human review.
+
 The desktop scheduler persists plugin bindings under `(pluginId, externalKey)`.
 `pluginId` comes from `PluginRuntime`, never from the plugin's argument object.
 The internal operations are hidden from the external MCP catalog:

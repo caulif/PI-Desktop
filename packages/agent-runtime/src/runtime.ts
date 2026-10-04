@@ -151,6 +151,8 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   providerRequestFetch,
   providerRequestKey,
+  withThinkingRequestTransport,
+  clampProviderThinkingLevel,
   type RuntimeProviderConfig,
 } from "./provider-binding.js";
 import {
@@ -189,7 +191,8 @@ import {
   composeModeSystemPrompt,
   DEFAULT_RUNTIME_SYSTEM_PROMPT,
 } from "./mode-prompts.js";
-import { agentThinkingLevel, clampThinkingLevel, omitThinkingModel } from "./thinking-level.js";
+import { agentThinkingLevel, omitThinkingModel } from "./thinking-level.js";
+import { normalizeRuntimeToolPolicy, type RuntimeToolPolicy } from "./session-tool-policy.js";
 import {
   alignRetainedReasoningIdentity,
   harvestRetainedReasoning,
@@ -904,6 +907,7 @@ export type PluginToolDef = {
 export type AgentRuntimeOptions = {
   host: RuntimeHost;
   sessionId: string;
+  toolPolicy?: RuntimeToolPolicy;
   mode: Mode;
   /** Durable host turn ID for the current prompt, used by plan identity. */
   turnId?: string;
@@ -962,6 +966,7 @@ export type AgentRuntimeOptions = {
 };
 
 export type RuntimeMatchConfig = {
+  toolPolicy?: RuntimeToolPolicy;
   mode: Mode;
   provider: RuntimeProviderConfig;
   thinkingLevel: SessionThinkingLevel;
@@ -1646,6 +1651,7 @@ export class DesktopAgentRuntime {
   private writeLocks = new PathMutex();
   /** Complete tool registry; only the active subset is sent to the provider. */
   private toolCatalog = new Map<string, AgentTool>();
+  private readonly toolPolicy: RuntimeToolPolicy;
   /** Tools intentionally omitted from the initial provider request. */
   private deferredToolNames = new Set<string>();
   /** Deferred tools loaded for the current user prompt. */
@@ -1790,11 +1796,12 @@ export class DesktopAgentRuntime {
 
   constructor(opts: AgentRuntimeOptions) {
     this.sessionId = opts.sessionId;
+    this.toolPolicy = normalizeRuntimeToolPolicy(opts.toolPolicy);
     this.turnId = opts.turnId;
     this.mode = opts.mode;
     this.planningState = proposalKindForMode(this.mode) ? "planning" : "inactive";
     this.provider = opts.provider;
-    this.thinkingLevel = clampThinkingLevel(opts.provider, opts.thinkingLevel);
+    this.thinkingLevel = clampProviderThinkingLevel(opts.provider, opts.thinkingLevel);
     this.infiniteProviderRetry = opts.infiniteProviderRetry === true;
     this.host = opts.host;
     this.hostCloseUnsubscribe = this.host.onClose?.(() => {
@@ -1832,16 +1839,21 @@ export class DesktopAgentRuntime {
     this.models = models;
     const runtimeApiKey = providerRequestKey(this.provider);
 
-    this.transcriptHistory = [...(opts.history ?? [])];
+    this.transcriptHistory = this.toolPolicy === "plugin-bot-scoped" ? [] : [...(opts.history ?? [])];
     this.fullEntries = this.historyToEntries(this.transcriptHistory);
-    this.activeCompaction = opts.compaction;
+    this.activeCompaction = this.toolPolicy === "plugin-bot-scoped" ? undefined : opts.compaction;
     this.delegationChains.hydrate(
       rebuildChainsFromTranscript(this.transcriptHistory),
     );
     const skillsPrompt = pluginSkillsPrompt(this.pluginSkills);
     // Parts: [0] is the product persona; [1:] are operational rules a custom
     // SYSTEM.md must not remove (tool guidance, delegation, scratch, skills).
-    const defaultSystemPromptParts = [
+    const defaultSystemPromptParts = this.toolPolicy === "plugin-bot-scoped"
+      ? [
+          DEFAULT_RUNTIME_SYSTEM_PROMPT,
+          "You are a scoped Bot. Use only the pi-bot bot_workbench tool for assigned work, collaboration, project file reading, file delivery, and replies. If it is on demand, activate it with ToolSearch. Other desktop tools, skills, subagents, shell commands, and direct file access are unavailable. Work only with the current assignment and information explicitly shared through bot_workbench; do not infer access from earlier turns or other conversations. Reply in the user's language and make the outcome visible.",
+        ]
+      : [
       DEFAULT_RUNTIME_SYSTEM_PROMPT,
       // Workflow rules.
       "Complete the requested work and relevant checks without expanding scope. Preserve unrelated user changes. Resolve recoverable blockers yourself.",
@@ -1974,7 +1986,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         const retryStream = createProviderRetryStream(
           m,
           context,
-          attemptOptions,
+          withThinkingRequestTransport(this.provider, m, this.thinkingLevel, attemptOptions),
           (retryOptions) =>
             this.thinkingLevel === "omit"
               ? this.models.stream(omitThinkingModel(m), context, retryOptions)
@@ -2367,6 +2379,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
 
   /** True when this runtime can be reused for a prompt with the given config. */
   matches(config: RuntimeMatchConfig): boolean {
+    // Durable Bot identity spans assignments; model context must not span them.
+    if (this.toolPolicy === "plugin-bot-scoped") return false;
     const requestedPluginTools = config.pluginTools ?? [];
     const requestedPluginSkills = config.pluginSkills ?? [];
     const current = this.pluginTools.map((t) => t.name).sort().join(",");
@@ -2392,6 +2406,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       this.provider.apiKey === config.provider.apiKey &&
       this.provider.authKind === config.provider.authKind &&
       (this.provider.apiStyle ?? "") === (config.provider.apiStyle ?? "") &&
+      this.provider.thinkingRequestProtocol === config.provider.thinkingRequestProtocol &&
       providerHeadersEqual(this.provider.headers, config.provider.headers) &&
       this.provider.supportsReasoning === config.provider.supportsReasoning &&
       currentThinkingLevels === nextThinkingLevels &&
@@ -2401,8 +2416,9 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       !this.disposed &&
       providerMatches &&
       this.mode === config.mode &&
+      this.toolPolicy === normalizeRuntimeToolPolicy(config.toolPolicy) &&
       this.thinkingLevel ===
-        clampThinkingLevel(config.provider, config.thinkingLevel) &&
+        clampProviderThinkingLevel(config.provider, config.thinkingLevel) &&
       current === next &&
       safeJson(this.commandShell) === safeJson(config.commandShell) &&
       safeJson(this.baseProjectInstructions ?? null) ===
@@ -2437,6 +2453,9 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
    * never fails the session.
    */
   async loadTrustedExtensions(): Promise<void> {
+    // Scoped assignments expose only the reviewed workbench; extension startup
+    // must not run code outside that tool path before catalog filtering.
+    if (this.toolPolicy === "plugin-bot-scoped") return;
     if (this.disposed || this.extensionRunner || this.trustedExtensionSpecs.length === 0) return;
     const runner = new TrustedExtensionRunner({
       specs: this.trustedExtensionSpecs,
@@ -2482,7 +2501,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       model,
       stream: { stream: agent.stream, streamSimple: agent.stream },
     });
-    this.thinkingLevel = clampThinkingLevel(this.provider, this.thinkingLevel);
+    this.thinkingLevel = clampProviderThinkingLevel(this.provider, this.thinkingLevel);
     this.agent.state.model = model;
     this.agent.state.thinkingLevel = agentThinkingLevel(this.thinkingLevel);
   }
@@ -2557,7 +2576,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       modelRegistry: runtime.extensionModelRegistry(),
       getThinkingLevel: () => agentThinkingLevel(runtime.thinkingLevel),
       setThinkingLevel: (level) => {
-        runtime.thinkingLevel = clampThinkingLevel(runtime.provider, level as ThinkingLevel);
+        runtime.thinkingLevel = clampProviderThinkingLevel(runtime.provider, level as ThinkingLevel);
       },
       isIdle: () => !runtime.agent.state.isStreaming,
       abort: () => {
@@ -3499,6 +3518,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   private rebuildToolCatalog(): void {
     const catalog = new Map<string, AgentTool>();
     for (const tool of this.buildToolDefinitions()) {
+      if (this.toolPolicy === "plugin-bot-scoped" &&
+          tool.name !== "plugin_local_pi_bot_bot_workbench") continue;
       if (!this.isToolAllowedInMode(tool.name)) continue;
       // The execution mode is decided here, in one place, so no tool can grow
       // an accidental parallel batch: everything is sequential except `Task`.
@@ -4321,7 +4342,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         const thinkingLevel: SubagentThinkingLevel =
           definition.thinkingLevel === "omit"
             ? "omit"
-            : clampThinkingLevel(
+            : clampProviderThinkingLevel(
                 provider,
                 definition.thinkingLevel ?? this.thinkingLevel,
               );

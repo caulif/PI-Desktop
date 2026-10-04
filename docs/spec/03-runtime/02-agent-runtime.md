@@ -14,6 +14,29 @@ Core packages:
 
 ## 2. Runtime placement
 
+### Scoped Bot assignments
+
+The Host-owned `SessionToolPolicy` is `unrestricted | plugin-bot-scoped`.
+Electron forwards the session policy on every runtime launch; the sidecar and
+runtime constructor reject invalid explicit values. Absent remains the legacy
+unrestricted policy. Runtime reuse checks the policy, and a scoped runtime is
+never reused for the next assignment even when the durable session id and model
+are unchanged.
+
+A scoped runtime exposes only `plugin_local_pi_bot_bot_workbench` plus local
+`ToolSearch` for discovering that tool. Filtering precedes discovery and tool
+activation: native file/shell tools, Skill, Task and other plugins are absent
+from the catalog and cannot be activated by search. Trusted extension startup
+is skipped for scoped assignments. Rust remains the authoritative execution
+gate; catalog filtering and prompt guidance are additional defense.
+
+Scoped launches do not restore persisted transcript messages, attachment
+history, or compaction into model context. The runtime constructor also discards
+history/compaction supplied directly. The Host still retains those records for
+audit. Each new assignment gets only its current prompt and explicitly shared
+workbench information, alongside configured trusted project instructions.
+The normal unrestricted history/reuse/catalog behavior remains unchanged.
+
 Agent loop runs in a **Node/TypeScript pi sidecar**, not in renderer.
 
 ```text
