@@ -16,7 +16,30 @@ import {
 // built-in window palette from the same table main and the panel host use.
 import { builtinWindowBackground } from "@pi-desktop/shared/theme";
 
+const viewPlacement = process.argv.includes("--pi-plugin-view-placement=main") ? "main" : process.argv.includes(PLUGIN_PANEL_EMBEDDED_ARGUMENT) ? "workpanel" : "standalone";
+let viewLocation: string | null = new URL(window.location.href).searchParams.get("piViewOpen");
+let viewAppearance: "light" | "dark" = process.argv.includes("--pi-plugin-panel-theme=light") ? "light" : "dark";
+let viewActive = false;
+ipcRenderer.on("pi-plugin-panel-event:view:open", (_event, payload) => { if (typeof payload?.path === "string") viewLocation = payload.path; });
+ipcRenderer.on("pi-plugin-panel-event:view:context", (_event, payload) => {
+  viewActive = payload?.active === true;
+  if (viewPlacement === "main" && payload?.placement === "main") viewLocation = JSON.stringify({ placement: "main", itemId: payload.itemId, sectionId: payload.sectionId, location: payload.location });
+});
+ipcRenderer.on("pi-plugin-panel-event:appearance:changed", (_event, payload) => { if (payload?.base === "light" || payload?.base === "dark") viewAppearance = payload.base; });
+
 const bridge = {
+  /** Host-authored immutable placement; never inferred from viewport width. */
+  getViewContext: () => {
+    const placement = viewPlacement;
+    const raw = viewLocation;
+    let location: unknown = raw;
+    let itemId: string | undefined;
+    let sectionId: string | undefined;
+    if (placement === "main" && raw) {
+      try { const data = JSON.parse(raw); location = data.location; itemId = data.itemId; sectionId = data.sectionId; } catch { /* Opaque locations remain strings. */ }
+    }
+    return { placement, active: viewActive, location, itemId, sectionId, appearance: viewAppearance };
+  },
   invoke: async (channel: string, payload?: Record<string, unknown>) => {
     return ipcRenderer.invoke("pi-plugin-panel-invoke", channel, payload ?? {});
   },

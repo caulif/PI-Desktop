@@ -1,5 +1,23 @@
 # 03. Plugin API
 
+## Main view context (ADR 0310)
+
+Sandboxed UI pages can feature-detect `window.pluginBridge.getViewContext()`.
+It returns `{placement:'main'|'workpanel'|'standalone',active,location,itemId?,
+sectionId?,appearance:'light'|'dark'}`. Placement is authored by the host at view
+creation. Location and appearance follow host events; focus refresh must never
+revert to an obsolete entry URL or startup theme. Raw `ui.getAppearance` and
+`appearance:changed` remain the authoritative richer theme APIs.
+
+Main navigation keeps the existing `piViewOpen` URL and `view:open {path}` event.
+`path` is a JSON wrapper `{placement:'main',sectionId,itemId,location}`; the getter
+unwraps the plugin's domain location. `view:context` emits the same unwrapped
+subject plus `active` on activation/deactivation and changes without reloading
+the page. Navigation is not a send/dispatch operation. Main route identities
+remain independent from Host Session IDs, with back/forward and restart recovery
+using the fresh provider projection. Missing items/plugins display an unavailable
+surface and permit returning to host conversation navigation.
+
 ## Theme variables
 
 `pi.themes.setVariables(themeId, values)` requires `ui.theme`. The host accepts

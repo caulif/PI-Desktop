@@ -165,10 +165,12 @@ export function createCatalogSlice({
     },
 
     refreshPluginViews: async () => {
+      const scope = get().workspace?.path ?? null;
       try {
-        set({ pluginViews: await api.listPluginViews() });
+        const [pluginViews, pluginSidebarSections] = await Promise.all([api.listPluginViews(), api.listPluginSidebarSections()]);
+        if (scope === (get().workspace?.path ?? null)) set({ pluginViews, pluginSidebarSections, pluginSidebarScope: scope });
       } catch {
-        set({ pluginViews: [] });
+        if (scope === (get().workspace?.path ?? null)) set({ pluginViews: [], pluginSidebarSections: [] });
       }
     },
 

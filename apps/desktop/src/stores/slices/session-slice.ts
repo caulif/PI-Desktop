@@ -1,4 +1,5 @@
 import i18n from "i18next";
+import { savePluginNavigation } from "../../lib/plugin-navigation";
 import type {
   Mode,
   PlanProposal,
@@ -225,6 +226,8 @@ export function createSessionSlice({
     },
 
     selectSession: async (id, opts) => {
+      savePluginNavigation(null);
+      set({ pluginTarget: null });
       const intent = opts?.navigationIntent ?? runtime.beginNavigationIntent();
       const selection = runtime.beginSessionSelection(id, intent);
       const stateAtStart = get();

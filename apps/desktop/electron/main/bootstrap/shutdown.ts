@@ -97,6 +97,7 @@ export function registerShutdownHandlers({
     const isAutomatedMode =
       process.env.PI_DESKTOP_BOOT_PROBE === "1" ||
       process.env.PI_DESKTOP_SUPERVISION_PROBE === "1" ||
+      process.env.PI_DESKTOP_PLUGIN_NAVIGATION_PROBE === "1" ||
       process.env.PI_DESKTOP_CAPTURE === "1";
     // Skip confirmation for the quit that an in-app update performs. The
     // installer for that update was already spawned before app.quit(), and it

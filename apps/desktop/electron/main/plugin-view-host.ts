@@ -51,6 +51,7 @@ export { PLUGIN_VIEW_LOCATION_EVENT, PLUGIN_VIEW_LOCATION_PARAM, viewEntryUrl };
 const MAX_LIVE_VIEWS = 4;
 
 export type PluginViewOpenRequest = {
+  placement?: "workpanel" | "main";
   pluginId: string;
   viewId: string;
   locale: string;
@@ -90,6 +91,7 @@ type LiveView = {
    * request is re-delivered against.
    */
   location: string | null;
+  placement: "main" | "workpanel";
   /** False until the first document finished loading. */
   loaded: boolean;
 };
@@ -231,6 +233,7 @@ export class PluginViewHost {
       htmlPath: request.htmlPath,
       usedAt: ++this.clock,
       location,
+      placement: request.placement ?? "workpanel",
       loaded: false,
     };
     this.views.set(key, entry);
@@ -242,6 +245,7 @@ export class PluginViewHost {
     view.webContents.once("destroyed", () => this.senders.release(senderId));
     view.webContents.once("did-finish-load", () => {
       entry.loaded = true;
+      this.deliverContext(entry, this.visibleKey === entry.key);
     });
     this.load(entry);
     this.evictBeyondLimit();
@@ -261,6 +265,7 @@ export class PluginViewHost {
     // The page reads its subject from the URL it was loaded with, so the
     // remembered value has to follow every accepted request.
     entry.location = delivery.location;
+    this.deliverContext(entry, this.visibleKey === entry.key);
     if (delivery.kind === "reload") {
       this.load(entry);
       return;
@@ -270,6 +275,17 @@ export class PluginViewHost {
     wc.send(`pi-plugin-panel-event:${PLUGIN_VIEW_LOCATION_EVENT}`, {
       path: delivery.location,
     });
+  }
+
+  private deliverContext(entry: LiveView, active: boolean): void {
+    if (!entry.loaded || entry.view.webContents.isDestroyed()) return;
+    let location: unknown = entry.location;
+    let itemId: string | undefined;
+    let sectionId: string | undefined;
+    if (entry.placement === "main" && entry.location) {
+      try { const data = JSON.parse(entry.location); location = data.location; itemId = data.itemId; sectionId = data.sectionId; } catch { /* Keep opaque locations intact. */ }
+    }
+    entry.view.webContents.send("pi-plugin-panel-event:view:context", { placement: entry.placement, active, location, itemId, sectionId });
   }
 
   private load(entry: LiveView): void {
@@ -326,6 +342,7 @@ export class PluginViewHost {
     }
     entry.view.setBounds(this.bounds);
     this.visibleKey = key;
+    this.deliverContext(entry, true);
     this.emitSurface();
   }
 
@@ -367,6 +384,7 @@ export class PluginViewHost {
   private detachVisible(): void {
     const entry = this.visibleKey ? this.views.get(this.visibleKey) : null;
     this.visibleKey = null;
+    if (entry) this.deliverContext(entry, false);
     if (entry && this.window && !this.window.isDestroyed()) {
       const children = this.window.contentView.children;
       if (children.includes(entry.view)) {
@@ -429,6 +447,7 @@ export class PluginViewHost {
           `${PLUGIN_PANEL_LOCALE_ARGUMENT_PREFIX}${encodeURIComponent(request.locale)}`,
           `--pi-plugin-panel-theme=${request.theme}`,
           PLUGIN_PANEL_EMBEDDED_ARGUMENT,
+          `--pi-plugin-view-placement=${request.placement ?? "workpanel"}`,
         ],
       },
     });

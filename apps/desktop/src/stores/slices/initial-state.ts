@@ -1,4 +1,5 @@
 import type { AppState, AppStateData } from "../app-state";
+import { loadPluginNavigation } from "../../lib/plugin-navigation";
 import { projectWorkspaceFromPath } from "../../lib/sidebar-preferences";
 import { loadSidebarPreferences } from "../../lib/sidebar-preferences";
 import { loadWorkPanelWidth } from "./work-panel-slice";
@@ -66,6 +67,10 @@ export function createInitialState(): AppStateData {
     plugins: [],
     pluginThemes: [],
     pluginViews: [],
+    pluginSidebarSections: [],
+    pluginSidebarScope: null,
+    pluginActivationRevision: 0,
+    pluginTarget: loadPluginNavigation(),
     pendingPermissions: {},
     pendingAsks: {},
     queuedPrompts: {},

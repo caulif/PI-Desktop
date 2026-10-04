@@ -1,5 +1,27 @@
 # 04. E2E Test Plan
 
+## E2E-PLUGIN-native-navigation (ADR 0310)
+
+Run `node scripts/e2e-plugin-native-navigation.mjs` against the task candidate's
+build. The probe sets `PI_DESKTOP_PLUGIN_NAVIGATION_PROBE=1` only in its isolated
+process to skip the native quit confirmation and allow a real graceful restart
+to flush Chromium navigation storage. Optional `PI_DESKTOP_NATIVE_PLUGIN_PATH`
+loads the actual pi-bot release with explicitly seeded UI-only Bot/Conversation
+records: this verifies its native shell, theme and file-details presentation,
+not provisioning or model execution. Host chrome and guest WebContentsView
+screenshots are captured separately because CDP does not composite child views.
+
+Run the probe against the task candidate's
+built Electron app, reusing the host runtime/dependencies and isolating both
+`PI_DESKTOP_DATA_DIR` and Chromium user-data. Install a fixture through the actual
+development-plugin permission boundary. Verify the peer section, main view
+activation/subject, literal labels, sandbox, host Session identity preservation,
+switching/return navigation, scope/permission failure, modal occlusion, theme
+context changes and plugin-disable cleanup. A restart restores navigation only;
+it never sends a prompt. Unit/IPC companions are `plugin-native-navigation.test.mjs`
+and `plugin-navigation-ipc.test.mjs`. A browser-only mock or standalone HTML
+does not constitute this Electron acceptance.
+
 > Scope: MVP acceptance scenarios plus current shipped product increments for PI-Desktop
 > Status: Accepted (protocol/Electron automation is active; full desktop Playwright remains planned)
 > Cross-references: [acceptance-criteria](02-acceptance-criteria.md) · [milestones](01-mvp-milestones.md) · [ai-development-workflow](03-ai-development-workflow.md) · [change-checklist](05-change-checklist.md)

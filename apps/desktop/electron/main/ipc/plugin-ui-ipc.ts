@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { IPC, type PluginScenicThemesDestinationMeta, type PluginViewMeta } from "@pi-desktop/shared";
+import { IPC, type PluginScenicThemesDestinationMeta, type PluginViewMeta, type PluginSidebarSectionMeta } from "@pi-desktop/shared";
+import { pluginSidebarItems } from "../plugin-sidebar-items";
 import { normalizeThemeAssetPath, pluginThemeId, resolvePluginLocalizedString, themeAssetUrl } from "@pi-desktop/plugin-sdk";
 import type { BrowserHost } from "../browser-host";
 import { BROWSER_PLUGIN_ID, BROWSER_VIEW_ID } from "../browser-host";
 import type { PluginRuntime } from "../plugin-runtime";
-import { resolveInsidePlugin as resolveInsidePluginRoot } from "../plugin-runtime";
+import { resolvePluginViewEntry as resolveInsidePluginRoot } from "../plugin-view-entry";
 import { PluginViewHost, pluginViewKey } from "../plugin-view-host";
 import { PluginPanelHost } from "../plugin-panel-host";
 import type { PluginPanelTheme } from "../../shared/plugin-panel-chrome";
@@ -35,6 +36,7 @@ export function registerPluginUiIpc({
   getUpdaterLocale,
   getPluginPanelTheme,
 }: PluginUiIpcDependencies): void {
+  const instanceItemRequests = new WeakMap<object, Map<string, Promise<unknown>>>();
   const handle = (channel: string, fn: (...args: any[]) => Promise<any>) => {
     registrar.handle(channel, fn);
   };
@@ -91,6 +93,7 @@ export function registerPluginUiIpc({
           pluginName: loaded.manifest.name,
           icon: view.icon,
           order: Number.isFinite(view.order) ? Number(view.order) : index,
+          placement: view.placement ?? "workpanel",
         });
       });
     }
@@ -103,6 +106,42 @@ export function registerPluginUiIpc({
         a.pluginName.localeCompare(b.pluginName) ||
         a.viewId.localeCompare(b.viewId),
     );
+  });
+
+  handle(IPC.invoke.pluginSidebarSections, async () => {
+    const workspacePath = currentWorkspacePath();
+    const sections: PluginSidebarSectionMeta[] = [];
+    await Promise.all(plugins.listLoaded().map(async loaded => {
+      const pluginId = loaded.manifest.id;
+      if (!loaded.permissions.has("ui.view") || !pluginActiveInProject(pluginId, workspacePath)) return;
+      for (const section of loaded.manifest.contributes?.sidebarSections ?? []) {
+        const view = loaded.manifest.contributes?.views?.find(view => view.id === section.viewId && view.placement === "main");
+        const path = view && resolveInsidePluginRoot(loaded.path, view.entry);
+        if (!path || !existsSync(path)) continue;
+        const meta: PluginSidebarSectionMeta = { pluginId, sectionId: section.id, title: resolvePluginLocalizedString(section.title, getUpdaterLocale(), section.id), icon: section.icon, order: section.order ?? 0, viewId: section.viewId, items: [] };
+        try {
+          let itemRequests = instanceItemRequests.get(loaded);
+          if (!itemRequests) { itemRequests = new Map(); instanceItemRequests.set(loaded, itemRequests); }
+          const key = JSON.stringify([pluginId, section.id, workspacePath]);
+          let request = itemRequests.get(key);
+          if (!request) {
+            request = plugins.invokePanelBridge(pluginId, section.itemsChannel, { sectionId: section.id });
+            itemRequests.set(key, request);
+            const requests = itemRequests;
+            void request.finally(() => { if (requests.get(key) === request) requests.delete(key); }).catch(() => {});
+          }
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            meta.items = pluginSidebarItems(await Promise.race([request, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Navigation provider timed out")), 2000); })]));
+          } finally { if (timer) clearTimeout(timer); }
+        } catch {
+          meta.error = "Navigation unavailable";
+        }
+        // A scope change during the asynchronous provider call cannot leak a stale roster.
+        if (workspacePath === currentWorkspacePath() && pluginActiveInProject(pluginId, workspacePath) && plugins.getLoaded(pluginId) === loaded) sections.push(meta);
+      }
+    }));
+    return sections.sort((a, b) => a.order - b.order || a.pluginId.localeCompare(b.pluginId) || a.sectionId.localeCompare(b.sectionId));
   });
 
   handle(IPC.invoke.pluginScenicThemesDestinations, async () => {
@@ -181,6 +220,7 @@ export function registerPluginUiIpc({
       sessionId?: string;
       location?: string;
       tabId?: string;
+      placement?: "main" | "workpanel";
     }) => {
       const pluginId = String(payload?.pluginId ?? "");
       const viewId = String(payload?.viewId ?? "");
@@ -199,7 +239,10 @@ export function registerPluginUiIpc({
         (candidate) => candidate?.id === viewId,
       );
       if (!view) throw new Error("plugin has no such view");
-      const htmlPath = join(loaded.path, view.entry);
+      const placement = payload.placement ?? "workpanel";
+      if (placement !== (view.placement ?? "workpanel")) throw new Error("view placement mismatch");
+      const htmlPath = resolveInsidePluginRoot(loaded.path, view.entry);
+      if (!htmlPath) throw new Error("view entry must stay inside the plugin");
       if (!existsSync(htmlPath)) throw new Error("view entry missing");
       if (isBrowserView && sessionId) {
         browserHost.setChromeSession(sessionId, typeof payload.tabId === "string" ? payload.tabId : undefined, location);
@@ -210,6 +253,7 @@ export function registerPluginUiIpc({
         locale: getUpdaterLocale(),
         theme: getPluginPanelTheme(),
         htmlPath,
+        placement,
         netDomains: loaded.manifest.net?.domains?.map((domain) => String(domain)),
         // The browser view owns an address bar and its own history, so its
         // location keeps going through `browserHost`; every other contributed
@@ -252,6 +296,10 @@ export function registerPluginUiIpc({
       const pluginId = String(payload?.pluginId ?? "");
       const viewId = String(payload?.viewId ?? "");
       const sessionId = String(payload?.sessionId ?? "").trim();
+      if (payload?.visible === true) {
+        const loaded = plugins.getLoaded(pluginId);
+        if (!loaded?.permissions.has("ui.view") || !pluginActiveInProject(pluginId, currentWorkspacePath())) throw new Error("PERMISSION_DENIED: view unavailable in current scope");
+      }
       if (
         payload?.visible === true &&
         sessionId &&

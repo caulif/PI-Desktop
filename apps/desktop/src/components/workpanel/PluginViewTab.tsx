@@ -25,6 +25,7 @@ export function PluginViewTab({
   sessionId,
   location,
   tabId,
+  placement = "workpanel",
 }: {
   pluginId: string;
   viewId: string;
@@ -34,6 +35,7 @@ export function PluginViewTab({
   sessionId?: string;
   location?: string;
   tabId?: string;
+  placement?: "main" | "workpanel";
 }) {
   const { t } = useTranslation();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -48,7 +50,7 @@ export function PluginViewTab({
   useEffect(() => {
     let current = true;
     const open = () => {
-      void api.pluginViewOpen(pluginId, viewId, { sessionId, location: locationRef.current, tabId }).then(
+      void api.pluginViewOpen(pluginId, viewId, { sessionId, location: locationRef.current, tabId, placement }).then(
         () => {
           if (current) setFailed(false);
         },
@@ -66,14 +68,16 @@ export function PluginViewTab({
       current = false;
       off();
     };
-  }, [pluginId, viewId, sessionId, viewLocation, tabId]);
+  }, [pluginId, viewId, sessionId, viewLocation, tabId, placement]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || failed) return;
-    void api.pluginViewSetVisible(pluginId, viewId, !blocked, sessionId);
+    let current = true;
+    void api.pluginViewSetVisible(pluginId, viewId, !blocked, sessionId).catch(() => { if (current) setFailed(true); });
     return () => {
-      void api.pluginViewSetVisible(pluginId, viewId, false);
+      current = false;
+      void api.pluginViewSetVisible(pluginId, viewId, false).catch(() => {});
     };
   }, [pluginId, viewId, blocked, failed, sessionId]);
 

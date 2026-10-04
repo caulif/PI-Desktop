@@ -1,4 +1,5 @@
 import i18n from "i18next";
+import { savePluginNavigation } from "../../lib/plugin-navigation";
 import type {
   AskToolResolution,
   PlanResolveRequest,
@@ -41,6 +42,7 @@ export function createInteractionSlice({
   | "canNavForward"
   | "navBack"
   | "navForward"
+  | "openPluginTarget"
   | "resolvePermission"
   | "resolveAsk"
   | "resolvePlan"
@@ -60,6 +62,8 @@ export function createInteractionSlice({
     },
 
     setPage: (page, opts) => {
+      savePluginNavigation(null);
+      set({ pluginTarget: null });
       runtime.beginNavigationIntent();
       const record = opts?.record !== false;
       set((state) => {
@@ -71,13 +75,25 @@ export function createInteractionSlice({
         const stack = state.navStack.slice(0, state.navIndex + 1);
         const last = stack[stack.length - 1];
         const same =
-          last?.page === entry.page && last?.sessionId === entry.sessionId;
+          !last?.pluginTarget && last?.page === entry.page && last?.sessionId === entry.sessionId;
         const nextStack = same ? stack : [...stack, entry].slice(-50);
         return {
           page,
           navStack: nextStack,
           navIndex: nextStack.length - 1,
         };
+      });
+    },
+
+    openPluginTarget: (pluginTarget, opts) => {
+      savePluginNavigation(pluginTarget);
+      runtime.beginNavigationIntent();
+      set(state => {
+        const stack = state.navStack.slice(0, state.navIndex + 1);
+        const last = stack[stack.length - 1]?.pluginTarget;
+        const same = last?.pluginId === pluginTarget.pluginId && last?.sectionId === pluginTarget.sectionId && last?.itemId === pluginTarget.itemId;
+        const next = opts?.record === false || same ? state.navStack : [...stack, { page: "chat" as const, pluginTarget }].slice(-50);
+        return { page: "chat", pluginTarget, pluginActivationRevision: state.pluginActivationRevision + 1, workPanelOpen: false, workPanelMaximized: false, navStack: next, navIndex: opts?.record === false ? state.navIndex : next.length - 1 };
       });
     },
 
@@ -98,7 +114,8 @@ export function createInteractionSlice({
       if (state.navIndex <= 0) return;
       const index = state.navIndex - 1;
       const entry = state.navStack[index];
-      set({ navIndex: index, page: entry.page });
+      savePluginNavigation(entry.pluginTarget ?? null);
+      set({ navIndex: index, page: entry.page, pluginTarget: entry.pluginTarget ?? null, pluginActivationRevision: state.pluginActivationRevision + 1 });
       if (entry.page === "chat" && entry.sessionId) {
         void get().selectSession(entry.sessionId, {
           record: false,
@@ -114,7 +131,8 @@ export function createInteractionSlice({
       if (state.navIndex >= state.navStack.length - 1) return;
       const index = state.navIndex + 1;
       const entry = state.navStack[index];
-      set({ navIndex: index, page: entry.page });
+      savePluginNavigation(entry.pluginTarget ?? null);
+      set({ navIndex: index, page: entry.page, pluginTarget: entry.pluginTarget ?? null, pluginActivationRevision: state.pluginActivationRevision + 1 });
       if (entry.page === "chat" && entry.sessionId) {
         void get().selectSession(entry.sessionId, {
           record: false,

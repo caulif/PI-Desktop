@@ -1,5 +1,7 @@
 import { type CSSProperties, lazy, type ReactNode, Suspense } from "react";
 import { ChatSurface } from "../../components/ChatSurface";
+import { PluginMainSurface } from "../../components/PluginMainSurface";
+import { useAppStore } from "../../stores/app-store";
 import { ConversationTopbar } from "../../components/ConversationTopbar";
 import { ExtensionPromptHost } from "../../components/ExtensionPromptDialog";
 import {
@@ -39,6 +41,7 @@ const PluginsPage = lazy(() =>
 );
 
 export function AppShell() {
+  const pluginTarget = useAppStore(state => state.pluginTarget);
   const {
     t,
     ready,
@@ -155,7 +158,7 @@ export function AppShell() {
 
             {!workPanelMaximized && (
               <section className="main-pane">
-                {page === "chat" ? (
+                {page === "chat" && !pluginTarget ? (
                   <ConversationTopbar
                     sidebarCollapsed={sidebarCollapsed}
                     workPanelOpen={presentedWorkPanelOpen}
@@ -170,6 +173,7 @@ export function AppShell() {
                       presentedWorkPanelOpen && "work-panel-open",
                     )}
                   >
+                    {pluginTarget && <div className="main-titlebar-left no-drag"><TooltipButton tooltip={t("settings.shortcutAction.navigateBack")} ariaLabel={t("settings.shortcutAction.navigateBack")} onClick={() => useAppStore.getState().navBack()}>←</TooltipButton><span>{pluginTarget.title}</span></div>}
                     {sidebarCollapsed && (
                       <div className="main-titlebar-left no-drag">
                         <CollapsedTitlebarActions
@@ -239,7 +243,7 @@ export function AppShell() {
                 )}
 
                 <Suspense fallback={<RoutePending />}>
-                  {page === "scheduled" ? (
+                  {pluginTarget && page === "chat" ? <PluginMainSurface blocked={searchOpen} /> : page === "scheduled" ? (
                     <div className="route-surface route-page">
                       <ScheduledPage />
                     </div>
@@ -254,7 +258,7 @@ export function AppShell() {
               </section>
             )}
 
-            {(presentedWorkPanelOpen || workPanelExiting) && (
+            {!pluginTarget && (presentedWorkPanelOpen || workPanelExiting) && (
               <WorkPanel
                 panelBlocked={searchOpen}
                 exiting={workPanelExiting}

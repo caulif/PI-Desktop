@@ -134,6 +134,8 @@ export type PluginManifest = {
     bus?: PluginBusContrib;
     /** Surfaces the plugin docks inside the host's work panel. */
     views?: PluginViewContrib[];
+    /** Data-only peer navigation sections beneath Projects. Requires ui.view. */
+    sidebarSections?: PluginSidebarSectionContrib[];
     /** External session namespaces this plugin may import and own. */
     sessionSources?: PluginSessionSourceContrib[];
     /**
@@ -626,6 +628,8 @@ export type PluginViewIcon = (typeof PLUGIN_VIEW_ICONS)[number];
  * plugin can ship "Changes" and "History" as two independent entries.
  */
 export type PluginViewContrib = {
+  /** Defaults to workpanel for backward compatibility. */
+  placement?: "workpanel" | "main";
   /** Plugin-local view id; `<pluginId>/<id>` addresses it globally. */
   id: string;
   /** Menu label. Localized objects are resolved against the host locale. */
@@ -636,6 +640,27 @@ export type PluginViewContrib = {
   entry: string;
   /** Ascending sort key within the plugin-views menu group. Defaults to 0. */
   order?: number;
+};
+
+/** Dynamic items are supplied by the plugin's existing panel invoke handler. */
+export type PluginSidebarSectionContrib = {
+  id: string;
+  title: PluginLocalizedString | string;
+  icon?: string;
+  order?: number;
+  /** Must reference a declared main-placement view. */
+  viewId: string;
+  /** Plugin-owned panel channel, never a host API channel. */
+  itemsChannel: string;
+};
+
+export type PluginSidebarItem = {
+  id: string;
+  title: string;
+  description?: string;
+  badge?: string;
+  /** Opaque JSON-compatible subject interpreted only by the plugin. */
+  location?: unknown;
 };
 
 export type PluginCommand = {
@@ -1789,6 +1814,7 @@ export function validateContributions(
 
   const viewIds = new Set<string>();
   for (const view of contributes.views ?? []) {
+    if (view?.placement !== undefined && view.placement !== "main" && view.placement !== "workpanel") return "invalid view placement";
     if (!view || typeof view !== "object") return "contributes.views entries must be objects";
     if (typeof view.id !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(view.id)) {
       return "contributes.views id must match [a-zA-Z][a-zA-Z0-9_-]{0,63}";
@@ -1814,6 +1840,20 @@ export function validateContributions(
   }
 
   const sessionSourceIds = new Set<string>();
+  const sidebarIds = new Set<string>();
+  if (contributes.sidebarSections !== undefined && !Array.isArray(contributes.sidebarSections)) return "sidebarSections must be an array";
+  if ((contributes.sidebarSections?.length ?? 0) > 8) return "at most eight sidebar sections are allowed";
+  for (const section of contributes.sidebarSections ?? []) {
+    if (!section || typeof section.id !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(section.id)) return "invalid sidebar section id";
+    if (sidebarIds.has(section.id)) return "duplicate sidebar section id";
+    sidebarIds.add(section.id);
+    const error = localizedStringError(section.title, "sidebar section title");
+    if (error) return error;
+    if (typeof section.title === "string" && !section.title.trim()) return "sidebar section requires a title";
+    if (!(contributes.views ?? []).some(view => view.id === section.viewId && view.placement === "main")) return "sidebar section requires a declared main view";
+    if (typeof section.itemsChannel !== "string" || !/^[a-zA-Z][a-zA-Z0-9:_-]{0,127}$/.test(section.itemsChannel) || section.itemsChannel.includes(".")) return "invalid sidebar items channel";
+    if (section.order !== undefined && !Number.isFinite(section.order)) return "invalid sidebar section order";
+  }
   for (const source of contributes.sessionSources ?? []) {
     if (!source || typeof source !== "object") {
       return "contributes.sessionSources entries must be objects";

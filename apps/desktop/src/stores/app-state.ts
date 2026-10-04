@@ -161,6 +161,11 @@ export type AppState = {
   pluginThemes: PluginTheme[];
   /** Work panel views contributed by loaded plugins, in menu order. */
   pluginViews: PluginViewMeta[];
+  pluginSidebarSections: import("@pi-desktop/shared").PluginSidebarSectionMeta[];
+  pluginSidebarScope: string | null;
+  pluginActivationRevision: number;
+  pluginTarget: { pluginId: string; sectionId: string; itemId: string; viewId: string; title: string; location?: unknown } | null;
+  openPluginTarget: (target: NonNullable<AppState["pluginTarget"]>, opts?: { record?: boolean }) => void;
   /** Per-session permission queue, oldest first. */
   pendingPermissions: PermissionQueues;
   /** Inline asktool requests, queued per session without an expiry. */
@@ -183,7 +188,7 @@ export type AppState = {
   settingsAnchor: string | null;
   /** Bumped by every setSettingsTab so a same-tab navigation is observable. */
   settingsTabNonce: number;
-  navStack: Array<{ page: AppState["page"]; sessionId?: string }>;
+  navStack: Array<{ page: AppState["page"]; sessionId?: string; pluginTarget?: NonNullable<AppState["pluginTarget"]> }>;
   navIndex: number;
   error?: string | null;
   errorCode?: string | null;
