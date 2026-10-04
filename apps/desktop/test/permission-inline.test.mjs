@@ -320,7 +320,7 @@ test("session and page navigation share the latest-intent guard", () => {
     storeSource.match(/navigationIntentIsCurrent\(intent\)/g)?.length >= 12,
     "navigation intent must be checked after asynchronous boundaries",
   );
-  assert.match(interactionSource, /setPage: \(page, opts\) => \{\s*runtime\.beginNavigationIntent\(\)/);
+  assert.match(interactionSource, /setPage: \(page, opts\) => \{\s*savePluginNavigation\(null\);\s*set\(\{ pluginTarget: null \}\);\s*runtime\.beginNavigationIntent\(\)/);
   assert.match(storeSource, /activateProject: async \(path, opts\)/);
   assert.match(storeSource, /clearProject: async \(opts\)/);
 });
