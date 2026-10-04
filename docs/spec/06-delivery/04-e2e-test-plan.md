@@ -10,6 +10,9 @@ loads the actual pi-bot release with explicitly seeded UI-only Bot/Conversation
 records: this verifies its native shell, theme and file-details presentation,
 not provisioning or model execution. Host chrome and guest WebContentsView
 screenshots are captured separately because CDP does not composite child views.
+Embedded guest capture can return a blank frame even when DOM/context assertions
+pass. Inspect those files before claiming visual acceptance; a blank PNG provides
+no visual evidence. The automated result proves only its interaction assertions.
 
 Run the probe against the task candidate's
 built Electron app, reusing the host runtime/dependencies and isolating both
