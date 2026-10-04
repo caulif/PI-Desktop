@@ -1,5 +1,29 @@
 # 02. Plugin Manifest Schema
 
+## Peer navigation and view placement (ADR 0310)
+
+`contributes.views[].placement` is optional: `workpanel` preserves the current
+default; `main` declares a main-content isolated view and excludes it from the
+work-panel launcher. A plugin wanting both placements declares two view IDs with
+the same HTML entry. `ui.view` continues to govern both; no new global permission
+is implied.
+
+`contributes.sidebarSections` contains at most eight `{id,title,icon?,order?,viewId,
+itemsChannel}` declarations. IDs follow the view-ID syntax, titles use the existing
+localized-string contract, and `viewId` must belong to a declared main view.
+`itemsChannel` is a plugin-owned channel matching `[a-zA-Z][a-zA-Z0-9:_-]{0,127}`;
+host API names containing dots are rejected. It is handled by `onPanelInvoke`.
+The handler receives `{sectionId}` and returns an array, or `{ok:true,data:array}`.
+Each pure item is `{id,title,description?,badge?,location?}`; identity is stable,
+text is rendered literally, and location is an opaque JSON-compatible subject.
+
+Each result has at most 100 items and 65,536 serialized characters. Item IDs,
+titles, descriptions and badges have limits 128/200/300/32 and disallow controls;
+duplicate IDs, invalid envelopes and malformed data fail closed. Providers have a
+two-second UI timeout and one in-flight call per section. Sections are ordered by
+order/plugin/section and rendered below Projects in a bounded scroll region.
+Listing and opening obey the current plugin activation scope, not item metadata.
+
 ## Appearance extensions
 
 `contributes.themes[].variables` declares typed custom properties that the same

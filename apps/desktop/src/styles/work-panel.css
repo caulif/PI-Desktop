@@ -718,6 +718,22 @@
   display: flex;
 }
 
+/* Project and plugin sections share one scroll budget; the footer stays fixed. */
+.sidebar-project-navigation-stack { min-height: 0; flex: 1; overflow: auto; }
+.sidebar-project-navigation-stack .sidebar-session-groups { flex: 0 0 auto; overflow: visible; }
+.plugin-sidebar-scroll { min-height: 0; }
+.plugin-sidebar-section { padding: 0 4px 8px; }
+.plugin-sidebar-heading { width: 100%; justify-content: space-between; background: transparent; border: 0; }
+.plugin-sidebar-items { display: flex; flex-direction: column; gap: 2px; }
+.plugin-sidebar-item { min-width: 0; width: 100%; justify-content: flex-start; gap: 8px; color: var(--ds-text-primary); background: transparent; border: 0; }
+.plugin-sidebar-item:hover, .plugin-sidebar-item.is-active { background: var(--ds-bg-hover); }
+.plugin-sidebar-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-sidebar-item-description { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-muted); font-size: var(--text-xs); }
+.plugin-sidebar-item-badge { color: var(--ds-text-secondary); }
+.plugin-sidebar-error { color: var(--ds-text-muted); font-size: var(--text-xs); padding: 8px; }
+.plugin-main-surface { min-height: 0; min-width: 0; flex: 1; display: flex; margin-top: var(--ds-toolbar-height); background: var(--ds-bg-primary); }
+.plugin-main-unavailable { margin: auto; color: var(--ds-text-secondary); }
+
 /* Fallback for a view whose icon token this build does not know. Sized to the
    15px icon box the launcher rows use so rows never shift between tools. */
 .work-panel-view-initial {

@@ -1223,11 +1223,12 @@ export const api = {
    * entry existence, with titles resolved for the active locale (ADR 0104).
    */
   listPluginViews: () => invoke<PluginViewMeta[]>(IPC.invoke.pluginViews),
+  listPluginSidebarSections: () => invoke<import("@pi-desktop/shared").PluginSidebarSectionMeta[]>(IPC.invoke.pluginSidebarSections),
   /** Create or reuse the view's web contents. Does not show it. */
   pluginViewOpen: (
     pluginId: string,
     viewId: string,
-    extra?: { sessionId?: string; location?: string; tabId?: string },
+    extra?: { sessionId?: string; location?: string; tabId?: string; placement?: "main" | "workpanel" },
   ) => invoke(IPC.invoke.pluginViewOpen, { pluginId, viewId, ...extra }),
   pluginViewClose: (pluginId: string, viewId: string, extra?: { sessionId: string; tabId?: string }) =>
     invoke(IPC.invoke.pluginViewClose, { pluginId, viewId, ...extra }),

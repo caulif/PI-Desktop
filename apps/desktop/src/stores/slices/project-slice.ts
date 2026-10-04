@@ -1,4 +1,5 @@
 import i18n from "i18next";
+import { savePluginNavigation } from "../../lib/plugin-navigation";
 import type { ProjectWorkspace } from "@pi-desktop/shared";
 import { api } from "../../lib/api";
 import {
@@ -245,6 +246,8 @@ export function createProjectSlice({
 > {
   return {
     activateProject: async (path, opts) => {
+      savePluginNavigation(null);
+      set({ pluginTarget: null, pluginSidebarSections: [] });
       const intent = opts?.navigationIntent ?? runtime.beginNavigationIntent();
       const preserveConversation = runtime.isSessionSelectionForIntent(intent);
       const requestedPath = path.trim();
@@ -387,6 +390,8 @@ export function createProjectSlice({
     },
 
     clearProject: async (opts) => {
+      savePluginNavigation(null);
+      set({ pluginTarget: null, pluginSidebarSections: [] });
       const intent = opts?.navigationIntent ?? runtime.beginNavigationIntent();
       const preserveConversation = runtime.isSessionSelectionForIntent(intent);
       await api.clearProject();

@@ -125,6 +125,7 @@ export type PluginPermissionReview = {
  * is a token from the SDK's closed list, not plugin markup.
  */
 export type PluginViewMeta = {
+  placement?: "workpanel" | "main";
   pluginId: string;
   /** Plugin-local view id from `contributes.views[].id`. */
   viewId: string;
@@ -136,6 +137,18 @@ export type PluginViewMeta = {
   pluginName: string;
   icon?: string;
   order: number;
+};
+
+export type PluginSidebarSectionMeta = {
+  pluginId: string;
+  sectionId: string;
+  title: string;
+  icon?: string;
+  order: number;
+  viewId: string;
+  items: Array<{ id: string; title: string; description?: string; badge?: string; location?: unknown }>;
+  /** Provider errors remain visible instead of masquerading as an empty roster. */
+  error?: string;
 };
 
 /** A data-only scenic Settings destination rendered by the host React tree. */

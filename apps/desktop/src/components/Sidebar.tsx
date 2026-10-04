@@ -1,4 +1,5 @@
 import { IconClock } from "./icons";
+import { PluginSidebarSections } from "./PluginSidebarSections";
 import {
   useCallback,
   useEffect,
@@ -2427,6 +2428,7 @@ export function Sidebar({
           </div>
         </section>
 
+        <div className="sidebar-project-navigation-stack" onScroll={() => closeMenus(false)}>
         <div
           className="sidebar-list-toolbar"
           data-sidebar-section="projects"
@@ -2488,6 +2490,8 @@ export function Sidebar({
           )}
         </div>
 
+        <div className="plugin-sidebar-scroll no-drag"><PluginSidebarSections /></div>
+        </div>
         <div className="sidebar-footer no-drag">
           <div className="footer-actions">
             <TooltipButton

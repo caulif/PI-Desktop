@@ -176,7 +176,7 @@ test("work panel uses the fixed-window internal dock", () => {
   // before unmounting, so MainChat reflows continuously in both directions.
   assert.match(
     appSource,
-    /<\/section>\s*\)\}\s*\{\(presentedWorkPanelOpen \|\| workPanelExiting\) && \(?\s*<WorkPanel/,
+    /<\/section>\s*\)\}\s*\{!pluginTarget && \(presentedWorkPanelOpen \|\| workPanelExiting\) && \(?\s*<WorkPanel/,
   );
   assert.doesNotMatch(
     appSource,
@@ -234,7 +234,7 @@ test("work panel header exposes a scrollable tab strip and direct new-page actio
   assert.match(panelSource, /event\.button !== 1/);
   assert.match(panelSource, /workPanelTools\(t, pluginViews\)/);
   assert.match(panelSource, /toolWorkPanelTab\("review"\)/);
-  assert.match(panelSource, /pluginViews\.map\(\(view\) =>/);
+  assert.match(panelSource, /pluginViews\.filter\(view => view\.placement !== "main"\)\.map\(\(view\) =>/);
   assert.doesNotMatch(panelSource, /HEADER_TOOLS|headerToolTab|HeaderToolKind/);
   // Launchable tools are plugin views (`pi.file-manager`, `pi.browser`, …). The
   // `file` *kind* remains: a `file:<path>` tab is a transcript artifact.

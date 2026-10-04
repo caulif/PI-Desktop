@@ -77,7 +77,7 @@ test("a plugin view counts as a tool, not a transcript resource", () => {
 test("the blank page launcher renders plugin views from the data-driven list", () => {
   assert.match(panelSource, /workPanelTools\(t, pluginViews\)/);
   assert.match(panelSource, /panel\.toolsAndPanels/);
-  assert.match(panelSource, /pluginViews\.map\(\(view\) =>/);
+  assert.match(panelSource, /pluginViews\.filter\(view => view\.placement !== "main"\)\.map\(\(view\) =>/);
   // Rows carry the same affordances as the host-owned Review row, so a plugin
   // surface is not visibly second-class.
   assert.match(panelSource, /className="work-panel-launcher-row"/);
