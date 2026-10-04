@@ -69,6 +69,16 @@ pub struct ToolPermit {
     _session_mutation: Option<OwnedSemaphorePermit>,
 }
 
+/// Admission futures can be dropped when their exact tool call is cancelled.
+/// Keep queue accounting correct on both settlement and future cancellation.
+struct QueuedCallGuard(Arc<AtomicUsize>);
+
+impl Drop for QueuedCallGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ToolBudgetSnapshot {
     pub active: usize,
@@ -129,8 +139,8 @@ impl ToolBudget {
         }
 
         let queue_depth = self.queued.fetch_add(1, Ordering::SeqCst) + 1;
+        let _queued = QueuedCallGuard(self.queued.clone());
         if queue_depth > MAX_QUEUED_TOOLS {
-            self.queued.fetch_sub(1, Ordering::SeqCst);
             return Err(AdmissionError::QueueFull { queue_depth });
         }
 
@@ -144,8 +154,6 @@ impl ToolBudget {
             ),
         )
         .await;
-        self.queued.fetch_sub(1, Ordering::SeqCst);
-
         match result {
             Ok(permit) => Ok(permit),
             Err(_) => Err(AdmissionError::QueueWaitTimeout),

@@ -306,6 +306,31 @@ test("quitting is not held open by a plugin that will not unload", async () => {
   assert.deepEqual(runtime.listLoaded(), []);
 });
 
+test("quit quiescence suppresses completion and due admission while keeping unload alive", async (t) => {
+  const { dir } = writeServicePlugin({ main: `
+    module.exports = { onUnload: async () => pi.ui.showToast("metadata can still settle") };
+  ` });
+  const { runtime } = createRuntime(t);
+  await runtime.loadFromPath(dir);
+  const loaded = runtime.listLoaded()[0];
+  const child = loaded.child, messages = [];
+  const send = child.postMessage.bind(child);
+  child.postMessage = (message) => { messages.push(message); send(message); };
+  runtime.broadcastEvent("session:turnEnded", [{ sessionId: "owned" }]);
+  assert.equal(messages.filter(message => message.t === "event").length, 1);
+  runtime.quiesceForShutdown();
+  const before = messages.length;
+  runtime.broadcastEvent("session:turnEnded", [{ sessionId: "owned" }]);
+  assert.equal(runtime.deliverPluginScheduleDue(loaded.manifest.id, { occurrenceId: "due" }), false);
+  assert.equal(messages.length, before, "quit-aborted turns must not wake deferred plugin work");
+  await assert.rejects(runtime.invokePanelBridge(loaded.manifest.id, "send", {}),
+    error => error.code === "PLUGIN_UNLOADED");
+  assert.equal(runtime.listLoaded().length, 1, "quiescence preserves the child until panel teardown");
+  await runtime.disposeAll();
+  assert.deepEqual(runtime.drainToasts(), ["metadata can still settle"]);
+  assert.deepEqual(runtime.listLoaded(), []);
+});
+
 test("app shutdown tears plugin hosts down", () => {
   const shutdown = mainSrc.slice(
     mainSrc.indexOf('logger.app("lifecycle", "info", "app shutdown")'),

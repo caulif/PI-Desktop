@@ -14,6 +14,7 @@ export async function invokePluginVerification(
   input: McpControlInvokeInput,
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   confirm: (check: unknown) => Promise<boolean>,
+  isShuttingDown?: () => boolean,
 ): Promise<unknown> {
   const pluginId = input.pluginContext?.pluginId;
   if (input.source !== "plugin" || !pluginId) {
@@ -27,11 +28,19 @@ export async function invokePluginVerification(
   if (["token", "claimToken", "authorized", "nativeAuthorized", "pluginId"].some((key) => Object.hasOwn(params, key))) {
     throw Object.assign(new Error("trusted verification fields are not plugin arguments"), { code: "PERMISSION_DENIED" });
   }
+  const requireAdmission = () => {
+    if (isShuttingDown?.() && ["verification/approveCheck", "verification/runApprovedCheck"].includes(input.operation)) {
+      throw Object.assign(new Error("Application is shutting down; no new verification is admitted"), { code: "PLUGIN_UNLOADED" });
+    }
+  };
+  requireAdmission();
   if (input.operation === "verification/approveCheck") {
     const challenge = await call("plugin.verification.beginApproval", { ...params, pluginId }) as { token: string; check: unknown };
+    requireAdmission();
     if (!await confirm(challenge.check)) {
       throw Object.assign(new Error("fixed check approval declined"), { code: "PERMISSION_DENIED" });
     }
+    requireAdmission();
     return call("plugin.verification.approveCheck", { token: challenge.token });
   }
   const methods: Record<string, string> = {

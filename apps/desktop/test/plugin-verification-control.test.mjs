@@ -34,6 +34,30 @@ test("MCP and plugin-authored consent or identity are refused before Host calls"
   assert.equal(calls, 0);
 });
 
+test("quit blocks a late exact-check approval but preserves cancellation and lookup", async () => {
+  const calls = [];
+  let quitting = false;
+  const call = async (method, params) => {
+    calls.push({ method, params });
+    return { token: "unconsumed-main-only", check: { digest: "exact" } };
+  };
+  await assert.rejects(invokePluginVerification(input, call, async () => {
+    quitting = true;
+    return true;
+  }, () => quitting), error => error.code === "PLUGIN_UNLOADED");
+  assert.deepEqual(calls.map(call => call.method), ["plugin.verification.beginApproval"]);
+  await assert.rejects(invokePluginVerification({ ...input, operation: "verification/runApprovedCheck" },
+    call, async () => { throw Error("no dialog"); }, () => quitting), error => error.code === "PLUGIN_UNLOADED");
+  for (const operation of ["cancelExecution", "lookupExecution"]) {
+    await invokePluginVerification({ ...input, operation: "verification/" + operation,
+      args: [{ executionId: "owned-execution" }] }, call, async () => { throw Error("no dialog"); }, () => quitting);
+  }
+  assert.deepEqual(calls.slice(1), [
+    { method: "plugin.verification.cancelExecution", params: { executionId: "owned-execution", pluginId: "owner" } },
+    { method: "plugin.verification.lookupExecution", params: { executionId: "owned-execution", pluginId: "owner" } },
+  ]);
+});
+
 test("verification catalog is plugin-only and recovery dispatch never starts a check", async () => {
   const controller = createMcpControlController({ channels: {}, invoke: async () => {},
     invokePluginVerification: async (request) => request });

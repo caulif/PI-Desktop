@@ -1273,6 +1273,7 @@ function parseSpeechAdapterReply(value: unknown): {
 }
 
 export class PluginRuntime {
+  private shutdownQuiesced = false;
   private commands = new Map<string, RegisteredCommand>();
   private tools = new Map<string, RegisteredPluginTool>();
   private speechAdapters = new Map<string, {
@@ -1678,6 +1679,7 @@ export class PluginRuntime {
    * half (spec 07 §5).
    */
   broadcastEvent(event: string, args: unknown[] = []): void {
+    if (this.shutdownQuiesced) return;
     for (const loaded of this.loaded.values()) {
       try {
         loaded.child?.postMessage({ t: "event", event, args });
@@ -1698,6 +1700,7 @@ export class PluginRuntime {
 
   /** Address a durable scheduler occurrence only to its owning loaded plugin. */
   deliverPluginScheduleDue(pluginId: string, occurrence: unknown): boolean {
+    if (this.shutdownQuiesced) return false;
     const loaded = this.loaded.get(pluginId);
     if (!loaded?.child) return false;
     try {
@@ -1931,6 +1934,18 @@ export class PluginRuntime {
     this.devPlugins.clear();
   }
 
+  /** Close execution admission before quit aborts turns, without tearing down
+   * panels or metadata writes needed to preserve pending Work and unload hooks.
+   */
+  quiesceForShutdown(): void {
+    this.shutdownQuiesced = true;
+    for (const loaded of this.loaded.values()) {
+      loaded.disposing = true;
+      this.cancelRestarts(loaded.manifest.id);
+    }
+    this.disposeWatchers();
+  }
+
   /**
    * Tear every plugin host down for app quit.
    *
@@ -1944,6 +1959,7 @@ export class PluginRuntime {
    * `onUnload` must never be the reason the app appears to hang on quit.
    */
   async disposeAll(): Promise<void> {
+    this.quiesceForShutdown();
     this.mcpCalls.cancelAll();
     const loadedPlugins = [...this.loaded.values()];
     // Mark first, in one pass: a child that dies while a sibling is still
@@ -2057,6 +2073,7 @@ export class PluginRuntime {
     payload?: Record<string, unknown>,
     context?: PluginPanelBridgeContext,
   ): Promise<unknown> {
+    if (this.shutdownQuiesced) throw apiError("PLUGIN_UNLOADED", "Application is shutting down");
     const loaded = this.loaded.get(pluginId);
     if (!loaded) throw apiError("NOT_FOUND", `plugin not loaded: ${pluginId}`);
     if (channel === "scheduled.authorizeManual") {
@@ -2079,6 +2096,7 @@ export class PluginRuntime {
         args: [{ routineId, sessionId, contentHash, requestIntentId }],
       }) : false;
       if (!granted) throw apiError("PERMISSION_DENIED", "Manual Routine run was not authorized");
+      if (this.shutdownQuiesced) throw apiError("PLUGIN_UNLOADED", "Application is shutting down");
       const token = randomUUID();
       this.manualRoutineAuthorizations.set(token, { pluginId, requestIntentId, routineId,
         sessionId, contentHash, expiresAt: Date.now() + 60_000 });
@@ -2108,6 +2126,7 @@ export class PluginRuntime {
           promptTemplateHash: fields.promptTemplateHash }],
       }) : false;
       if (!granted) throw apiError("PERMISSION_DENIED", "Routine schedule was not authorized");
+      if (this.shutdownQuiesced) throw apiError("PLUGIN_UNLOADED", "Application is shutting down");
       const control = this.services.desktopControl;
       if (!control) throw apiError("UNSUPPORTED", "desktop control is unavailable");
       return control.invoke({ operation: "scheduled/pluginUpsert", args: [fields],
@@ -2125,6 +2144,7 @@ export class PluginRuntime {
         args: [{ sessionId }],
       }) : false;
       if (!granted) throw apiError("PERMISSION_DENIED", "Session adoption was not authorized");
+      if (this.shutdownQuiesced) throw apiError("PLUGIN_UNLOADED", "Application is shutting down");
       const control = this.services.desktopControl;
       if (!control) throw apiError("UNSUPPORTED", "desktop control is unavailable");
       return control.invoke({ operation: "scheduled/pluginAdoptSession", args: [{ sessionId }],
@@ -2867,6 +2887,7 @@ export class PluginRuntime {
         return this.services.usage.listTurns(loaded.manifest.id, input);
       }
       case "agent.complete": {
+        if (this.shutdownQuiesced) throw apiError("PLUGIN_UNLOADED", "Application is shutting down");
         return this.runAgentComplete(loaded, (args[0] ?? {}) as PluginCompleteInput);
       }
       default: {
@@ -5043,6 +5064,16 @@ export class PluginRuntime {
           const operationInfo = this.services.desktopControl.operations.find(
             (candidate) => candidate.id === operation,
           );
+          const assertAdmission = () => {
+            // Lookup and exact cancellation remain available to in-flight stop
+            // reconciliation; quit must not create new execution or scheduling.
+            if (this.shutdownQuiesced && operationInfo?.risk !== "read" &&
+                !["agent/abort", "agent/promptInvalidate", "scheduled/pluginDisable", "scheduled/pluginSkip",
+                  "verification/cancelExecution", "verification/revokeCheck"].includes(operation)) {
+              throw apiError("PLUGIN_UNLOADED", "Application is shutting down; no new execution is admitted");
+            }
+          };
+          assertAdmission();
           // The controller's `confirm` flag is an acknowledgement by the
           // caller, not a decision by the user. A plugin can set it at will,
           // so a dangerous operation additionally needs the host's native
@@ -5087,6 +5118,7 @@ export class PluginRuntime {
             }
           }
           try {
+            assertAdmission();
             const invocation = this.inFlightTool(pluginId);
             const result = await this.services.desktopControl.invoke({
               operation,

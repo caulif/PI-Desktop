@@ -204,6 +204,11 @@ test("late tool metadata cleanup is scoped to the turn that started the call", (
   );
 });
 
+test("quit closes plugin admission before aborting turns can wake the queue", () => {
+  assert.ok(shutdownModuleSource.indexOf("plugins.quiesceForShutdown()") <
+    shutdownModuleSource.indexOf("await settleRunningTurnsForQuit("));
+});
+
 test("app quit waits for one idempotent teardown before allowing the follow-up quit", () => {
   const shutdownSource = shutdownModuleSource.slice(
     shutdownModuleSource.indexOf('app.on("before-quit"'),

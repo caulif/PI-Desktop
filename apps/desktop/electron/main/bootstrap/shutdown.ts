@@ -38,7 +38,7 @@ export type ShutdownDependencies = {
   persistenceOutbox: PersistenceOutbox;
   inflightCheckpointer: InflightCheckpointer;
   pluginPanels: Pick<PluginPanelHost, "closeAll">;
-  plugins: Pick<PluginRuntime, "disposeAll">;
+  plugins: Pick<PluginRuntime, "quiesceForShutdown" | "disposeAll">;
   userMcp: Pick<UserMcpRuntime, "disposeAll">;
   mcpOAuth?: Pick<McpOAuthManager, "disposeAll">;
   browserHost: Pick<BrowserHost, "dispose">;
@@ -131,6 +131,10 @@ export function registerShutdownHandlers({
       state.toggleWindowAccelerator = null;
     }
     state.shutdownPromise = (async () => {
+      // Abort emits turn-ended events. Close plugin admission synchronously
+      // first so a deferred queue cannot start a new paid turn during quit.
+      // Keep the runtime alive until panels close and pending metadata settles.
+      plugins.quiesceForShutdown();
       // Close every paired remote host before the local host-core so any
       // in-flight remote turn's abort still goes over a live socket. Bounded
       // parallelism inside `closeAll`; safe to run before local disposals.

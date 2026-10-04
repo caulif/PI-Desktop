@@ -3912,7 +3912,17 @@ async fn handle_request(
                     let st = state.lock().await;
                     st.tool_budget.clone()
                 };
-                let _tool_permit = match tool_budget.acquire(&p.session_id, &p.tool_name).await {
+                let mut admission_cancellation = cancellation_receiver.clone();
+                let admission = tokio::select! {
+                    biased;
+                    _ = wait_for_bash_cancellation(&mut admission_cancellation) => {
+                        return serde_json::to_value(shell_failure_result(
+                            &p, "TOOL_ABORTED", "tool aborted", permission_shell_id.clone(), call_started,
+                        )).map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"));
+                    }
+                    result = tool_budget.acquire(&p.session_id, &p.tool_name) => result,
+                };
+                let _tool_permit = match admission {
                     Ok(permit) => permit,
                     Err(error) => {
                         tracing::warn!(
@@ -7677,7 +7687,6 @@ mod tests {
                 .unwrap();
                 assert_eq!(aborted["aborted"], true);
             }
-            drop(permits);
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
                 .await
                 .unwrap()
@@ -7689,6 +7698,9 @@ mod tests {
                 "cancellation is not a permission denial"
             );
             assert_eq!(budget.snapshot().queued, 0);
+            // Capacity remains occupied until after cancellation settles: releasing
+            // it earlier would mask an uncancellable admission wait.
+            drop(permits);
             if let Some(request_id) = permission_id {
                 let late = handle_request(
                     state.clone(),

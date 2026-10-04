@@ -978,7 +978,7 @@ registerApplicationStartup({
     const result = window && !window.isDestroyed()
       ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
     return result.response === 1;
-  }),
+  }, () => shutdownState.quitting),
   invokePluginSchedule: (input, invoke) => invokePluginSchedule(input, async (method, params) => {
     const host = getHost();
     if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
