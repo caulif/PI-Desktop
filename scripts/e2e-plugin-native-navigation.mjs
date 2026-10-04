@@ -141,6 +141,9 @@ try {
     await actual.eval("document.querySelector('button[aria-controls=\"companion-chat\"]').click()");
     await actual.eval("(document.querySelector('button[aria-label=\"同伴详情\"]') ?? [...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='详情')).click()");
     await waitFor(() => actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');return Boolean(dialog&&dialog.getBoundingClientRect().width>0&&dialog.innerText.includes('原生验收同伴')&&dialog.innerText.includes('文件'))})()"), "actual visible Bot file details drawer");
+    // Opening the real inspector starts its entry animation. DOM presence is
+    // insufficient for a visual capture: wait for opaque, settled composition.
+    await waitFor(() => actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');return Boolean(dialog&&getComputedStyle(dialog).opacity==='1'&&!dialog.getAnimations({subtree:true}).some(animation=>animation.playState==='running'||animation.pending))})()"), "actual Bot details animation settled");
     const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
     await host.eval(`__PI_DESKTOP__.selectSession(${JSON.stringify(created.session.id)})`);
     assert.equal(await host.eval("Boolean(document.querySelector('[data-plugin-main-surface]'))"), false);
