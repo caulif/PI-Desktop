@@ -3099,7 +3099,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             })
           : undefined;
         const abort = () => {
-          if ((!isBash && toolName !== "GenerateImages") || abortRequested || settled) return;
+          if ((!isBash && toolName !== "GenerateImages" && !toolName.startsWith("plugin_")) || abortRequested || settled) return;
           abortRequested = true;
           abortPromise = this.host
             .call("tools.abort", {
@@ -8256,6 +8256,11 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.providerRetryAbort?.abort();
     if (this.compactionInProgress) this.compactionAborted = true;
     this.compactionAbort?.abort();
+  }
+
+  /** External cancellation barrier; never await this from an agent listener. */
+  async waitForIdle(): Promise<void> {
+    await this.agent.waitForIdle();
   }
 
   /** Ask pi-agent-core to stop after the current assistant/tool turn. */

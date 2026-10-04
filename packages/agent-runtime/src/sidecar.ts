@@ -506,6 +506,9 @@ async function handle(method: string, params: any): Promise<unknown> {
       await hostProxy.call("plans.abort", { sessionId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
       if (runtime && runtimes.get(sessionId) === runtime && (!turnId || runtime.getStatus().currentTurnId === turnId)) {
         await runtime.abort();
+        // The signal is not settlement: an approval waiter must unwind and
+        // pi-agent-core must release its active run before Main reports idle.
+        await runtime.waitForIdle();
       }
       return { ok: true };
     }
