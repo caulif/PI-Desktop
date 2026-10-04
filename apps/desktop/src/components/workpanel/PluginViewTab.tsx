@@ -43,6 +43,7 @@ export function PluginViewTab({
   locationRef.current = location;
   const viewLocation = pluginId === "pi.browser" && viewId === "browser" ? undefined : location;
   const [failed, setFailed] = useState(false);
+  const [openedRevision, setOpenedRevision] = useState(0);
 
   // Create the view, and re-create it whenever the plugin's lifecycle changed
   // underneath us: a crash, a development reload, or a re-enable all destroy
@@ -52,7 +53,13 @@ export function PluginViewTab({
     const open = () => {
       void api.pluginViewOpen(pluginId, viewId, { sessionId, location: locationRef.current, tabId, placement }).then(
         () => {
-          if (current) setFailed(false);
+          if (current) {
+            setFailed(false);
+            // Opening and showing cross separate asynchronous IPC boundaries.
+            // Reapply visibility/bounds after the entry actually exists, also
+            // when a development reload replaces an already-mounted view.
+            setOpenedRevision((revision) => revision + 1);
+          }
         },
         () => {
           if (current) setFailed(true);
@@ -79,7 +86,7 @@ export function PluginViewTab({
       current = false;
       void api.pluginViewSetVisible(pluginId, viewId, false).catch(() => {});
     };
-  }, [pluginId, viewId, blocked, failed, sessionId]);
+  }, [pluginId, viewId, blocked, failed, sessionId, openedRevision]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -106,7 +113,7 @@ export function PluginViewTab({
       window.removeEventListener("resize", report);
       cancelAnimationFrame(frame);
     };
-  }, [pluginId, viewId, failed]);
+  }, [pluginId, viewId, failed, openedRevision]);
 
   if (failed) {
     return (
