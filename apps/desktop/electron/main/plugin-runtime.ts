@@ -1714,7 +1714,10 @@ export class PluginRuntime {
       throw new Error(`PLUGIN_INVALID: ${validated.error}`);
     }
     const manifest = validated.manifest;
-    await this.unload(manifest.id);
+    // Cold loading is not an explicit unload: its persisted authority must
+    // survive startup. Replacing a live instance still revokes through unload;
+    // explicit unload remains authoritative even if an instance has crashed.
+    if (this.loaded.has(manifest.id)) await this.unload(manifest.id);
 
     const mainPath = resolveInsidePlugin(pluginPath, manifest.main);
     if (!mainPath) {

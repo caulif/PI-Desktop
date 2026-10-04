@@ -43,6 +43,14 @@ discovered
 
 **Implemented today:** the runtime (`apps/desktop/electron/main/plugin-runtime.ts`) invokes `onLoad` (when a plugin is loaded on load/enable) and `onUnload` (dispatched into the plugin process on unload/disable/reload/app quit, 5s budget — 1.5s on quit — then the process is stopped); unloading tears down the plugin's registered commands and tools. The other hooks below are declared in the API but not yet fired.
 
+Cold-load preflight unloads only an existing live instance. An initial load
+must not signal the host's `onPluginUnload` authority-revocation callback, since
+there is no prior runtime instance to replace. Replacing a loaded instance still
+runs the full unload boundary. Explicit `unload` remains authoritative even
+when no live instance exists (for example after a crash): the host callback
+still revokes persisted execution authority. These distinct paths are covered
+by `plugin-cold-load-authority.test.mjs` using the real plugin runtime/process.
+
 **Planned:** once the full lifecycle lands, hooks fire in this order:
 
 1. `onInstall` (once, only after a successful install)
