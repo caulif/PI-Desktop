@@ -141,9 +141,23 @@ try {
     await actual.eval("document.querySelector('button[aria-controls=\"companion-chat\"]').click()");
     await actual.eval("(document.querySelector('button[aria-label=\"同伴详情\"]') ?? [...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='详情')).click()");
     await waitFor(() => actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');return Boolean(dialog&&dialog.getBoundingClientRect().width>0&&dialog.innerText.includes('原生验收同伴')&&dialog.innerText.includes('文件'))})()"), "actual visible Bot file details drawer");
-    // Opening the real inspector starts its entry animation. DOM presence is
-    // insufficient for a visual capture: wait for opaque, settled composition.
-    await waitFor(() => actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');return Boolean(dialog&&getComputedStyle(dialog).opacity==='1'&&!dialog.getAnimations({subtree:true}).some(animation=>animation.playState==='running'||animation.pending))})()"), "actual Bot details animation settled");
+    // Capture a real guest frame before waiting: an occluded embedded surface
+    // may otherwise retain an entry animation awaiting its first compositor frame.
+    // Descendant spinners do not govern whether the drawer entry has finished.
+    const transition = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    writeFileSync(join(artifacts, "actual-plugin-files-transition.png"), Buffer.from(transition.data, "base64"));
+    await delay(200); // modal-appear is a 160 ms finite entry animation.
+    const animationObservations = [];
+    await waitFor(async () => {
+      const state = await actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');if(!dialog)return null;const animations=dialog.getAnimations().filter(animation=>animation.animationName==='modal-appear'&&Number.isFinite(animation.effect?.getTiming().iterations)).map(animation=>({name:animation.animationName,playState:animation.playState,pending:animation.pending,currentTime:animation.currentTime}));return {opacity:getComputedStyle(dialog).opacity,animations}})()");
+      animationObservations.push(state);
+      writeFileSync(join(artifacts, "actual-plugin-files-animation.json"), JSON.stringify(animationObservations, null, 2));
+      if (state?.opacity === "1" && !state.animations.some(animation => animation.playState === "running" || animation.pending)) return true;
+      // Capture again to request an actual compositor frame, without changing
+      // animation time, opacity, reduced-motion settings or the native approval UI.
+      await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+      return false;
+    }, "actual Bot details animation settled");
     const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
     await host.eval(`__PI_DESKTOP__.selectSession(${JSON.stringify(created.session.id)})`);
     assert.equal(await host.eval("Boolean(document.querySelector('[data-plugin-main-surface]'))"), false);
