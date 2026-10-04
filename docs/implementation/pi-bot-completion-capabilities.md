@@ -1,5 +1,30 @@
 # pi-bot completion Host capabilities
 
+## Current completion checkpoint (2026-10-04)
+
+Implementation head `0c0a062a102b572855280baee457e821305d42f2` has actual
+GitHub CI run37187330385 successful for both JS and Rust jobs. The prior
+6440601be CI failure repairs remain included. The final source delta updates
+only the isolated native-navigation acceptance harness for the current native
+toolbar and adds four-page activation plus visible exact-Bot inspector checks.
+Independent source review found no new blocker; this is not GitHub APPROVE.
+
+Actual combined-plugin Electron DOM acceptance `navigation-ui-final-04` passes,
+including native sidebar/main placement, real route restart, active context,
+four plugin pages, live dark/light theme, visible inspector and reopening.
+It uses explicitly persisted UI-only Bot/direct fixtures, modelRef=null and
+zero model calls. Embedded screenshots were observed black; visual acceptance
+and native consent are unpassed. Earlier timed-out stale-selector runs remain
+failed records. Independent exact-profile/process/port reads confirmed cleanup;
+the harness's final forced exit is not claimed as a normal-exit acceptance.
+
+Earlier runtime live reports below retain their original 42230122 source and
+binary hash. Later path/error-registry repairs have their own affected tests
+and CI; do not relabel an old live report as executed on a new binary. Approved
+Memory/Skill live recall now has a real paid result and zero-model cold-read
+recovery in pi-bot #14, with genuine semantic human review still pending.
+The chronological baseline below contains historical pending statements.
+
 ## Scope and baseline
 
 Task branch: `feat/pi-bot-completion-capabilities`, based on origin/main
