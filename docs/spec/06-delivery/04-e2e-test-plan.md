@@ -37,6 +37,9 @@ The actual guest must also report `active: true` after asynchronous open: a
 rendered DOM in an unattached WebContentsView is insufficient. Focused component
 effects cover delayed open, an overlay arriving before open completes, and a
 development reload replacing a mounted view (`plugin-view-open-visibility.test.mjs`).
+The measured native main surface begins at the Host titlebar's bottom edge,
+reserving its shared toolbar height. Native composition must not cover the
+Host route title, back action or window drag lane.
 
 Run the probe against the task candidate's
 built Electron app, reusing the host runtime/dependencies and isolating both
