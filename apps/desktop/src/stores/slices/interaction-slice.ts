@@ -92,7 +92,7 @@ export function createInteractionSlice({
         const stack = state.navStack.slice(0, state.navIndex + 1);
         const last = stack[stack.length - 1]?.pluginTarget;
         const same = last?.pluginId === pluginTarget.pluginId && last?.sectionId === pluginTarget.sectionId && last?.itemId === pluginTarget.itemId;
-        const next = opts?.record === false || same ? state.navStack : [...stack, { page: "chat" as const, pluginTarget }].slice(-50);
+        const next = opts?.record === false ? state.navStack : same ? stack : [...stack, { page: "chat" as const, pluginTarget }].slice(-50);
         return { page: "chat", pluginTarget, pluginActivationRevision: state.pluginActivationRevision + 1, workPanelOpen: false, workPanelMaximized: false, navStack: next, navIndex: opts?.record === false ? state.navIndex : next.length - 1 };
       });
     },
