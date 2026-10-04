@@ -112,6 +112,7 @@ export type StartupDependencies = {
   invokeSessionCollaboration?: (input: McpControlInvokeInput) => Promise<unknown>;
   invokePluginSchedule?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
   invokePluginPrompt?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
+  invokePluginVerification?: (input: McpControlInvokeInput) => Promise<unknown>;
   onSessionQueueChange?: () => void;
 };
 
@@ -267,6 +268,7 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
       invoke: invokeIpc,
       channels: IPC.invoke,
       invokeSessionCollaboration: deps.invokeSessionCollaboration,
+      invokePluginVerification: deps.invokePluginVerification,
       invokePluginSchedule: deps.invokePluginSchedule
         ? (input) => deps.invokePluginSchedule!(input, invokeIpc)
         : undefined,

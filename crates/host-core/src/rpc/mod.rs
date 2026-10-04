@@ -1,4 +1,5 @@
 mod config_sync_rpc;
+mod plugin_verification_rpc;
 mod scheduled_rpc;
 mod scheduled_tools;
 
@@ -2296,6 +2297,27 @@ async fn handle_request(
             } else {
                 None
             };
+            let requested_tool_policy = match params.get("toolPolicy") {
+                Some(value) => Some(value.as_str().ok_or_else(|| {
+                    rpc_err(1002, "toolPolicy must be a string", "INVALID_PARAMS")
+                })?),
+                None => None,
+            };
+            let tool_policy = if let Some(parent_id) = params
+                .get("inheritPermissionFromSessionId")
+                .and_then(|v| v.as_str())
+            {
+                let inherited = sessions::session_tool_policy(&st.db, parent_id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                    .ok_or_else(|| rpc_err(1007, "parent session not found", "NOT_FOUND"))?;
+                if inherited == "plugin-bot-scoped" {
+                    Some(inherited)
+                } else {
+                    requested_tool_policy.map(str::to_string)
+                }
+            } else {
+                requested_tool_policy.map(str::to_string)
+            };
             let session = sessions::create_session_with_options(
                 &st.db,
                 sessions::SessionCreateOptions {
@@ -2321,6 +2343,7 @@ async fn handle_request(
                         .map(str::to_string),
                     thinking_level,
                     permission_mode,
+                    tool_policy,
                 },
             )
             .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
@@ -2427,6 +2450,9 @@ async fn handle_request(
             Ok(json!({ "session": session }))
         }
         "session.configure" => {
+            if params.get("toolPolicy").is_some() {
+                return Err(rpc_err(1002, "toolPolicy is immutable", "INVALID_PARAMS"));
+            }
             let id = params
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -2821,7 +2847,15 @@ async fn handle_request(
             Ok(page)
         }
 
-        "plugin.promptPrepare" | "plugin.promptLookup" | "plugin.promptSettle" => {
+        method if method.starts_with("plugin.verification.") => {
+            plugin_verification_rpc::handle(state.clone(), method, params).await
+        }
+        "plugin.promptPrepare"
+        | "plugin.promptLookup"
+        | "plugin.promptSettle"
+        | "plugin.promptBeginTurn"
+        | "plugin.promptReleaseClaim"
+        | "plugin.promptInvalidate" => {
             let plugin_id = params
                 .get("pluginId")
                 .and_then(Value::as_str)
@@ -2846,8 +2880,30 @@ async fn handle_request(
                         .get("contentHash")
                         .and_then(Value::as_str)
                         .unwrap_or(""),
+                    params.get("processEpoch").and_then(Value::as_str),
                 ),
                 "plugin.promptLookup" => plugin_prompt::lookup(&st.db, plugin_id, intent_id),
+                "plugin.promptReleaseClaim" => plugin_prompt::release_claim(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("claimId").and_then(Value::as_str).unwrap_or(""),
+                ),
+                "plugin.promptInvalidate" => {
+                    plugin_prompt::invalidate(&st.db, plugin_id, intent_id)
+                }
+                "plugin.promptBeginTurn" => plugin_prompt::begin_turn(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("claimId").and_then(Value::as_str).unwrap_or(""),
+                    params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    params.get("providerId").and_then(Value::as_str),
+                    params.get("modelId").and_then(Value::as_str),
+                ),
                 _ => plugin_prompt::settle(
                     &st.db,
                     plugin_id,
@@ -2857,7 +2913,18 @@ async fn handle_request(
                     params.get("code").and_then(Value::as_str),
                 ),
             }
-            .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.starts_with("PERMISSION_DENIED:") {
+                    rpc_err(1003, message, "PERMISSION_DENIED")
+                } else if message == "STALE_PROMPT_CLAIM" {
+                    rpc_err(1008, message, "STALE_PROMPT_CLAIM")
+                } else if matches!(message.as_str(), "AGENT_BUSY" | "IDEMPOTENCY_CONFLICT") {
+                    session_collaboration_rpc_err(message)
+                } else {
+                    rpc_err(1002, message, "INVALID_PARAMS")
+                }
+            })
         }
         "session.beginTurn" => {
             let session_id = params
@@ -3450,6 +3517,19 @@ async fn handle_request(
             let call_started = std::time::Instant::now();
             let p: ToolsExecuteParams = serde_json::from_value(params.clone())
                 .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            {
+                let st = state.lock().await;
+                let policy = sessions::session_tool_policy(&st.db, &p.session_id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                    .ok_or_else(|| rpc_err(1007, "session not found", "SESSION_NOT_FOUND"))?;
+                if !sessions::session_tool_allows(&policy, &p.tool_name) {
+                    return Err(rpc_err(
+                        1003,
+                        "tool is unavailable to this Bot session",
+                        "PERMISSION_DENIED",
+                    ));
+                }
+            }
             let execution_timeout_ms = tools::effective_timeout_ms(&p.tool_name, p.timeout_ms);
 
             let command_shell_id = if p.tool_name == "Bash" {
@@ -5665,6 +5745,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_bot_session_policy_survives_inheritance_and_blocks_host_tools() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app_state = AppState::open(data_dir.path()).unwrap();
+        app_state.handshook = true;
+        let state = Arc::new(Mutex::new(app_state));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let created = handle_request(
+            state.clone(),
+            "session.create",
+            json!({ "mode": "agent", "toolPolicy": "plugin-bot-scoped" }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        let session_id = created["session"]["id"].as_str().unwrap();
+        assert_eq!(created["session"]["toolPolicy"], "plugin-bot-scoped");
+
+        let child = handle_request(
+            state.clone(),
+            "session.create",
+            json!({
+                "inheritPermissionFromSessionId": session_id,
+                "toolPolicy": "unrestricted"
+            }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(child["session"]["toolPolicy"], "plugin-bot-scoped");
+
+        let configure = handle_request(
+            state.clone(),
+            "session.configure",
+            json!({ "id": session_id, "mode": "agent", "toolPolicy": "unrestricted" }),
+            tx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(configure.data.unwrap()["errorCode"], "INVALID_PARAMS");
+
+        for tool_name in ["Bash", "Read"] {
+            let denied = handle_request(
+                state.clone(),
+                "tools.execute",
+                json!({
+                    "sessionId": session_id,
+                    "toolCallId": format!("blocked-{tool_name}"),
+                    "toolName": tool_name,
+                    "args": {},
+                    "mode": "agent"
+                }),
+                tx.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(denied.data.unwrap()["errorCode"], "PERMISSION_DENIED");
+        }
+
+        let invalid = handle_request(state, "session.create", json!({ "toolPolicy": 1 }), tx)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.data.unwrap()["errorCode"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
     async fn plugin_session_rpc_routes_the_full_p0_p1_surface() {
         let data_dir = tempfile::tempdir().unwrap();
         let mut app_state = AppState::open(data_dir.path()).unwrap();
@@ -7766,13 +7912,16 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let mut app_state = AppState::open(data_dir.path()).unwrap();
         app_state.handshook = true;
+        let session_id = sessions::create_session(&app_state.db, None, None, None, None, None)
+            .unwrap()
+            .id;
         let state = Arc::new(Mutex::new(app_state));
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = handle_request(
             state.clone(),
             "tools.execute",
             json!({
-                "sessionId": "missing-session",
+                "sessionId": session_id,
                 "toolCallId": "mismatch-no-register",
                 "toolName": "Bash",
                 "args": { "command": "should-not-run" },

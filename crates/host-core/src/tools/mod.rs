@@ -216,6 +216,8 @@ struct ToolRunnerStartConfig {
     scratch_dir: Option<PathBuf>,
     #[serde(default)]
     env_path: Option<String>,
+    #[serde(default)]
+    approved_environment: Option<std::collections::BTreeMap<String, String>>,
 }
 
 fn path_has_nul(path: &Path) -> bool {
@@ -231,6 +233,12 @@ fn validate_runner_config(config: &ToolRunnerStartConfig) -> Result<(), String> 
     }
     if config.args.iter().any(|argument| argument.contains('\0')) {
         return Err("runner config contains an argument with an embedded NUL".into());
+    }
+    if config.approved_environment.as_ref().is_some_and(|env| {
+        env.iter()
+            .any(|(k, v)| k.is_empty() || k.contains(['=', '\0']) || v.contains('\0'))
+    }) {
+        return Err("runner config contains invalid approved environment".into());
     }
     if config
         .scratch_dir
@@ -386,6 +394,9 @@ pub async fn run_internal_tool_runner() -> Result<i32> {
         .map_err(|error| anyhow!(error))?;
 
     let mut command = Command::new(&config.program);
+    if let Some(env) = &config.approved_environment {
+        command.env_clear().envs(env);
+    }
     command
         .args(&config.args)
         .current_dir(&config.workspace)
@@ -2363,6 +2374,9 @@ async fn spawn_tool_runner(
     command.stdin(Stdio::piped());
     #[cfg(test)]
     command.stdin(Stdio::null());
+    if let Some(env) = &config.approved_environment {
+        command.env_clear().envs(env);
+    }
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2433,6 +2447,160 @@ async fn spawn_tool_runner(
 
 fn terminate_runner_tree(pid: u32, ownership: &mut ProcessOwnership) -> Result<(), String> {
     ownership.terminate_fail_closed(pid)
+}
+
+/// Runs only a Host-frozen approved program/argv; does not interpret shell text.
+/// Output bytes are merged in pipe arrival order and bounded across both streams.
+pub async fn run_approved_process(
+    admission: &crate::plugin_verification::ExecutionAdmission,
+    cancel: watch::Receiver<bool>,
+) -> crate::plugin_verification::ProcessOutcome {
+    use crate::plugin_verification::ProcessOutcome;
+    if admission.input_guards.is_empty() {
+        return ProcessOutcome {
+            exit_code: None,
+            output: vec![],
+            termination: "unknown".into(),
+        };
+    }
+    let Some(check) = admission.check.as_ref().filter(|_| admission.start) else {
+        return ProcessOutcome {
+            exit_code: None,
+            output: vec![],
+            termination: "unknown".into(),
+        };
+    };
+    if *cancel.borrow() {
+        return ProcessOutcome {
+            exit_code: None,
+            output: vec![],
+            termination: "cancelled".into(),
+        };
+    }
+    let config = ToolRunnerStartConfig {
+        program: PathBuf::from(&check.definition.program),
+        args: check.definition.args.clone(),
+        workspace: PathBuf::from(&check.project_path),
+        scratch_dir: None,
+        env_path: None,
+        approved_environment: Some(admission.environment.clone()),
+    };
+    let runner = match spawn_tool_runner(&config).await {
+        Ok(runner) => runner,
+        Err(_) => {
+            return ProcessOutcome {
+                exit_code: None,
+                output: vec![],
+                termination: "unknown".into(),
+            }
+        }
+    };
+    let SpawnedToolRunner {
+        pid,
+        mut ownership,
+        mut control,
+        stdout,
+        stderr,
+        mut wait_task,
+    } = runner;
+    let (tx, mut rx) = mpsc::channel::<io::Result<Vec<u8>>>(16);
+    async fn capture<R: AsyncRead + Unpin>(pipe: Option<R>, tx: mpsc::Sender<io::Result<Vec<u8>>>) {
+        let Some(mut pipe) = pipe else {
+            let _ = tx.send(Err(io::Error::other("missing output pipe"))).await;
+            return;
+        };
+        let mut buffer = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buffer).await {
+                Ok(0) => return,
+                Ok(n) => {
+                    if tx.send(Ok(buffer[..n].to_vec())).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+            }
+        }
+    }
+    let mut stdout_task = tokio::spawn(capture(stdout, tx.clone()));
+    let mut stderr_task = tokio::spawn(capture(stderr, tx));
+    let deadline = tokio::time::sleep(Duration::from_millis(check.definition.timeout_ms));
+    tokio::pin!(deadline);
+    let mut output = Vec::new();
+    let mut pipes_open = true;
+    let mut exit_code = None;
+    let mut cancel = Some(cancel);
+    let mut termination = loop {
+        tokio::select! {
+            status = &mut wait_task => {
+                match status { Ok(Ok(status)) => { exit_code=status.code(); break if exit_code.is_some() { "completed" } else { "unknown" }; }, _ => break "unknown" }
+            }
+            _ = wait_for_cancellation(&mut cancel) => break "cancelled",
+            _ = &mut deadline => break "timed_out",
+            chunk = rx.recv(), if pipes_open => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        let remaining=check.definition.max_output_bytes.saturating_sub(output.len());
+                        output.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                        if bytes.len()>remaining { break "output_limited"; }
+                    }
+                    Some(Err(_)) => break "unknown",
+                    None => pipes_open=false,
+                }
+            }
+        }
+    }.to_owned();
+    if termination == "completed" || wait_task.is_finished() {
+        control.take();
+        if terminate_runner_tree(pid, &mut ownership).is_err() {
+            termination = "unknown".into();
+        }
+    } else if kill_and_reap(pid, &mut ownership, &mut control, &mut wait_task)
+        .await
+        .is_err()
+    {
+        termination = "unknown".into();
+    }
+    let drain = async {
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                Ok(bytes) => {
+                    let remaining = check
+                        .definition
+                        .max_output_bytes
+                        .saturating_sub(output.len());
+                    output.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                    if bytes.len() > remaining && termination == "completed" {
+                        termination = "output_limited".into();
+                    }
+                }
+                Err(_) => termination = "unknown".into(),
+            }
+        }
+        let _ = (&mut stdout_task).await;
+        let _ = (&mut stderr_task).await;
+    };
+    if tokio::time::timeout(PIPE_DRAIN_TIMEOUT, drain)
+        .await
+        .is_err()
+    {
+        stdout_task.abort();
+        stderr_task.abort();
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        termination = "unknown".into();
+    }
+    if cancel.as_ref().is_some_and(|receiver| *receiver.borrow()) && termination == "completed" {
+        termination = "cancelled".into();
+    }
+    ProcessOutcome {
+        exit_code,
+        output,
+        termination,
+    }
 }
 
 async fn kill_and_reap(
@@ -2550,6 +2718,7 @@ async fn tool_bash(
         workspace: root.to_path_buf(),
         scratch_dir: scratch.map(Path::to_path_buf),
         env_path: shell::user_login_path().map(str::to_string),
+        approved_environment: None,
     };
     let SpawnedToolRunner {
         pid,
@@ -2938,6 +3107,7 @@ mod tests {
             workspace: PathBuf::from("workspace"),
             scratch_dir: None,
             env_path: None,
+            approved_environment: None,
         };
         let frame = encode_runner_config(&config).unwrap();
         assert_eq!(decode_runner_config(&frame).unwrap().args, config.args);
@@ -2956,6 +3126,7 @@ mod tests {
             workspace: PathBuf::from("workspace"),
             scratch_dir: None,
             env_path: None,
+            approved_environment: None,
         };
         assert!(encode_runner_config(&nul_config).is_err());
     }

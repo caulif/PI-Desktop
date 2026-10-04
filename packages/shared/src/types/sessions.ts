@@ -16,6 +16,7 @@ import type { PlanningState } from "./plans.js";
  *   from a display badge; the local/remote split is resolved in Electron main.
  */
 export type SessionSource = "desktop" | "pi-native" | "remote";
+export type SessionToolPolicy = "unrestricted" | "plugin-bot-scoped";
 
 export type SessionCapabilities = {
   canPrompt: boolean;
@@ -41,6 +42,8 @@ export type SessionSummary = {
   thinkingLevel: SessionThinkingLevel;
   /** Per-session permission mode; `inherit` follows the global default (D115). */
   permissionMode: PermissionMode;
+  /** Host-persisted tool restriction; forks inherit it and configure cannot change it. */
+  toolPolicy?: SessionToolPolicy;
   /** Effective capability for this session's exact provider/model pair. */
   supportsReasoning?: boolean;
   /** Effective image-input capability for this session's exact model. */

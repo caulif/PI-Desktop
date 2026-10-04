@@ -725,6 +725,7 @@ type LoadedPlugin = {
   dropGrants: Map<string, { fullPath: string; requestPath: string }>;
   child?: PluginProcessHandle;
   pending: Map<string, PendingCall>;
+  panelCalls: Set<string>;
   nextCallId: number;
   disposing: boolean;
 };
@@ -1777,6 +1778,7 @@ export class PluginRuntime {
       dropGrants: new Map(),
       child,
       pending: new Map(),
+      panelCalls: new Set(),
       nextCallId: 1,
       disposing: false,
     };
@@ -2318,6 +2320,8 @@ export class PluginRuntime {
     }
     if (signal?.aborted) return Promise.reject(signal.reason);
     const id = `h${loaded.nextCallId++}`;
+    const panelInvocationId = message.method === "panel.invoke" ? randomUUID() : null;
+    if (panelInvocationId) loaded.panelCalls.add(panelInvocationId);
     return new Promise((resolvePromise, rejectPromise) => {
       const cancelChild = (error: Error) => {
         if (typeof message.invocationId !== "string") return;
@@ -2337,6 +2341,7 @@ export class PluginRuntime {
       const cleanup = () => {
         clearTimeout(timer);
         loaded.pending.delete(id);
+        if (panelInvocationId) loaded.panelCalls.delete(panelInvocationId);
         signal?.removeEventListener("abort", abort);
       };
       const timer = setTimeout(() => {
@@ -2351,7 +2356,8 @@ export class PluginRuntime {
       });
       signal?.addEventListener("abort", abort, { once: true });
       try {
-        child.postMessage({ ...message, id });
+        child.postMessage({ ...message, id,
+          ...(panelInvocationId ? { panelInvocationId } : {}) });
       } catch (error) {
         loaded.pending.get(id)?.reject(error instanceof Error ? error : new Error(String(error)));
       }
@@ -2380,11 +2386,14 @@ export class PluginRuntime {
       return;
     }
     if (message.t === "call") {
+      const panelAuthorized = typeof message.panelInvocationId === "string" &&
+        loaded.panelCalls.has(message.panelInvocationId) &&
+        message.invocationId === undefined && message.api === "desktop.invoke";
       void this.toolInvocations.run(loaded, message.invocationId, async () => {
         if (this.loaded.get(loaded.manifest.id) !== loaded) {
           throw apiError("PLUGIN_UNLOADED", "Plugin host process is no longer active");
         }
-        return this.dispatchHostCall(loaded, String(message.api ?? ""), message.args ?? []);
+        return this.dispatchHostCall(loaded, String(message.api ?? ""), message.args ?? [], panelAuthorized);
       })
         .then((value) =>
           loaded.child?.postMessage({ t: "res", id: message.id, ok: true, value: value ?? null }),
@@ -2411,6 +2420,7 @@ export class PluginRuntime {
     loaded: LoadedPlugin,
     api: string,
     args: unknown[],
+    panelAuthorized = false,
   ): Promise<unknown> {
     const pluginId = loaded.manifest.id;
     switch (api) {
@@ -2871,7 +2881,7 @@ export class PluginRuntime {
           throw apiError("UNSUPPORTED", `host api not available: ${api}`);
         }
         const [group, member] = api.split(".");
-        const target = (this.hostApi(loaded) as any)[group]?.[member];
+        const target = (this.hostApi(loaded, undefined, panelAuthorized) as any)[group]?.[member];
         if (typeof target !== "function") {
           throw apiError("UNSUPPORTED", `host api not available: ${api}`);
         }
@@ -4358,17 +4368,15 @@ export class PluginRuntime {
    *
    * A `userSelected` mode keeps the directory the user picked. Every other mode
    * resolves the project of the session that invoked the tool: two sessions can
-   * sit on two projects at once, so the visible workspace is a fallback only --
-   * for a panel call, which has no tool session, and for a session the host has
-   * not launched yet.
+   * sit on two projects at once. A session without a known project cannot
+   * borrow the window's project; only panel calls use the visible workspace.
    */
   private fsRoot(loaded: LoadedPlugin, rule: PluginFsRule): string | null {
     if (rule.root === "userSelected") return loaded.userRoot ?? null;
     const sessionId = this.inFlightTool(loaded.manifest.id)?.sessionId.trim() || undefined;
-    const scoped = sessionId
+    return sessionId
       ? (this.services.getWorkspacePathForSession?.(sessionId) ?? null)
-      : null;
-    return scoped ?? this.services.getWorkspacePath();
+      : this.services.getWorkspacePath();
   }
 
   /**
@@ -4723,7 +4731,7 @@ export class PluginRuntime {
     throw apiError("UNSUPPORTED", `host api not available: ${api}`);
   }
 
-  private hostApi(loaded: LoadedPlugin, browserContext?: { sessionId: string; tabId: string }) {
+  private hostApi(loaded: LoadedPlugin, browserContext?: { sessionId: string; tabId: string }, panelAuthorized = false) {
     const pluginId = loaded.manifest.id;
     const pluginPath = loaded.path;
 
@@ -5085,6 +5093,7 @@ export class PluginRuntime {
               source: "plugin",
               pluginContext: {
                 pluginId,
+                ...(operation === "agent/steer" && panelAuthorized ? { panelAuthorized: true } : {}),
                 ...(invocation?.sessionId ? { sessionId: invocation.sessionId } : {}),
                 ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
                 ...(invocation ? { invocationId: invocation.id } : {}),
@@ -5331,13 +5340,13 @@ export class PluginRuntime {
             throw apiError("INVALID_ARGUMENT", "path must stay inside the root");
           }
           const base = realpathOrSelf(root);
-          const dir = rel ? join(base, rel) : base;
-          if (this.isProtectedPath(dir)) {
+          const resolvedDir = await resolveRealPathWithinRoot(base, rel);
+          if (!resolvedDir || this.isProtectedPath(resolvedDir)) {
             throw apiError("PERMISSION_DENIED", "path is protected");
           }
           let names: string[] = [];
           try {
-            names = readdirSync(dir);
+            names = readdirSync(resolvedDir);
           } catch {
             throw apiError("NOT_FOUND", `cannot list ${rel || "."}`);
           }
@@ -5351,7 +5360,8 @@ export class PluginRuntime {
           for (const name of names.sort()) {
             if (entries.length >= MAX_LIST_ENTRIES) break;
             const childRel = rel ? `${rel}/${name}` : name;
-            const full = join(dir, name);
+            const full = await resolveRealPathWithinRoot(base, childRel);
+            if (!full) continue;
             if (isDeniedFsPath(childRel)) continue;
             if (this.isProtectedPath(full)) continue;
             let st: ReturnType<typeof statSync>;

@@ -16,6 +16,7 @@ export {
 } from "./thinking-level.js";
 
 export type ModelCapabilities = ThinkingCapabilitySet;
+export { clampProviderThinkingLevel } from "./relay-thinking-transport.js";
 /** Compatibility name used by Electron main and existing runtime callers. */
 export type ThinkingCapabilities = ModelCapabilities;
 

@@ -13,6 +13,7 @@ import type { PersistenceOutbox } from "../persistence-outbox";
 import type { ComposerCommandService } from "./composer-ipc";
 import type { IpcRegistrar } from "./types";
 import { withPromptEnhancementTimeout } from "../prompt-enhancement-timeout";
+import { consumePluginPromptAdmission } from "../trusted-plugin-prompt";
 
 export type AgentIpcDependencies = {
   registrar: IpcRegistrar;
@@ -294,6 +295,7 @@ export function registerAgentIpc({
   });
 
   handle(IPC.invoke.agentPrompt, async (req: AgentPromptRequest) => {
+    const pluginAdmission = consumePluginPromptAdmission(req);
     if (!sidecar) throw new Error("sidecar unavailable");
     if (req.sessionId.startsWith("native-pi:")) {
       if (req.sessionMessageId || req.truncateFromMessageId || req.truncateBefore !== undefined || req.attachments?.length) {
@@ -420,15 +422,20 @@ export function registerAgentIpc({
     sidecar.setProjectInstructionRoot(req.sessionId, launch.projectPath);
 
     // Open a durable turn row, then persist the user message under it.
-    const turn = await host.call<{ turnId?: string }>("session.beginTurn", {
+    const turn = await host.call<{ turnId?: string; start?: boolean }>(
+      pluginAdmission ? "plugin.promptBeginTurn" : "session.beginTurn", {
       sessionId: req.sessionId,
       providerId: launch.providerId,
       modelId: launch.modelId,
+      ...(pluginAdmission ? pluginAdmission : {}),
       ...(sessionMessage ? { sessionMessageId: sessionMessage.origin.messageId } : {}),
     });
     const durableTurnId = String(turn?.turnId ?? "").trim();
     if (!durableTurnId) {
       throw new Error("session.beginTurn returned no turn");
+    }
+    if (pluginAdmission && turn.start === false) {
+      return { accepted: true, turnId: durableTurnId };
     }
     activeTurns.set(req.sessionId, durableTurnId);
     activeTurnUsages.delete(req.sessionId);
@@ -618,6 +625,10 @@ export function registerAgentIpc({
         turnId: durableTurnId,
       });
       throw e;
+    }
+    if (result.accepted === false) {
+      await finishTurn(req.sessionId, "error", "AGENT_REJECTED", { turnId: durableTurnId });
+      return result;
     }
     logger.app("session", "info", "prompt accepted", {
       sessionId: req.sessionId,

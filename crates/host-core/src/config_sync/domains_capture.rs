@@ -25,6 +25,10 @@ fn capture_providers(st: &AppState) -> Result<Vec<PortableEntity>> {
             continue;
         }
         let mut payload = serde_json::to_value(&provider)?;
+        // A cleared override must clear an existing row on the receiving host.
+        // Older payloads without this field retain their old update semantics.
+        payload["thinkingRequestProtocol"] =
+            serde_json::to_value(&provider.thinking_request_protocol)?;
         strip_keys(
             &mut payload,
             &[

@@ -61,3 +61,4 @@ electron.vite.config.*.mjs
 
 .playwright-cli
 worktrees
+artifacts/local/
