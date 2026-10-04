@@ -177,6 +177,9 @@ pub fn upsert(db: &Database, plugin_id: &str, input: &Value) -> Result<Value> {
             {
                 return Ok(json!({ "consentRequired": true }));
             }
+            // The enabled flag and its exact authorization are one durable fact.
+            // A failed authorization write/readback must not leave a half-enabled task.
+            let tx = db.conn().unchecked_transaction()?;
             if current.enabled != enabled {
                 set_enabled(db, task_id, enabled)?;
             }
@@ -199,8 +202,10 @@ pub fn upsert(db: &Database, plugin_id: &str, input: &Value) -> Result<Value> {
                     [task_id],
                 )?;
             }
-            return get(db, plugin_id, external_key)?
-                .ok_or_else(|| anyhow::anyhow!("binding vanished"));
+            let result = get(db, plugin_id, external_key)?
+                .ok_or_else(|| anyhow::anyhow!("binding vanished"))?;
+            tx.commit()?;
+            return Ok(result);
         }
     }
     if enabled
