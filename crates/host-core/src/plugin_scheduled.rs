@@ -931,20 +931,42 @@ pub fn due(db: &Database, now: i64) -> Result<Vec<Value>> {
             "pending"
         };
         let occurrence_id = format!("{task_id}:{scheduled_for}");
-        let tx = db.conn().unchecked_transaction()?;
-        tx.execute(
+        // Savepoints preserve per-occurrence atomicity both standalone and when
+        // the isolated diagnostic wraps the complete due operation in a transaction.
+        db.conn().execute_batch("SAVEPOINT plugin_due_occurrence")?;
+        let saved = (|| -> Result<()> {
+            db.conn().execute(
             "INSERT OR IGNORE INTO plugin_schedule_occurrences
              (occurrence_id,task_id,definition_revision,scheduled_for,state,skip_reason,created_at,updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
             params![occurrence_id, task_id, revision, scheduled_for, state,
                 if state == "skipped" { Some("missed") } else { None }, now],
         )?;
-        config["nextRunAt"] = json!(next);
-        db.conn().execute(
-            "UPDATE scheduled_tasks SET config_json=?1 WHERE id=?2",
-            params![config.to_string(), task_id],
-        )?;
-        tx.commit()?;
+            config["nextRunAt"] = json!(next);
+            db.conn().execute(
+                "UPDATE scheduled_tasks SET config_json=?1 WHERE id=?2",
+                params![config.to_string(), task_id],
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = saved {
+            if let Err(rollback) = db
+                .conn()
+                .execute_batch("ROLLBACK TO plugin_due_occurrence; RELEASE plugin_due_occurrence")
+            {
+                bail!("due write failed: {error}; savepoint rollback failed: {rollback}");
+            }
+            return Err(error);
+        }
+        if let Err(error) = db.conn().execute_batch("RELEASE plugin_due_occurrence") {
+            if let Err(rollback) = db
+                .conn()
+                .execute_batch("ROLLBACK TO plugin_due_occurrence; RELEASE plugin_due_occurrence")
+            {
+                bail!("due commit failed: {error}; savepoint rollback failed: {rollback}");
+            }
+            return Err(error.into());
+        }
     }
     db.conn().execute(
         "UPDATE plugin_schedule_occurrences SET state='skipped',skip_reason='deadline',updated_at=?1

@@ -1,5 +1,22 @@
 # 12. 插件 IPC 和主机服务
 
+## 隔离的受控 due 诊断（ADR 0315）
+
+`scheduled.devPluginDueAt` 仅供原生开发诊断，不开放 Plugin SDK/MCP。
+`PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` 与 `PI_DESKTOP_DEV_SCHEDULE_DUE_DIR`
+必须同时指向同一个规范化的专属 Temp profile；打开 SQLite 前及每次调用都核对。
+输入绑定 exact plugin、external key、定义版本、时区、RFC3339 `now` 和一次性的
+`seedAfter`；未知字段、旧版本、时间回退、多绑定、未启用/未批准定义及重复 seed 均拒绝。
+
+仅无 occurrence 历史时允许 seed，且不得早于 now 超过七天；nextRunAt 使用生产日历。
+事务覆盖时间游标、seed、生产 due 写入和最终读取；occurrence savepoint 在独立调用
+及外层事务下都保持原子。不创建授权、不改系统时间、不启动模型，也不改变 prompt
+admission 和插件 policy 的现有时间源。
+
+runner 在变更前保存 journal，unknown 只读查询。存储授权标记本身不证明真实原生批准；
+没有绑定 hash 的原生观察回执时验收保持 incomplete。受控 due 持久化、实际墙钟触发
+与插件 Run/Attempt 是分别记录的证据。
+
 > **翻译说明：** 本页是与 [英文源规格](/spec/07-plugins/12-plugin-ipc-and-host-services) 一一对应的机器辅助翻译。代码、协议字段和标识符保持原文；如翻译与英文源事实有歧义，以英文版本为准。
 
 

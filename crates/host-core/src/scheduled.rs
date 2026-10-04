@@ -8,6 +8,7 @@ use crate::db::{ms_to_ts, now_ms, ts_to_ms, Database};
 use crate::sessions;
 
 pub mod automation;
+pub(crate) mod diagnostic_due;
 pub(crate) mod preview;
 pub mod project;
 pub mod timing;
