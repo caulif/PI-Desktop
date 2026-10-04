@@ -731,7 +731,7 @@
 .plugin-sidebar-item-description { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-muted); font-size: var(--text-xs); }
 .plugin-sidebar-item-badge { color: var(--ds-text-secondary); }
 .plugin-sidebar-error { color: var(--ds-text-muted); font-size: var(--text-xs); padding: 8px; }
-.plugin-main-surface { min-height: 0; min-width: 0; flex: 1; display: flex; background: var(--ds-bg-primary); }
+.plugin-main-surface { min-height: 0; min-width: 0; flex: 1; display: flex; margin-top: var(--ds-toolbar-height); background: var(--ds-bg-primary); }
 .plugin-main-unavailable { margin: auto; color: var(--ds-text-secondary); }
 
 /* Fallback for a view whose icon token this build does not know. Sized to the

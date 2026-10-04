@@ -67,7 +67,9 @@ try {
   await waitFor(() => view.eval("pluginBridge.getViewContext().location?.botId==='one'"), "native navigation back");
   await host.eval("document.dispatchEvent(new KeyboardEvent('keydown',{key:']',code:'BracketRight',ctrlKey:true,bubbles:true}))");
   await waitFor(() => view.eval("pluginBridge.getViewContext().location?.botId==='two'"), "native navigation forward");
-  const rect = await host.eval("(()=>{const r=document.querySelector('.work-plugin-view-surface').getBoundingClientRect();return {width:r.width,height:r.height}})()"); assert(rect.width > 300 && rect.height > 200, JSON.stringify(rect));
+  const rect = await host.eval("(()=>{const r=document.querySelector('.work-plugin-view-surface').getBoundingClientRect();const bar=document.querySelector('.main-titlebar').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,titlebarBottom:bar.bottom}})()"); assert(rect.width > 300 && rect.height > 200, JSON.stringify(rect));
+  assert.equal(rect.y, rect.titlebarBottom, "isolated main guest must leave Host titlebar visible and interactive");
+  writeFileSync(join(artifacts, "geometry.json"), JSON.stringify({ passed: true, rect, active: await view.eval("pluginBridge.getViewContext().active"), scratch }, null, 2));
   const shot = await host.send("Page.captureScreenshot", { format: "png" }); writeFileSync(join(artifacts, "main.png"), Buffer.from(shot.data, "base64"));
   const guestShot = await view.send("Page.captureScreenshot", { format: "png" }); writeFileSync(join(artifacts, "isolated-main-content.png"), Buffer.from(guestShot.data, "base64"));
   await host.eval("document.querySelector('[data-sidebar-section=projects]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:250,clientY:150}))");
