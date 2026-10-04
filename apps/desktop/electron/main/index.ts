@@ -1005,6 +1005,7 @@ registerShutdownHandlers({
   getSidecar,
   getMcpControl: () => mainState.mcpControl,
   activeTurns,
+  lockAbortReason,
   persistenceOutbox,
   inflightCheckpointer,
   pluginPanels,

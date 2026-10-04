@@ -14,6 +14,7 @@ import type { UserMcpRuntime } from "../user-mcp";
 import type { McpControlServer } from "../mcp-control";
 import type { McpOAuthManager } from "../mcp-oauth";
 import { getActiveRemoteHostsBoot, setActiveRemoteHostsBoot } from "./remote-hosts";
+import { lockQuitTurnAborts } from "./quit-turn-aborts";
 
 const QUIT_TURN_SETTLE_BUDGET_MS = 2_000;
 
@@ -35,6 +36,7 @@ export type ShutdownDependencies = {
   getSidecar: () => AgentSidecar | null;
   getMcpControl: () => McpControlServer | null;
   activeTurns: Map<string, string>;
+  lockAbortReason: (sessionId: string, turnId: string) => void;
   persistenceOutbox: PersistenceOutbox;
   inflightCheckpointer: InflightCheckpointer;
   pluginPanels: Pick<PluginPanelHost, "closeAll">;
@@ -57,6 +59,7 @@ export function registerShutdownHandlers({
   getSidecar,
   getMcpControl,
   activeTurns,
+  lockAbortReason,
   persistenceOutbox,
   inflightCheckpointer,
   pluginPanels,
@@ -146,6 +149,7 @@ export function registerShutdownHandlers({
       // (D299). Bounded: a quit must not hang on an unresponsive provider.
       await settleRunningTurnsForQuit({
         activeTurns,
+        lockAbortReason,
         getHost,
         getSidecar,
         inflightCheckpointer,
@@ -201,6 +205,7 @@ export function registerShutdownHandlers({
 
 type TurnSettlementDependencies = {
   activeTurns: Map<string, string>;
+  lockAbortReason: (sessionId: string, turnId: string) => void;
   getHost: () => HostProcess | null;
   getSidecar: () => AgentSidecar | null;
   inflightCheckpointer: InflightCheckpointer;
@@ -210,27 +215,28 @@ type TurnSettlementDependencies = {
 
 async function settleRunningTurnsForQuit({
   activeTurns,
+  lockAbortReason,
   getHost,
   getSidecar,
   inflightCheckpointer,
   persistenceOutbox,
   logger,
 }: TurnSettlementDependencies): Promise<void> {
-  const sessions = [...activeTurns.keys()];
+  const targets = lockQuitTurnAborts(activeTurns, lockAbortReason);
   const deadline = Date.now() + QUIT_TURN_SETTLE_BUDGET_MS;
   // The newest snapshot of every streaming reply lands first: it is the
   // fallback if the abort below does not produce a final row in time.
   await inflightCheckpointer.flushAll();
-  if (sessions.length === 0) {
+  if (targets.length === 0) {
     await persistenceOutbox.flush(getHost);
     return;
   }
   const sidecar = getSidecar();
   if (sidecar) {
     await Promise.allSettled(
-      sessions.map((sessionId) =>
+      targets.map(({ sessionId, turnId }) =>
         Promise.race([
-          sidecar.call("agent.abort", { sessionId }),
+          sidecar.call("agent.abort", { sessionId, turnId }),
           new Promise((resolve) => setTimeout(resolve, 800)),
         ]),
       ),
