@@ -141,6 +141,11 @@ export type AuthenticateInput = {
  * that may only call `connection/pair`.
  */
 export class DeviceTokenAuthenticator {
+  async isActive(auth: ConnectionAuth): Promise<boolean> {
+    if (auth.kind !== "device") return true;
+    const current = await this.store.findDeviceByTokenHash(auth.device.tokenHash);
+    return Boolean(current && !current.revokedAt && current.deviceId === auth.device.deviceId && hashesEqual(current.tokenHash, auth.device.tokenHash));
+  }
   constructor(
     private readonly store: DeviceCredentialStore,
     private readonly now: () => number = () => Date.now(),

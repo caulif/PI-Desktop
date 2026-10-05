@@ -33,6 +33,14 @@ exact expiring approval. Native runtime approvals remain in AgentHost. Scheduled
 occurrences have their own scoped context and Host-owned occurrence authorization;
 no fabricated user principal is used for automatic execution.
 
+An explicitly enabled execution node exposes a fixed owner-only RACP catalog.
+It holds no Bot domain writer. The central adapter qualifies sessions by pinned
+Host identity and sends tool results through the native active-invocation token.
+The node device principal authenticates the machine connection; automatic Routine
+authority remains the durable Host occurrence and its frozen definition, not an
+HTTP flag or a newly fabricated human approval. Native risk approvals remain
+required where the installed tool policy requires them.
+
 Registered canonical roots, the installed manifest scope and protected-file
 policy constrain file reads/writes. Reads check an opened descriptor identity
 before reading. Linux atomic writes anchor both temporary and destination names

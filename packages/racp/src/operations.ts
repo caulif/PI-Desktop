@@ -2,6 +2,7 @@ import type { AgentHost, Principal } from "@pi-desktop/agent-host";
 import { RacpError } from "@pi-desktop/agent-host";
 import {
   RacpApprovalResponseSchema,
+  BOT_NODE_SCHEMAS,
   RacpCursorSchema,
   RacpInputResponseSchema,
   RacpRequestContextSchema,
@@ -125,6 +126,20 @@ function unavailable(capability: string): OperationHandler {
 /** The operation catalog bound to the Agent Host module and the Host operations. */
 export function createOperations(): Map<RacpOperation, OperationHandler> {
   const handlers = new Map<RacpOperation, OperationHandler>();
+
+  for (const [method, schema] of Object.entries(BOT_NODE_SCHEMAS)) {
+    handlers.set(method as RacpOperation, async (context, params) => {
+      check(schema, params);
+      const node = context.operations.botNode;
+      if (!node) throw new RacpError("CAPABILITY_UNAVAILABLE", "this Host is not a bot node");
+      return node.invoke(method, params, {
+        principal: context.principal,
+        connectionId: context.connection.id,
+        request: (name, input, timeout) => context.connection.request(name, input, timeout),
+        isClosed: () => context.connection.isClosed,
+      });
+    });
+  }
 
   handlers.set("connection/initialize", async () => {
     throw new RacpError("CONFLICT", "the connection is already initialized");

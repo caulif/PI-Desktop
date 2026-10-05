@@ -11,6 +11,28 @@ function envelope(sessionId: string, turnId: string, event: AgentEventEnvelope["
 const context = (requestId: string, idempotencyKey?: string) => ({ requestId, ...(idempotencyKey ? { idempotencyKey } : {}) });
 
 describe("RACP-WS handshake and authentication", () => {
+  it("revokes an already-connected device before its next operation", async () => {
+    const h = await harness();
+    const { client } = await h.connect(OWNER_TOKEN, { reconnect: { enabled: false } });
+    await h.store.revokeDevice("dev_owner", "2026-09-18T00:00:02.000Z");
+    await expect(client.request("project/list")).rejects.toMatchObject({ code: "HOST_DISCONNECTED" });
+    expect(h.server.connectionCount()).toBe(0);
+  });
+
+  it("keeps fixed bot-node methods owner-only and validates their wire shapes", async () => {
+    const calls: string[] = [];
+    const h = await harness({ operations: { botNode: { invoke: async method => { calls.push(method); return {ok:true}; }, release: () => undefined } } });
+    const { client: viewer } = await h.connect(VIEWER_TOKEN);
+    await expect(viewer.request("botNode/models")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const { client } = await h.connect(OWNER_TOKEN);
+    await expect(client.request("botNode/sessionCreate", { operation: "providers/getSecret", args: [{}] })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(client.request("botNode/sessionConfigure", { args: ["s1"] })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(client.request("botNode/fileReadRange", { path: "README.md", offset: 0, length: 524289 })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(calls).toEqual([]);
+    await expect(client.request("botNode/models")).resolves.toEqual({ok:true});
+    expect(calls).toEqual(["botNode/models"]);
+    await viewer.close(); await client.close();
+  });
   it("negotiates protocol, capabilities, limits, and the Host identity", async () => {
     const h = await harness();
     const { client } = await h.connect(OWNER_TOKEN);

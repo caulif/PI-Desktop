@@ -262,11 +262,17 @@ export class RacpServer {
       this.options.operations.terminal?.detach(terminalId);
     }
     connection.terminals.clear();
+    this.options.operations.botNode?.release(connection.id);
     connection.close(1000, "closed");
     this.options.log("info", "racp connection released", { connectionId: connection.id });
   }
 
   private async handleFrame(connection: RacpConnection, frame: string): Promise<void> {
+    if (!await this.options.authenticator.isActive(connection.auth)) {
+      connection.close(1008, "device revoked");
+      this.release(connection);
+      return;
+    }
     const message = parseFrame(frame);
     if (!message) {
       connection.send({

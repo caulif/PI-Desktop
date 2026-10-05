@@ -21,6 +21,7 @@ import { FileCredentialStore, loadOrCreateHostId } from "./credentials.js";
 import { createHostOperations } from "./host-operations.js";
 import { createLogger, type HostLogger } from "./logger.js";
 import { TerminalService, loadPty } from "./terminal.js";
+import { createBotNodePort } from "./bot-node.js";
 
 export type PiHostApp = {
   hostId: string;
@@ -211,12 +212,22 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
     },
   });
 
-  if (options.trustedPlugin) plugin = createTrustedPlugin(options.trustedPlugin, { getHost, getSidecar, runtime, agentHost, log });
-  await startHost();
-  if (options.trustedPlugin) for (const root of options.trustedPlugin.workspaceRoots) await state.host!.call("projects.create", { path: root });
-  await startSidecar();
-  await agentHost.start();
-  plugin?.start();
+  if (options.trustedPlugin) plugin = createTrustedPlugin(options.trustedPlugin, { getHost, getSidecar, runtime, agentHost, launch, log });
+  try {
+    await startHost();
+    if (options.trustedPlugin) for (const root of options.trustedPlugin.workspaceRoots) await state.host!.call("projects.create", { path: root });
+    await startSidecar();
+    await agentHost.start();
+    plugin?.start();
+  } catch (error) {
+    state.stopping = true;
+    plugin?.stop();
+    plans.dispose();
+    await runtime.dispose();
+    await state.sidecar?.dispose();
+    await state.host?.dispose();
+    throw error;
+  }
   await plans.drainApprovedPlanExecutions().catch((error: unknown) => log("warn", "queued approved plan drain failed", { error: String(error) }));
 
   const pty = loadPty();
@@ -250,6 +261,7 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
       revokeDevice: (deviceId) => store.revokeDevice(deviceId, new Date().toISOString()),
     }),
     ...(terminal ? { terminal } : {}),
+    ...(plugin ? { botNode: createBotNodePort(plugin, message => log("warn", message)) } : {}),
   };
   const server = new RacpServer({ agentHost, operations, authenticator, hostId, serverVersion: APP_VERSION, log });
   let binding: WsBinding;
@@ -257,6 +269,11 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
     binding = await bindRacpWebSocket({ server: server, authenticator, host: config.host, port: config.port, log });
   } catch (error) {
     state.stopping = true;
+    plugin?.stop();
+    server.close();
+    await terminal?.closeAll();
+    plans.dispose();
+    await runtime.dispose();
     await state.sidecar?.dispose();
     await state.host?.dispose();
     throw error;

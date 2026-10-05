@@ -5,3 +5,5 @@ export * from "./host-operations.js";
 export * from "./logger.js";
 export * from "./terminal.js";
 export * from "./trusted-plugin.js";
+export * from "./remote-plugin.js";
+export * from "./bot-node-launch.js";
