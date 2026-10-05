@@ -1,3 +1,4 @@
+import { trustedNavigation } from "./trusted-plugin-navigation.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -19,95 +20,25 @@ import {
   type McpControlInvokeInput,
   listPendingToolRequests,
 } from "@pi-desktop/host-runtime";
-import type { AgentHost } from "@pi-desktop/agent-host";
-import { completeOneShot } from "@pi-desktop/agent-runtime";
-import type { LaunchResolver } from "@pi-desktop/host-runtime";
 import { createTrustedFiles } from "./trusted-plugin-files.js";
-export type WebPrincipal = {
-  userId: "owner";
-  deviceId: string;
-};
-export type TrustedPluginConfig = {
-  manifest: {
-    id: string;
-    version?: unknown;
-    permissions?: string[];
-    [key: string]: unknown;
-  };
-  dataDir: string;
-  workspaceRoots: readonly string[];
-  settings?: Record<string, unknown>;
-};
-export type PluginTool = {
-  name: string;
-  description: string;
-  schema: unknown;
-  risk?: string;
-  planSafeActions?: string[];
-  execute: (
-    args: unknown,
-    context: {
-      sessionId: string;
-      turnId: string;
-      mode: string;
-      signal?: AbortSignal;
-      invocationId?: string;
-      log?: (message: string) => void;
-    },
-  ) => Promise<unknown>;
-};
-export type PluginConsent = {
-  id: string;
-  operation: string;
-  args: readonly unknown[];
-  hash: string;
-  expiresAt: string;
-  principal: WebPrincipal;
-};
-export type TrustedPluginDeps = {
-  getHost: () => HostProcess | null;
-  getSidecar: () => AgentSidecar | null;
-  runtime: RuntimeService;
-  agentHost: AgentHost;
-  launch?: LaunchResolver;
-  log: (
-    level: "info" | "warn" | "error",
-    message: string,
-    data?: Record<string, unknown>,
-  ) => void;
-};
-const fail = (message: string, code = "PERMISSION_DENIED"): never => {
-  throw Object.assign(new Error(message), { code, errorCode: code });
-};
-const READS = [
-  "session/list",
-  "session/get",
-  "providers/list",
-  "agent/getStatus",
-  "agent/promptLookup",
-  "scheduled/pluginGet",
-  "scheduled/pluginLookup",
-  "scheduled/pluginSessionOwner",
-  "session/collaboration/status",
-  "session/collaboration/list",
-  "session/collaboration/result",
-  "session/collaboration/lookup",
-];
-const WRITES = [
-  "session/create",
-  "agent/prompt",
-  "agent/promptInvalidate",
-  "agent/steer",
-  "agent/abort",
-  "scheduled/pluginUpsert",
-  "scheduled/pluginDisable",
-  "scheduled/pluginStart",
-  "scheduled/pluginSkip",
-  "scheduled/pluginRetry",
-  "session/collaboration/spawn",
-  "session/collaboration/send",
-  "session/collaboration/cancel",
-];
+export type {
+  WebPrincipal,
+  TrustedPluginConfig,
+  PluginTool,
+  PluginConsent,
+  TrustedPluginDeps,
+} from "./trusted-plugin-contracts.js";
+import {
+  fail,
+  READS,
+  WRITES,
+  type WebPrincipal,
+  type TrustedPluginConfig,
+  type PluginTool,
+  type PluginConsent,
+  type TrustedPluginDeps,
+} from "./trusted-plugin-contracts.js";
+import { createIndependentCompletion } from "./trusted-plugin-completion.js";
 /** Fixed administrator-installed first-party module; this is not a general plugin loader. */
 export function createTrustedPlugin(
   config: TrustedPluginConfig,
@@ -150,73 +81,13 @@ export function createTrustedPlugin(
   >();
   let stopped = false;
   const pluginId = config.manifest.id;
-  let completions = 0;
-  const complete = async (input: {
-    modelKey: string;
-    system?: string;
-    messages?: { role: "user" | "assistant"; content: string }[];
-    includeSessionContext?: boolean;
-  }) => {
-    requireAuthority();
-    if (!grants.has("agent.complete") || !deps.launch)
-      fail("Completion is not enabled", "UNSUPPORTED");
-    if (
-      !input ||
-      input.includeSessionContext !== false ||
-      typeof input.modelKey !== "string" ||
-      !Array.isArray(input.messages) ||
-      input.messages.some(
-        (m) =>
-          !["user", "assistant"].includes(m.role) ||
-          typeof m.content !== "string",
-      ) ||
-      Buffer.byteLength(JSON.stringify(input)) > 24576
-    )
-      fail("Invalid bounded independent completion", "INVALID_ARGUMENT");
-    const listed = await api.models.list();
-    const model = listed.find((m) => m.key === input.modelKey);
-    if (!model) fail("Completion model is not ready", "MODEL_NOT_CONFIGURED");
-    if (completions >= 2)
-      fail("Completion concurrency limit reached", "AGENT_BUSY");
-    completions++;
-    try {
-      const settings = await host().call<Record<string, unknown>>(
-        "settings.get",
-        {},
-      );
-      const resolved = await deps.launch!.resolve(
-        "plugin-complete",
-        {
-          providerId: model!.providerId,
-          modelId: model!.modelId,
-          mode: "agent",
-          thinkingLevel: "off",
-        },
-        settings,
-      );
-      const result = await completeOneShot(
-        resolved.sidecarParams.provider,
-        {
-          systemPrompt: input.system,
-          messages: input.messages!.map((m) => ({
-            role: "user" as const,
-            content:
-              m.role === "assistant"
-                ? "### Assistant\n" + m.content
-                : m.content,
-            timestamp: Date.now(),
-          })),
-        },
-        "off",
-        { signal: AbortSignal.timeout(90000) },
-      );
-      if (Buffer.byteLength(result.text) > 24576)
-        fail("Completion output exceeds the bound", "INVALID_ARGUMENT");
-      return { ...result, modelKey: input.modelKey };
-    } finally {
-      completions--;
-    }
-  };
+  const complete = createIndependentCompletion(
+    deps,
+    grants,
+    () => requireAuthority(),
+    () => host(),
+    () => api.models.list(),
+  );
   const host = (): HostProcess => {
     if (stopped) fail("Plugin stopped", "ABORTED");
     const h = deps.getHost();
@@ -746,52 +617,7 @@ export function createTrustedPlugin(
     },
     log: (message: string) => deps.log("info", message),
   };
-  async function navigation() {
-    const [p, s] = await Promise.all([
-      host().call<{
-        projects: {
-          id: number;
-          name: string;
-          path: string;
-        }[];
-      }>("projects.list", {}),
-      host().call<{
-        sessions: {
-          id: string;
-          title: string;
-          projectPath?: string;
-        }[];
-      }>("session.list", {}),
-    ]);
-    const projects = [] as {
-      id: string;
-      name: string;
-      path: string;
-    }[];
-    for (const row of p.projects) {
-      try {
-        await files.checkRoot(row.path);
-        projects.push({ id: String(row.id), name: row.name, path: row.path });
-      } catch (error) {
-        if ((error as { code?: string }).code !== "PERMISSION_DENIED")
-          throw error;
-      }
-    }
-    return {
-      projects: projects.map(({ path, ...row }) => row),
-      sessions: s.sessions
-        .filter(
-          (row) =>
-            row.projectPath && projects.some((p) => p.path === row.projectPath),
-        )
-        .map((row) => ({
-          id: row.id,
-          title: row.title,
-          projectId:
-            projects.find((p) => p.path === row.projectPath)?.id ?? null,
-        })),
-    };
-  }
+  const navigation = () => trustedNavigation(host, files.checkRoot);
   async function nativeSession(id: string) {
     const allowed = await navigation();
     if (!allowed.sessions.some((s) => s.id === id))

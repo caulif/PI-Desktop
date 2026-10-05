@@ -342,7 +342,7 @@ fn transient_retry_requires_confirmed_rejection_and_has_two_delays() {
 }
 
 #[test]
-fn v20_migration_preserves_existing_intents_and_unlocks_retry_ledger() {
+fn v22_migration_preserves_existing_intents_and_unlocks_retry_ledger() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pi.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -361,7 +361,7 @@ fn v20_migration_preserves_existing_intents_and_unlocks_retry_ledger() {
              INSERT INTO scheduled_tasks(id) VALUES('task-1');
              INSERT INTO plugin_schedule_occurrences VALUES('occ-1','task-1',1,1000,'pending',NULL,1000,1000);
              INSERT INTO plugin_automation_intents VALUES('intent-1','plugin-a','session-1','occ-1','schedule:occ-1','hash','unknown',NULL,1000,1000);
-             PRAGMA user_version=20;",
+             PRAGMA user_version=22;",
         ).unwrap();
     crate::db::migrate_v22_to_v23(&conn, &path).unwrap();
     let version: i64 = conn

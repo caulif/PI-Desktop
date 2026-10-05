@@ -48,9 +48,21 @@ const report = {
   checks: [],
   providerRequests: 0,
 };
-report.runtimeHashes={};
-for(const [name,file]of Object.entries({core:binary,sidecar,hostModule:join(repo,"apps/pi-host/dist-bundle/service.mjs"),botDomain:join(botRoot,"release/main.js"),gateway:join(botRoot,"release/server/gateway.cjs")}))report.runtimeHashes[name]=createHash("sha256").update(await readFile(file)).digest("hex");
-if(process.getuid){report.uid=process.getuid();assert.notEqual(report.uid,0,"Acceptance must run without root privileges");}
+report.runtimeHashes = {};
+for (const [name, file] of Object.entries({
+  core: binary,
+  sidecar,
+  hostModule: join(repo, "apps/pi-host/dist-bundle/service.mjs"),
+  botDomain: join(botRoot, "release/main.js"),
+  gateway: join(botRoot, "release/server/gateway.cjs"),
+}))
+  report.runtimeHashes[name] = createHash("sha256")
+    .update(await readFile(file))
+    .digest("hex");
+if (process.getuid) {
+  report.uid = process.getuid();
+  assert.notEqual(report.uid, 0, "Acceptance must run without root privileges");
+}
 const proof =
   "# Actual remote Work\n\nWritten through native Host-approved bot_workbench over authenticated RACP.\n";
 let app, second, remote, runtime, gateway, origin, cookie, csrf;
@@ -534,7 +546,9 @@ try {
     workId,
     approvals: approved,
     artifactId,
-    diskSha256:createHash("sha256").update(await readFile(join(cfg.browseRoot,"pi-bot/remote-proof.md"))).digest("hex"),
+    diskSha256: createHash("sha256")
+      .update(await readFile(join(cfg.browseRoot, "pi-bot/remote-proof.md")))
+      .digest("hex"),
   });
   const sendMessage = (content) =>
     invoke("conversation.send", {
@@ -723,13 +737,38 @@ try {
   assert.equal(report.providerRequests, requestsBefore);
   record("actual-due-occurrence-once-across-node-central-restart");
   record("node-and-central-restart-preserve-result-without-reexecution");
-  await invoke("routine.toggle", {routineId:routine.routineId,enabled:false,expectedRevision:routine.revision});
-  const disabledDb=new DatabaseSync(join(cfg.dataDir,"pi.sqlite"));
-  const disabledTask=disabledDb.prepare("SELECT enabled FROM scheduled_tasks WHERE id=?").get(binding.binding.schedulerTaskId);assert.equal(disabledTask.enabled,0);
-  disabledDb.prepare("UPDATE scheduled_tasks SET config_json=json_set(config_json,'$.nextRunAt',CAST(? AS INTEGER)) WHERE id=?").run(Date.now()-60000,binding.binding.schedulerTaskId);
-  const occurrenceCount=()=>disabledDb.prepare("SELECT COUNT(*) AS count FROM plugin_schedule_occurrences WHERE task_id=?").get(binding.binding.schedulerTaskId).count;
-  const beforeDisabled=occurrenceCount();await delay(31000);assert.equal(occurrenceCount(),beforeDisabled);disabledDb.close();assert.equal(report.providerRequests,requestsBefore);
-  assert.equal((await invoke("routine.runs",{routineId:routine.routineId})).runs.length,1);record("actual-disabled-routine-creates-no-occurrence-after-due-tick");
+  await invoke("routine.toggle", {
+    routineId: routine.routineId,
+    enabled: false,
+    expectedRevision: routine.revision,
+  });
+  const disabledDb = new DatabaseSync(join(cfg.dataDir, "pi.sqlite"));
+  const disabledTask = disabledDb
+    .prepare("SELECT enabled FROM scheduled_tasks WHERE id=?")
+    .get(binding.binding.schedulerTaskId);
+  assert.equal(disabledTask.enabled, 0);
+  disabledDb
+    .prepare(
+      "UPDATE scheduled_tasks SET config_json=json_set(config_json,'$.nextRunAt',CAST(? AS INTEGER)) WHERE id=?",
+    )
+    .run(Date.now() - 60000, binding.binding.schedulerTaskId);
+  const occurrenceCount = () =>
+    disabledDb
+      .prepare(
+        "SELECT COUNT(*) AS count FROM plugin_schedule_occurrences WHERE task_id=?",
+      )
+      .get(binding.binding.schedulerTaskId).count;
+  const beforeDisabled = occurrenceCount();
+  await delay(31000);
+  assert.equal(occurrenceCount(), beforeDisabled);
+  disabledDb.close();
+  assert.equal(report.providerRequests, requestsBefore);
+  assert.equal(
+    (await invoke("routine.runs", { routineId: routine.routineId })).runs
+      .length,
+    1,
+  );
+  record("actual-disabled-routine-creates-no-occurrence-after-due-tick");
   await remote.revokeDevice(paired.deviceId);
   await assert.rejects(
     () => remote.api.models.list(),
