@@ -35,7 +35,7 @@ export function createBotNodePort(
 ): Port {
   let peer: Peer | undefined;
   const invocations = new Map<string, string>();
-  const events = ["session:turnEnded", "scheduled:pluginDue", "web:consent"];
+  const events = ["session:turnEnded", "scheduled:pluginDue", "web:consent", "host.changed"];
   const listeners = new Map<string, (payload: unknown) => void>();
   const principal = (p: Peer): WebPrincipal => ({
     userId: "owner",

@@ -7,7 +7,9 @@ import {
   type TrustedPluginDeps,
 } from "./trusted-plugin.js";
 import { createTrustedFiles } from "./trusted-plugin-files.js";
-async function fixture() {
+import { AgentHost } from "@pi-desktop/agent-host";
+import { createBotNodePort } from "./bot-node.js";
+async function fixture(approvalLifetimeMs = 120_000) {
   const root = await mkdtemp(join(tmpdir(), "pi-trusted-"));
   const calls: { method: string; params: any }[] = [];
   let listener: ((m: string, p: unknown) => void) | undefined;
@@ -15,7 +17,7 @@ async function fixture() {
     call: async (method: string, params: any) => {
       calls.push({ method, params });
       if (method === "scheduled.pluginSessionOwnership")
-        return { state: "own" };
+        return { state: params.sessionId === "other-session" ? "other" : "own" };
       if (method === "session.configure")
         return {
           session: { id: params.id, permissionMode: params.permissionMode },
@@ -30,6 +32,12 @@ async function fixture() {
     },
   };
   const abort = vi.fn(async () => {});
+  const native = new AgentHost({
+    runtime: { prompt: async () => ({ turnId: "turn-1" }), stop: async () => ({ requested: true }), abort, respondInput: async () => {} },
+    sessions: { get: async (id) => ({ id, title: id, mode: "agent", permissionMode: "ask", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }), history: async () => ({ items: [], hasMore: false }) },
+    approvals: { resolveTool: async () => {}, resolveContract: async () => {}, listPendingTools: async () => [] },
+    localApprovalLifetimeMs: approvalLifetimeMs,
+  });
   const deps = {
     getHost: () => h,
     getSidecar: () => null,
@@ -38,7 +46,7 @@ async function fixture() {
       activeTurnId: () => "turn-1",
       abort,
     },
-    agentHost: {},
+    agentHost: native,
     log: () => {},
   } as unknown as TrustedPluginDeps;
   const plugin = createTrustedPlugin(
@@ -55,8 +63,10 @@ async function fixture() {
   return {
     root,
     calls,
+    host: h,
     plugin,
     abort,
+    native,
     notify: (m: string, p: unknown) => listener?.(m, p),
     close: async () => {
       plugin.stop();
@@ -65,6 +75,96 @@ async function fixture() {
   };
 }
 describe("headless first-party broker", () => {
+  it.each(["tool", "plan", "goal"] as const)("bridges actual AgentHost %s approvals and external settlement without leaking native payloads", async (kind) => {
+    const f = await fixture();
+    try {
+      const events: unknown[] = [];
+      f.plugin.api.events.on("host.changed", (payload) => events.push(payload));
+      const ingest = (sessionId: string, id: string) => {
+        f.native.ingest({ sessionId, turnId: "native-turn-" + sessionId, ts: Date.now(), event: { type: "agent_start" } });
+        f.native.ingest({ sessionId, turnId: "native-turn-" + sessionId, ts: Date.now(), event: kind === "tool" ? { type: "tool_permission_request", request: { requestId: id, sessionId, toolName: "Bash", toolCallId: "tool-1", argsPreview: { command: "private-command" }, risk: "high", reason: "private-reason" } } : { type: "planning_state", state: "awaiting_approval", kind, proposalId: id, title: "private-title", question: "private-question", version: 1 } });
+      };
+      ingest("other-session", "other-approval");
+      ingest("s1", "own-approval");
+      await vi.waitFor(() => expect(events).toEqual([{ sessionId: "s1", reason: "approvals" }]));
+      expect(f.native.pendingApprovals("s1")).toHaveLength(1);
+      expect(await f.plugin.approvals("s1")).toMatchObject([{ id: "own-approval", kind, sessionId: "s1" }]);
+      await expect(f.plugin.approvals("other-session")).rejects.toThrow("not owned");
+      expect(f.native.pendingApprovals("s1")[0]?.expiresAt).not.toBeUndefined();
+      f.native.settleApprovalExternally("own-approval", { status: "resolved", decision: kind === "tool" ? "deny" : "reject" });
+      await vi.waitFor(() => expect(events).toHaveLength(2));
+      expect(f.native.pendingApprovals("s1")).toEqual([]);
+      expect(await f.plugin.approvals("s1")).toEqual([]);
+      expect(JSON.stringify(events)).not.toContain("private");
+      f.plugin.stop();
+      ingest("s1", "after-stop");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(events).toHaveLength(2);
+    } finally { await f.close(); }
+  });
+  it("forwards real native approval creation and cancellation to only the attached node peer and detaches on release", async () => {
+    const f = await fixture();
+    const delivered: any[] = [];
+    const peer = { connectionId: "central-1", principal: { subject: "central-owner", roles: ["owner" as const] }, isClosed: () => false, request: async (method: string, payload: unknown) => { delivered.push({ method, payload }); return {}; } };
+    const port = createBotNodePort(f.plugin, () => {});
+    try {
+      await port.invoke("botNode/attach", { description: "test", schema: { type: "object" } }, peer);
+      f.native.ingest({ sessionId: "s1", turnId: "rt1", ts: Date.now(), event: { type: "agent_start" } });
+      f.native.ingest({ sessionId: "s1", turnId: "rt1", ts: Date.now(), event: { type: "planning_state", state: "awaiting_approval", kind: "goal", proposalId: "p1", title: "private", question: "private" } });
+      await vi.waitFor(() => expect(delivered).toEqual([{ method: "botNode/event", payload: { event: "host.changed", payload: { sessionId: "s1", reason: "approvals" } } }]));
+      f.native.ingest({ sessionId: "s1", turnId: "rt1", ts: Date.now(), event: { type: "agent_end", messageIds: [] } });
+      await vi.waitFor(() => expect(delivered).toHaveLength(2));
+      expect(f.native.pendingApprovals("s1")).toEqual([]);
+      port.release(peer.connectionId);
+      f.native.ingest({ sessionId: "s1", turnId: "rt2", ts: Date.now(), event: { type: "planning_state", state: "awaiting_approval", kind: "plan", proposalId: "p2", title: "private", question: "private" } });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(delivered).toHaveLength(2);
+    } finally { port.release(peer.connectionId); await f.close(); }
+  });
+  it("refreshes at actual native approval expiry without changing local approval lifetime", async () => {
+    const f = await fixture(150);
+    try {
+      const events: unknown[] = [];
+      f.plugin.api.events.on("host.changed", (payload) => events.push(payload));
+      const before = Date.now();
+      f.native.ingest({ sessionId: "s1", turnId: "rt1", ts: before, event: { type: "planning_state", state: "awaiting_approval", kind: "goal", proposalId: "expiry", title: "title", question: "?" } });
+      expect(Date.parse(f.native.pendingApprovals("s1")[0]!.expiresAt) - before).toBeLessThan(200);
+      await vi.waitFor(() => expect(events).toHaveLength(2));
+      expect(f.native.pendingApprovals("s1")).toEqual([]);
+    } finally { await f.close(); }
+  });
+  it("cancels expiry timers and detaches the native observer on stop", async () => {
+    const f = await fixture();
+    vi.useFakeTimers();
+    try {
+      f.native.ingest({ sessionId: "s1", ts: Date.now(), event: { type: "planning_state", state: "awaiting_approval", kind: "goal", proposalId: "p1", title: "title", question: "?" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      const callCount = f.calls.length;
+      f.plugin.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      f.native.ingest({ sessionId: "s1", ts: Date.now(), event: { type: "planning_state", state: "awaiting_approval", kind: "goal", proposalId: "p2", title: "title", question: "?" } });
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(f.calls).toHaveLength(callCount);
+    } finally { vi.useRealTimers(); await f.close(); }
+  });
+  it("fails closed when an ownership check finishes after stop", async () => {
+    const f = await fixture();
+    try {
+      let finish!: (value: { state: string }) => void;
+      const ownership = new Promise<{ state: string }>((resolve) => { finish = resolve; });
+      const check = vi.spyOn(f.host, "call").mockImplementation(async () => ownership);
+      const listener = vi.fn();
+      f.plugin.api.events.on("host.changed", listener);
+      f.native.ingest({ sessionId: "s1", ts: Date.now(), event: { type: "planning_state", state: "awaiting_approval", kind: "plan", proposalId: "p1", title: "private", question: "private" } });
+      await vi.waitFor(() => expect(check).toHaveBeenCalledOnce());
+      f.plugin.stop();
+      finish({ state: "own" });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(listener).not.toHaveBeenCalled();
+      expect(check).toHaveBeenCalledOnce();
+    } finally { await f.close(); }
+  });
   it("confirms abort only for the exact live native turn", async () => {
     const f = await fixture();
     try {

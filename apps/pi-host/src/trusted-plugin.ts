@@ -39,6 +39,7 @@ import {
   type TrustedPluginDeps,
 } from "./trusted-plugin-contracts.js";
 import { createIndependentCompletion } from "./trusted-plugin-completion.js";
+import { subscribeNativeApprovalChanges } from "./trusted-plugin-approvals-events.js";
 /** Fixed administrator-installed first-party module; this is not a general plugin loader. */
 export function createTrustedPlugin(
   config: TrustedPluginConfig,
@@ -111,6 +112,9 @@ export function createTrustedPlugin(
     }>("scheduled.pluginSessionOwnership", { pluginId, sessionId });
     if (result.state !== "own") fail("Session is not owned by this plugin");
   };
+  const detachApprovalEvents = subscribeNativeApprovalChanges({
+    getHost: deps.getHost, agentHost: deps.agentHost, log: deps.log, pluginId, emit,
+  });
   const consent = async (operation: string, args: readonly unknown[]) => {
     const principal = users.getStore();
     if (!principal) fail("Authenticated user consent is required");
@@ -778,6 +782,7 @@ export function createTrustedPlugin(
       stopped = true;
       scheduler.stop();
       detach();
+      detachApprovalEvents();
       invocations.cancelOwner(owner, "Plugin stopped");
       for (const p of pending.values()) {
         clearTimeout(p.timer);

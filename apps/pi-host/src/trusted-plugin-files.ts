@@ -34,6 +34,26 @@ export function createTrustedFiles(
   getRoot: () => Promise<string>,
   access?: ResolvedFsAccess,
 ) {
+  const checkPolicy = (path: string, write: boolean) => {
+    if (isDeniedFsPath(path)) fail("Protected file path");
+    if (access) {
+      const mode = write ? "write" : "read";
+      const rule = access.policy[mode];
+      if (
+        !access.permissions.includes("fs." + mode) ||
+        rule?.root !== "workspace" ||
+        !rule.scope.some((pattern) => matchFsGlob(path, pattern))
+      )
+        fail("File is outside the declared plugin scope");
+    }
+  };
+  const checkCanonical = (root: string, path: string, write: boolean) => {
+    if (!within(root, path)) fail("Symlink leaves project root");
+    // Include the root's own segments: a workspace alias must not turn a
+    // protected directory into an apparently ordinary project root.
+    if (isDeniedFsPath(path)) fail("Protected file path");
+    checkPolicy(relative(root, path), write);
+  };
   const checkRoot = async (path: string) => {
     const canonical = await realpath(path);
     const allowed = await Promise.all(roots.map((r) => realpath(r)));
@@ -48,17 +68,7 @@ export function createTrustedFiles(
       path.split(/[\\/]/).includes("..")
     )
       fail("Relative workspace path required");
-    if (isDeniedFsPath(path)) fail("Protected file path");
-    if (access) {
-      const mode = write ? "write" : "read";
-      const rule = access.policy[mode];
-      if (
-        !access.permissions.includes("fs." + mode) ||
-        rule?.root !== "workspace" ||
-        !rule.scope.some((pattern) => matchFsGlob(path, pattern))
-      )
-        fail("File is outside the declared plugin scope");
-    }
+    checkPolicy(path, write);
     const root = await checkRoot(await getRoot());
     const candidate = resolve(root, path);
     if (!within(root, candidate)) fail("Path leaves project root");
@@ -66,13 +76,14 @@ export function createTrustedFiles(
     try {
       canonical = await realpath(candidate);
     } catch (error) {
-      if (!write || (error as NodeJS.ErrnoException).code !== "ENOENT")
-        throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       let ancestor = dirname(candidate);
       while (true) {
         try {
           const real = await realpath(ancestor);
           if (!within(root, real)) fail("Write parent leaves project root");
+          const projected = resolve(real, relative(ancestor, candidate));
+          checkCanonical(root, projected, write);
           break;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -81,13 +92,14 @@ export function createTrustedFiles(
           ancestor = parent;
         }
       }
+      if (!write) throw error;
       await mkdir(dirname(candidate), { recursive: true });
       canonical = resolve(
         await realpath(dirname(candidate)),
         candidate.split(/[\\/]/).at(-1)!,
       );
     }
-    if (!within(root, canonical)) fail("Symlink leaves project root");
+    checkCanonical(root, canonical, write);
     return canonical;
   };
   const read = async (path: string, offset = 0, length = 524288) => {
@@ -109,6 +121,7 @@ export function createTrustedFiles(
       const before = await handle.stat();
       const root = await checkRoot(await getRoot());
       const current = await realpath(target);
+      checkCanonical(root, current, false);
       const currentStat = await stat(current);
       if (
         !within(root, current) ||
@@ -177,6 +190,16 @@ export function createTrustedFiles(
         const canonicalParent = await realpath(dirname(target));
         const actualParent = await stat(canonicalParent);
         const root = await checkRoot(await getRoot());
+        try {
+          checkCanonical(
+            root,
+            resolve(canonicalParent, target.split(/[\\/]/).at(-1)!),
+            true,
+          );
+        } catch (error) {
+          await parent.close();
+          throw error;
+        }
         if (
           !within(root, canonicalParent) ||
           identity.dev !== actualParent.dev ||

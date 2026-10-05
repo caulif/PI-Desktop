@@ -9,6 +9,7 @@ import type {
   RacpApprovalResponse,
   RacpApprovalResult,
   RacpCursor,
+  RacpEventEnvelope,
   RacpInputRequest,
   RacpInputResponse,
   RacpItemSummary,
@@ -177,6 +178,13 @@ const MAX_TURNS_PER_SESSION = 200;
  * the messaging integration are callers of this one object.
  */
 export class AgentHost {
+  private readonly sessionEventListeners = new Set<(event: RacpEventEnvelope) => void>();
+
+  /** In-process observers only; no remote subscription or control role is granted. */
+  onSessionEvent(listener: (event: RacpEventEnvelope) => void): () => void {
+    this.sessionEventListeners.add(listener);
+    return () => { this.sessionEventListeners.delete(listener); };
+  }
   readonly hub: EventHub;
   readonly queue: TurnQueue;
   readonly approvals: ApprovalBroker;
@@ -1211,7 +1219,7 @@ export class AgentHost {
   ): void {
     const durable = racpDurable(kind);
     if (durable) state.revision += 1;
-    this.hub.publish({
+    const envelope = this.hub.publish({
       scope: "session",
       sessionId: state.id,
       ...(meta.turnId ? { turnId: meta.turnId } : {}),
@@ -1222,6 +1230,7 @@ export class AgentHost {
       ...(meta.agentName ? { agentName: meta.agentName } : {}),
       payload: this.boundPayload(payload),
     });
+    for (const listener of this.sessionEventListeners) listener(envelope);
   }
 
   private emitSessionChanged(state: SessionState): void {
