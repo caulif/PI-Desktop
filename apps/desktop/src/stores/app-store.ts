@@ -432,7 +432,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // must not create a history row merely because the app was opened.
         set((s) => {
           const stack = s.navStack.slice(0, s.navIndex + 1);
-          const nextStack = [...stack, { page: "chat" as const, ...(s.pluginTarget ? { pluginTarget: s.pluginTarget } : {}) }].slice(-50);
+          const nextStack = [...stack, { page: "chat" as const }].slice(-50);
           return {
             ...switchWorkPanelSession(s, undefined),
             ...clearSessionPanes(),

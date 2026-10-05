@@ -24,6 +24,12 @@ Each ADR includes:
 | 0312 | [Development scheduled calendar preview](0312-dev-scheduled-calendar-preview.md) | Implemented candidate |
 | 0313 | [Relay thinking transport](0313-relay-thinking-transport.md) | Implemented candidate |
 | 0314 | [Scoped Bot session tool policy](0314-plugin-bot-session-tool-policy.md) | Implemented candidate |
+| composer-mcp-invocations | [Composer MCP Invocations](composer-mcp-invocations.md) | Accepted |
+| chronological-system-transcript | [Preserve chronological model system state](chronological-system-transcript.md) | Accepted |
+| mcp-tool-approval-risk | [User MCP tools keep the normal approval path](mcp-tool-approval-risk.md) | Accepted |
+| models-dev-catalog-authority | [models.dev owns published model metadata](models-dev-catalog-authority.md) | Accepted for implementation |
+| pi-ai-core-0991-authority | [Pi 0.99.1 account model authority](pi-ai-core-0991-authority.md) | Superseded for chat model metadata |
+| plan-tool-declarations-and-execution-denials | [Keep known tool declarations while denying contract-mode execution](plan-tool-declarations-and-execution-denials.md) | Accepted for implementation |
 | trusted-extension-operation-ownership | [Trusted extension operation ownership](trusted-extension-operation-ownership.md) | Implemented candidate |
 | scheduled-desktop-automations | [Desktop automation scheduling](scheduled-desktop-automations.md) | Accepted for implementation |
 | subagent-model-fallback | [Ordered subagent model fallback](subagent-model-fallback.md) | Accepted for implementation |
@@ -54,7 +60,7 @@ Each ADR includes:
 | 0024 | Composer Slash Commands and @ File References | Accepted |
 | 0025 | Keep Application Menus out of Windows/Linux Windows | Accepted |
 | 0026 | Move the Projects Index into Settings as an Archive | Superseded in part by 0036 |
-| 0027 | Make pi-ai authoritative for model metadata | Accepted |
+| 0027 | Make pi-ai authoritative for model metadata | Superseded for chat metadata |
 | 0028 | Scope work-panel runtime contexts to conversations | Accepted |
 | 0029 | Separate native-window and work-panel resize ownership | Superseded in part by 0032 |
 | 0030 | Turn-boundary context checkpoint compaction | Accepted |
@@ -122,6 +128,7 @@ Each ADR includes:
 | 0092 | Use a plugin-owned surface with a host window-control capsule | Accepted |
 | 0093 | Keep a strict 46px plugin drag band with a minimal capsule | Accepted |
 | 0094 | Admit one desktop instance per data directory | Accepted |
+| custom-storage-location | [Custom storage location with cold migration](custom-storage-location.md) | Accepted |
 | 0095 | Sign in with a vendor account instead of pasting an API key | Accepted for implementation |
 | 0096 | Flatten the Settings directory and colocate marketplace source configuration | Accepted |
 | 0097 | Place global defaults under the AI settings destination | Accepted |
@@ -160,8 +167,8 @@ Each ADR includes:
 | 0130 | Bounded Mounted Transcript Window | Accepted |
 | 0131 | Spill Large Composer Text Pastes into Session Scratch | Accepted |
 | 0132 | Attribute cross-display window moves to the user | Accepted |
-| 0133 | Use models.dev as the primary model catalog with pi-ai fallback | Superseded by 0134 |
-| 0134 | Use models.dev as the sole model metadata source with a local snapshot | Accepted |
+| 0133 | Use models.dev as the primary model catalog with pi-ai fallback | Superseded for chat metadata by `models-dev-catalog-authority` |
+| 0134 | Use models.dev as the sole model metadata source with a local snapshot | Superseded for chat metadata by `models-dev-catalog-authority` |
 | 0135 | Retry unchanged edited prompts | Accepted |
 | 0136 | Preserve the active task boundary across context compaction | Accepted |
 | 0137 | Retained Session Panes | Accepted (amends 0130 clauses 4/5) |
@@ -343,10 +350,18 @@ Each ADR includes:
 | 0307 | [Sync the API-key service catalog with pi-ai's built-in providers](0307-pi-ai-api-key-provider-sync.md) | Accepted (amends ADR 0012 / 0020 / 0116 / 0155) |
 | 0308 | [Remove the Pull Requests destination and listing tool](0308-remove-pull-requests-destination.md) | Accepted |
 | 0309 | [Remove bundled macOS first-launch guidance](0309-remove-macos-first-launch-artifacts.md) | Accepted (D634; amends D457 / ADR 0296) |
-| 0310 | [Plugin peer navigation and isolated main views](0310-plugin-peer-navigation-and-main-views.md) | Accepted for implementation |
+| 0310 | [Keep local permission approvals pending until resolved](0310-local-permission-approvals-without-deadline.md) | Accepted for implementation |
+| 0311 | [Recheck Live Work workspace identity at Host admission](0311-live-work-workspace-admission-guard.md) | Implemented candidate |
+| 0312 | [Session-scoped Todo checklist](0312-session-scoped-todo-checklist.md) | Accepted for implementation |
+| 0317 | [Preserve Windows resizing without the native frameless rim](0317-windows-borderless-window-resize.md) | Accepted (D637) |
+| 0313 | [Default Live Work to the Current Composer Session](0313-live-voice-default-session-target.md) | Accepted |
+| 0315 | [A spoken answer selects among an open asktool question's own options](0315-live-voice-spoken-asktool-answers.md) | Accepted for implementation (amends the Live Voice Work Session decision path for AskTool only) |
+| 0316 | [The Live Voice call bar is a docked desktop widget window](0316-live-voice-docked-widget.md) | Accepted |
 | turn-process-and-thinking-display | [Turn process and thinking presentation](turn-process-and-thinking-display.md) | Accepted |
 | provider-display-order | [Provider display order](provider-display-order.md) | Accepted |
 | registry-header-variable-spelling | [Remote header variables accept the registry's `{name}` spelling](registry-header-variable-spelling.md) | Proposed |
 | provider-system-certificates | [Desktop sidecar uses OS-trusted certificates](provider-system-certificates.md) | Accepted |
 | image-generation-capability | [Image generation as a configured Agent capability](image-generation-capability.md) | Accepted |
 | retained-browser-pages-per-tab | [Retain a host-owned browser page per resource tab](retained-browser-pages-per-tab.md) | Accepted |
+| 0318 | [Publish native Linux arm64 artifacts](0318-linux-arm64-release-lane.md) | Accepted (D638) |
+| 0319 | [Inline external imports in owning Settings destinations](0319-settings-inline-imports.md) | Accepted (D645) |

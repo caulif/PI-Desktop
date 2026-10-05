@@ -1,7 +1,9 @@
 /**
- * Experimental settings destinations are retained in development builds but
- * omitted from packaged builds. Navigation, search, and stale-page handling
- * must all honor the same build visibility.
+ * Developer-only settings destinations are retained in development builds
+ * but omitted from packaged builds. Cloud sync is a public Experimental
+ * destination: it is visible in every build without developer mode.
+ * Navigation, search, and stale-page handling must all honor the same
+ * visibility rules.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -25,61 +27,142 @@ const composer = readFileSync(
   new URL("../src/components/Composer.tsx", import.meta.url),
   "utf8",
 );
+const composerToolbar = readFileSync(
+  new URL("../src/features/chat/composer/ComposerToolbar.tsx", import.meta.url),
+  "utf8",
+);
+
+const liveVoiceSettings = readFileSync(
+  new URL(
+    "../src/features/settings/voice/LiveVoiceSettings.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const settingsPrimitives = readFileSync(
+  new URL("../src/features/settings/primitives.tsx", import.meta.url),
+  "utf8",
+);
 
 const identity = (key) => key;
-const experimentalIds = ["voice", "sync", "remoteHosts"];
+const developerOnlyIds = ["remoteHosts"];
 
-test("developer mode retains the experimental destinations in development", () => {
+test("Live Voice is reachable in every build without developer mode", () => {
+  for (const developerMode of [false, true]) {
+    for (const includeDevelopmentOnly of [false, true]) {
+      assert.ok(visibleSettingsNav(developerMode, includeDevelopmentOnly)
+        .some((entry) => entry.id === "voice"));
+      assert.equal(isSettingsDestinationHidden("voice", developerMode, includeDevelopmentOnly), false);
+      for (const query of [
+        "liveVoice.title",
+        "liveVoice.enable",
+        "liveVoice.provider",
+        "liveVoice.adapters.codex-live.title",
+        "liveVoice.adapters.gemini-live.title",
+        "liveVoice.adapters.openai-realtime.title",
+      ]) {
+        assert.ok(searchSettings(query, identity, { developerMode, includeDevelopmentOnly })
+          .some((hit) => hit.tab === "voice"));
+      }
+    }
+  }
+  // Voice is a regular Preferences destination now: no Experimental badge on
+  // the rail row or the page title.
+  assert.equal(
+    SETTINGS_NAV.find((entry) => entry.id === "voice")?.experimentalBadgeKey,
+    undefined,
+  );
+});
+
+test("Cloud sync is reachable in every build without developer mode", () => {
+  for (const developerMode of [false, true]) {
+    for (const includeDevelopmentOnly of [false, true]) {
+      assert.ok(visibleSettingsNav(developerMode, includeDevelopmentOnly)
+        .some((entry) => entry.id === "sync"));
+      assert.equal(isSettingsDestinationHidden("sync", developerMode, includeDevelopmentOnly), false);
+      for (const query of [
+        "configSync.connectionTitle",
+        "configSync.endpoint",
+        "configSync.syncNow",
+      ]) {
+        assert.ok(searchSettings(query, identity, { developerMode, includeDevelopmentOnly })
+          .some((hit) => hit.tab === "sync"));
+      }
+    }
+  }
+  // Cloud sync is a regular destination now: no developer or build gate and no
+  // Experimental badge remain.
+  const sync = SETTINGS_NAV.find((entry) => entry.id === "sync");
+  assert.equal(sync?.developerOnly, undefined);
+  assert.equal(sync?.developmentOnly, undefined);
+  assert.equal(sync?.experimentalBadgeKey, undefined);
+});
+
+test("developer mode retains the developer-only destinations in development", () => {
   const off = visibleSettingsNav(false).map((entry) => entry.id);
   const on = visibleSettingsNav(true).map((entry) => entry.id);
 
-  for (const id of experimentalIds) {
+  for (const id of developerOnlyIds) {
     assert.equal(off.includes(id), false);
     assert.equal(on.includes(id), true);
   }
-  assert.deepEqual(off, on.filter((id) => !experimentalIds.includes(id)));
+  assert.deepEqual(off, on.filter((id) => !developerOnlyIds.includes(id)));
   assert.deepEqual(
     SETTINGS_NAV.filter((entry) => entry.developerOnly === true).map((entry) => entry.id),
-    experimentalIds,
+    developerOnlyIds,
   );
   assert.ok(
     SETTINGS_NAV.filter((entry) => entry.developerOnly === true)
       .every((entry) => entry.experimentalBadgeKey),
   );
+  assert.equal(off.includes("sync"), true);
 });
 
-test("packaged builds hide voice, cloud sync, and remote hosts", () => {
+test("packaged builds still hide the developer-only remote hosts", () => {
   const packaged = visibleSettingsNav(true, false).map((entry) => entry.id);
-  for (const id of experimentalIds) {
+  for (const id of developerOnlyIds) {
     assert.equal(packaged.includes(id), false);
     assert.equal(isSettingsDestinationHidden(id, true, false), true);
   }
+  assert.equal(packaged.includes("sync"), true);
+  assert.equal(isSettingsDestinationHidden("sync", true, false), false);
+  assert.equal(isSettingsDestinationHidden("sync", false, false), false);
   assert.equal(isSettingsDestinationHidden("general", true, false), false);
 });
 
 test("settings search mirrors developer and packaged visibility", () => {
-  assert.deepEqual(
-    searchSettings("configSync.connectionTitle", identity, { developerMode: false }),
-    [],
-  );
-  assert.ok(
-    searchSettings("configSync.connectionTitle", identity, { developerMode: true })
-      .some((hit) => hit.tab === "sync"),
-  );
-
-  for (const query of ["voiceEnable", "configSync.connectionTitle", "remotehosts"]) {
+  for (const options of [
+    { developerMode: false },
+    { developerMode: true },
+    { developerMode: false, includeDevelopmentOnly: false },
+    { developerMode: true, includeDevelopmentOnly: false },
+  ]) {
     assert.ok(
-      searchSettings(query, identity, { developerMode: true })
-        .some((hit) => experimentalIds.includes(hit.tab)),
-    );
-    assert.deepEqual(
-      searchSettings(query, identity, {
-        developerMode: true,
-        includeDevelopmentOnly: false,
-      }),
-      [],
+      searchSettings("configSync.connectionTitle", identity, options)
+        .some((hit) => hit.tab === "sync"),
     );
   }
+
+  for (const options of [
+    { developerMode: false },
+    { developerMode: false, includeDevelopmentOnly: false },
+  ]) {
+    assert.ok(
+      searchSettings("remotehosts", identity, options)
+        .every((hit) => hit.tab !== "remoteHosts"),
+    );
+  }
+  assert.ok(
+    searchSettings("remotehosts", identity, { developerMode: true })
+      .some((hit) => hit.tab === "remoteHosts"),
+  );
+  assert.deepEqual(
+    searchSettings("remotehosts", identity, {
+      developerMode: true,
+      includeDevelopmentOnly: false,
+    }),
+    [],
+  );
   assert.equal(searchSettings("settings", identity, { limit: 2 }).length, 2);
 });
 
@@ -91,6 +174,20 @@ test("settings routes, global search, and composer use build visibility", () => 
   assert.match(settingsPage, /tab === "sync" && !tabHidden && <ConfigSyncPage \/>/);
   assert.match(settingsPage, /tab === "remoteHosts" && !tabHidden && <RemoteHostsPage \/>/);
   assert.match(searchDialog, /includeDevelopmentOnly: import\.meta\.env\.DEV/);
-  assert.match(composer, /const voiceEnabled = import\.meta\.env\.DEV && !!settings\?\.voice\?\.enabled/);
-  assert.match(composer, /\{import\.meta\.env\.DEV && \([\s\S]*<VoiceOverlay/);
+  assert.match(composer, /useVoiceInput/);
+  assert.doesNotMatch(composer, /VoiceOverlay|voiceEnabled/);
+  assert.match(composerToolbar, /<LiveVoiceControls\b/);
+  assert.doesNotMatch(composerToolbar, /VoiceMicButton|voicePhase|onVoiceToggle|onVoiceCancel/);
+});
+
+test("Live Voice keeps its Model configuration link on the card heading", () => {
+  // The link belongs to the enable card's heading line, not to a floating
+  // control inside the row stack.
+  assert.match(settingsPrimitives, /settings-card-heading-with-action/);
+  assert.match(settingsPrimitives, /action\?: ReactNode/);
+  assert.match(
+    liveVoiceSettings,
+    /action=\{[\s\S]*className="settings-text-action"[\s\S]*settings\.configuration/,
+  );
+  assert.doesNotMatch(liveVoiceSettings, /live-voice-actions/);
 });

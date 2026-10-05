@@ -31,7 +31,7 @@ fn owned_bot_policy_tightens_on_registration_upgrade_and_restart() {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        23
+        crate::db::SCHEMA_VERSION
     );
     assert!(crate::db::migration_backup_path(&dir.path().join("pi.sqlite"), 22).exists());
     assert_eq!(
@@ -166,7 +166,7 @@ fn v21_upgrade_disables_schedules_without_native_authorization() {
         db.conn()
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        23
+        crate::db::SCHEMA_VERSION
     );
 }
 
@@ -363,11 +363,11 @@ fn v20_migration_preserves_existing_intents_and_unlocks_retry_ledger() {
              INSERT INTO plugin_automation_intents VALUES('intent-1','plugin-a','session-1','occ-1','schedule:occ-1','hash','unknown',NULL,1000,1000);
              PRAGMA user_version=20;",
         ).unwrap();
-    crate::db::migrate_v20_to_v21(&conn, &path).unwrap();
+    crate::db::migrate_v22_to_v23(&conn, &path).unwrap();
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 21);
+    assert_eq!(version, 23);
     let state: String = conn
         .query_row(
             "SELECT state FROM plugin_automation_intents WHERE request_intent_id='intent-1'",

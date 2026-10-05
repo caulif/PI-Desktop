@@ -3,7 +3,6 @@ import {
   ErrorCodes,
   inferEndpointProfile,
   normalizeApiStyle,
-  resolveBindingLimits,
   type ModelBinding,
   type ProviderReorderInput,
   type OAuthRespondInput,
@@ -15,10 +14,10 @@ import {
   probeDiscoveryCandidates,
   type DiscoveryAttempt,
 } from "../provider-endpoint-probe";
-import { modelConfigWithBinding } from "@pi-desktop/agent-runtime";
 import {
   catalogModelConfigFor,
   modelInfoFromModelsDev,
+  modelConfigFromModelsDev,
   type ModelsDevCatalog,
 } from "../models-dev-catalog";
 import type { HostProcess } from "../host-process";
@@ -70,8 +69,12 @@ export type ProviderIpcDependencies = {
     | "loadLocal"
     | "getStatus"
     | "findModel"
-    | "anthropicThinkingFor"
     | "modelsForProvider"
+    | "configureAccount"
+    | "deleteAccount"
+    | "modelConfigFor"
+    | "settingsMetadataFor"
+    | "publishedModelFor"
   >;
   vendorOAuth: VendorOAuth;
   logger: Pick<Logger, "app">;
@@ -79,6 +82,7 @@ export type ProviderIpcDependencies = {
   listRuntimeProviders: () => Promise<RuntimeProvider[]>;
   enrichProviderList: (result: { providers: RuntimeProvider[] }) => Promise<unknown>;
   bindingForModel: (provider: Pick<RuntimeProvider, "models">, modelId: string) => ModelBinding | undefined;
+  onProviderInvalidated?: (providerId: string) => Promise<void> | void;
 };
 
 /** Register provider catalog, model discovery, OAuth and secret channels. */
@@ -92,6 +96,7 @@ export function registerProviderIpc({
   listRuntimeProviders,
   enrichProviderList,
   bindingForModel,
+  onProviderInvalidated,
 }: ProviderIpcDependencies): void {
   let host: HostProcess | null = null;
   const handle = (channel: string, fn: (...args: any[]) => Promise<any>) => {
@@ -152,7 +157,8 @@ export function registerProviderIpc({
           : typeof input?.baseUrl === "string" && input.baseUrl
             ? (inferEndpointProfile({ baseUrl: input.baseUrl })?.providerKey ?? declaredKey)
             : declaredKey;
-      const model = modelsDevCatalog.findModel({
+      const model = (modelsDevCatalog.publishedModelFor?.bind(modelsDevCatalog) ?? modelsDevCatalog.findModel.bind(modelsDevCatalog))({
+        providerId: input?.providerId,
         vendorKey: lookupVendorKey,
         baseUrl: input?.baseUrl,
         modelId,
@@ -160,7 +166,7 @@ export function registerProviderIpc({
       return {
         info: model
           ? modelInfoFromModelsDev(model, input?.providerId ?? "")
-          : null,
+          : modelsDevCatalog.settingsMetadataFor?.({ providerId: input?.providerId, vendorKey: lookupVendorKey, baseUrl: input?.baseUrl, modelId }) ?? null,
       };
     },
   );
@@ -175,10 +181,14 @@ export function registerProviderIpc({
   });
   handle(IPC.invoke.providersUpdate, async (input: unknown) => {
     if (!host) throw new Error("host unavailable");
+    const providerId = input && typeof input === "object" && typeof (input as { id?: unknown }).id === "string"
+      ? (input as { id: string }).id
+      : "";
     const result = await host.call<{ provider?: RuntimeProvider | null }>(
       "providers.update",
       input,
     );
+    if (providerId) await onProviderInvalidated?.(providerId);
     await modelsDevCatalog.ensureLoaded();
     return result.provider
       ? { ...result, provider: enrichProvider(result.provider) }
@@ -192,6 +202,7 @@ export function registerProviderIpc({
         "providers.setSecret",
         input,
       );
+      await onProviderInvalidated?.(input.id);
       await modelsDevCatalog.ensureLoaded();
       return result.provider
         ? { ...result, provider: enrichProvider(result.provider) }
@@ -200,7 +211,10 @@ export function registerProviderIpc({
   );
   handle(IPC.invoke.providersDelete, async (id: string) => {
     if (!host) throw new Error("host unavailable");
-    return host.call("providers.delete", { id });
+    const result = await host.call("providers.delete", { id });
+    modelsDevCatalog.deleteAccount(id);
+    await onProviderInvalidated?.(id);
+    return result;
   });
   handle(IPC.invoke.providersTest, async (id: string) => {
     if (!host) throw new Error("host unavailable");
@@ -335,6 +349,7 @@ export function registerProviderIpc({
       const provider = req.providerId
         ? providers.find((p) => p.id === req.providerId)
         : undefined;
+      if (provider) modelsDevCatalog.configureAccount(provider);
       const baseUrl = (req.baseUrl ?? provider?.baseUrl ?? "").trim();
       const apiStyle = req.apiStyle ?? provider?.apiStyle ?? "chat_completions";
       /*
@@ -394,31 +409,29 @@ export function registerProviderIpc({
         modelApiStyle: string = apiStyle,
         catalogBaseUrl: string = endpointBaseUrl,
       ) => {
-        const modelsDevModel = modelsDevCatalog.findModel({
+        const modelsDevModel = (modelsDevCatalog.publishedModelFor?.bind(modelsDevCatalog) ?? modelsDevCatalog.findModel.bind(modelsDevCatalog))({
+          providerId: provider?.id,
           vendorKey: catalogVendorKey,
           baseUrl: catalogBaseUrl,
           modelId: model.modelId,
         });
-        const catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
+        const catalogModelConfig = modelsDevModel ? modelConfigFromModelsDev(modelsDevModel, catalogBaseUrl) : catalogModelConfigFor(modelsDevCatalog, {
+          providerId: provider?.id,
           vendorKey: catalogVendorKey,
           baseUrl: catalogBaseUrl,
           apiStyle: modelApiStyle,
           modelId: model.modelId,
         });
-        const storedModel = provider ? bindingForModel(provider, model.modelId) : undefined;
-        const resolvedModel = resolveBindingLimits(catalogModelConfig, storedModel);
-        const modelConfig = modelConfigWithBinding(
-          resolvedModel.catalogConfig,
-          resolvedModel.binding,
-        );
+        const modelConfig = catalogModelConfig;
+        const operationMetadata = modelsDevCatalog.settingsMetadataFor?.({ providerId: provider?.id, vendorKey: catalogVendorKey, baseUrl: catalogBaseUrl, modelId: model.modelId });
         const info = modelsDevModel
           ? modelInfoFromModelsDev(modelsDevModel, provider?.id ?? "")
-          : {
+          : operationMetadata ?? {
               modelId: model.modelId,
               displayName: model.displayName,
               providerId: provider?.id ?? "",
               modalities: modelConfig.modalities,
-              reasoning: catalogModelConfig.reasoning,
+              reasoning: catalogModelConfig.source === "generic" ? false : catalogModelConfig.reasoning,
               ...(catalogModelConfig.reasoningOptions
                 ? { reasoningOptions: catalogModelConfig.reasoningOptions }
                 : {}),
@@ -427,24 +440,27 @@ export function registerProviderIpc({
                 : {}),
               capabilities: [
                 "text",
-                ...(catalogModelConfig.reasoning ? ["reasoning" as const] : []),
+                ...(catalogModelConfig.source !== "generic" && catalogModelConfig.reasoning ? ["reasoning" as const] : []),
               ] as Array<"text" | "tools" | "vision" | "reasoning" | "json">,
               supportedThinkingLevels: [...(catalogModelConfig.supportedThinkingLevels ?? [])],
               source: model.source ?? ("discovered" as const),
             };
         return {
           ...info,
+          // Catalog enrichment must not turn a configured-only row into
+          // evidence that the endpoint still serves it.
+          source: model.source ?? info.source,
           modelId: model.modelId,
           displayName: info.displayName || modelConfig.name,
           providerId: provider?.id ?? "",
-          contextWindow: modelConfig.contextWindow,
-          maxTokens: modelConfig.maxTokens,
+          contextWindow: operationMetadata?.contextWindow ?? modelConfig.contextWindow,
+          maxTokens: operationMetadata?.maxTokens ?? modelConfig.maxTokens,
           // Published modalities, taken before the binding is applied. This
           // record is what the settings panel compares its checkboxes against,
           // so letting a stored override shape it would make the override its
           // own justification and the panel could never show what models.dev
           // actually says.
-          modalities: catalogModelConfig.modalities ?? { input: ["text"], output: ["text"] },
+          modalities: operationMetadata?.modalities ?? catalogModelConfig.modalities ?? { input: ["text"], output: ["text"] },
           // ModelInfo is catalog metadata. Keep its published reasoning fields
           // intact; Composer and runtime resolve the exact user binding when
           // they need effective per-provider capabilities.

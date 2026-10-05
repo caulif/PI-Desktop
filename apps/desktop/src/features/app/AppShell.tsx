@@ -1,9 +1,7 @@
-import { type CSSProperties, lazy, type ReactNode, Suspense } from "react";
-import { ChatSurface } from "../../components/ChatSurface";
-import { PluginMainSurface } from "../../components/PluginMainSurface";
-import { useAppStore } from "../../stores/app-store";
+import { type CSSProperties, lazy, type ReactNode, Suspense, useEffect } from "react";
 import { ConversationTopbar } from "../../components/ConversationTopbar";
 import { ExtensionPromptHost } from "../../components/ExtensionPromptDialog";
+import { PluginRendererHost } from "../../plugins/renderer-host/PluginRendererHost";
 import {
   IconNewSession,
   IconPanel,
@@ -17,10 +15,11 @@ import { ToastHost } from "../../components/Toast";
 import { UpdateBanner } from "../../components/UpdateBanner";
 import { cx, TooltipButton } from "../../components/ui";
 import { WindowControls } from "../../components/WindowControls";
-import { WorkPanel } from "../../components/workpanel/WorkPanel";
 import { useCopyTex } from "../../hooks/use-copy-tex";
 import { api } from "../../lib/api";
 import { PortalVisibilityProvider } from "../../lib/portal-visibility";
+import { workPanelLayout } from "../../lib/work-panel-resize";
+import { LiveVoiceStatusHost } from "../voice/live/LiveVoiceStatusHost";
 import { CollapsedTitlebarActions, RoutePending } from "./chrome";
 import { useAppShellRuntime } from "./useAppShellRuntime";
 
@@ -39,9 +38,18 @@ const PluginsPage = lazy(() =>
     default: module.PluginsPage,
   })),
 );
+const loadChatSurface = () => import("../../components/ChatSurface");
+const ChatSurface = lazy(() =>
+  loadChatSurface().then((module) => ({
+    default: module.ChatSurface,
+  })),
+);
+const loadWorkPanel = () => import("../../components/workpanel/WorkPanel");
+const WorkPanel = lazy(() =>
+  loadWorkPanel().then((module) => ({ default: module.WorkPanel })),
+);
 
 export function AppShell() {
-  const pluginTarget = useAppStore(state => state.pluginTarget);
   const {
     t,
     ready,
@@ -83,8 +91,30 @@ export function AppShell() {
     startupRetrying,
     sidebarToggleShortcut,
     workPanelToggleTooltip,
+    workPanelWidth,
   } = useAppShellRuntime();
   useCopyTex();
+
+  useEffect(() => {
+    void loadChatSurface().catch((error: unknown) => {
+      console.error("Failed to preload the chat surface", error);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!ready || page !== "chat" || !workPanelOpen) return;
+    void loadWorkPanel().catch((error: unknown) => {
+      console.error("Failed to preload the work panel", error);
+    });
+  }, [page, ready, workPanelOpen]);
+
+  const pendingWorkPanelWidth = workPanelLayout({
+    containerWidth: shellWidth,
+    sidebarWidth,
+    sidebarCollapsed,
+    requestedPanelWidth: workPanelWidth,
+    maximized: workPanelMaximized,
+  }).panelWidth;
 
   // A boot that never reaches the shell gets a surface it can act on instead of
   // a window that only knows how to wait (issue #831). Rendered as a direct child
@@ -158,7 +188,7 @@ export function AppShell() {
 
             {!workPanelMaximized && (
               <section className="main-pane">
-                {page === "chat" && !pluginTarget ? (
+                {page === "chat" ? (
                   <ConversationTopbar
                     sidebarCollapsed={sidebarCollapsed}
                     workPanelOpen={presentedWorkPanelOpen}
@@ -173,7 +203,6 @@ export function AppShell() {
                       presentedWorkPanelOpen && "work-panel-open",
                     )}
                   >
-                    {pluginTarget && <div className="main-titlebar-left no-drag"><TooltipButton tooltip={t("settings.shortcutAction.navigateBack")} ariaLabel={t("settings.shortcutAction.navigateBack")} onClick={() => useAppStore.getState().navBack()}>←</TooltipButton><span>{pluginTarget.title}</span></div>}
                     {sidebarCollapsed && (
                       <div className="main-titlebar-left no-drag">
                         <CollapsedTitlebarActions
@@ -243,7 +272,7 @@ export function AppShell() {
                 )}
 
                 <Suspense fallback={<RoutePending />}>
-                  {pluginTarget && page === "chat" ? <PluginMainSurface blocked={searchOpen} /> : page === "scheduled" ? (
+                  {page === "scheduled" ? (
                     <div className="route-surface route-page">
                       <ScheduledPage />
                     </div>
@@ -258,21 +287,38 @@ export function AppShell() {
               </section>
             )}
 
-            {!pluginTarget && (presentedWorkPanelOpen || workPanelExiting) && (
-              <WorkPanel
-                panelBlocked={searchOpen}
-                exiting={workPanelExiting}
-                onExitAnimationEnd={() =>
-                  finishWorkPanelExit(workPanelExitGeneration.current)
+            {(presentedWorkPanelOpen || workPanelExiting) && (
+              <Suspense
+                fallback={
+                  <aside
+                    className="work-panel work-panel-pending"
+                    role="status"
+                    aria-label={t("app.loadingView")}
+                    style={
+                      {
+                        "--work-panel-width": `${pendingWorkPanelWidth}px`,
+                      } as CSSProperties
+                    }
+                  >
+                    <span className="route-pending-indicator" aria-hidden />
+                  </aside>
                 }
-                containerWidth={shellWidth}
-                sidebarWidth={sidebarWidth}
-                sidebarCollapsed={sidebarCollapsed}
-                sidebarExiting={sidebarExiting}
-                onAutoCollapseSidebar={autoCollapseSidebar}
-                maximized={workPanelMaximized}
-                onToggleMaximize={toggleWorkPanelMaximize}
-              />
+              >
+                <WorkPanel
+                  panelBlocked={searchOpen}
+                  exiting={workPanelExiting}
+                  onExitAnimationEnd={() =>
+                    finishWorkPanelExit(workPanelExitGeneration.current)
+                  }
+                  containerWidth={shellWidth}
+                  sidebarWidth={sidebarWidth}
+                  sidebarCollapsed={sidebarCollapsed}
+                  sidebarExiting={sidebarExiting}
+                  onAutoCollapseSidebar={autoCollapseSidebar}
+                  maximized={workPanelMaximized}
+                  onToggleMaximize={toggleWorkPanelMaximize}
+                />
+              </Suspense>
             )}
 
             <TooltipButton
@@ -298,6 +344,8 @@ export function AppShell() {
         ) : null}
         <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
         <ToastHost />
+        <LiveVoiceStatusHost />
+        <PluginRendererHost />
         <ExtensionPromptHost />
         {page === "settings" ? <UpdateBanner /> : null}
       </>

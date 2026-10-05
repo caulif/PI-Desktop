@@ -17,6 +17,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createInstallationIdentity } from "./installation-identity.ts";
 
 import { InMemoryModelsStore } from "@earendil-works/pi-ai";
 import type {
@@ -44,11 +45,12 @@ import {
 import {
   isConversationModelId,
   parseVendorModelIds,
-  pinnedSiblingId,
   readVendorModelList,
+  VendorModelListError,
   vendorModelListRequest,
   wireForLiveModel,
 } from "./vendor-live-models.ts";
+import type { ThinkingLevel } from "@pi-desktop/shared";
 import {
   OAUTH_AUTH_KIND,
   type OAuthLoginEvent,
@@ -57,7 +59,6 @@ import {
   type OAuthStartResult,
   type OAuthVendor,
   type ModelBinding,
-  type ThinkingLevel,
 } from "@pi-desktop/shared";
 
 export { OAUTH_AUTH_KIND };
@@ -94,36 +95,33 @@ export function apiStyleForWireApi(api: string): string {
   return API_STYLE_BY_WIRE_API[api] ?? "chat_completions";
 }
 
+function wireApiForStyle(style: string): Api {
+  return Object.entries(API_STYLE_BY_WIRE_API).find(([, value]) => value === style)?.[0] ?? "openai-completions";
+}
+
+/** Interpret an explicitly supplied wire map without borrowing another model's record. */
+function withMappedThinkingLevels(config: ModelConfig): ModelConfig {
+  if (!config.thinkingLevelMap) return config;
+  const supportedThinkingLevels = Object.entries(config.thinkingLevelMap).flatMap(([level, value]) =>
+    typeof value === "string" ? [level as ThinkingLevel] : [],
+  );
+  return {
+    ...config,
+    reasoning: supportedThinkingLevels.some((level) => level !== "off"),
+    supportedThinkingLevels,
+  };
+}
+
 export function protocolForApiStyle(apiStyle: string): string {
   return PROTOCOL_BY_API_STYLE[apiStyle] ?? "openai_compatible";
 }
 
 const LIVE_MODELS_TTL_MS = 30_000;
 const LIVE_MODELS_NEGATIVE_TTL_MS = 15_000;
-const THINKING_LEVEL_ORDER = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const satisfies readonly ThinkingLevel[];
 
 /** xAI and the other account lists also publish generators. Those are not conversation models. */
 export function isXaiConversationModel(modelId: string): boolean {
   return isConversationModelId(modelId);
-}
-
-function thinkingLevelsFromPiModel(model: Model<Api>): ThinkingLevel[] {
-  const map = model.thinkingLevelMap as Partial<Record<string, string | null>> | undefined;
-  if (!map) return model.reasoning ? ["low", "medium", "high"] : ["off"];
-  const levels = THINKING_LEVEL_ORDER.filter((level) => typeof map[level] === "string");
-  return levels.length > 0
-    ? [...levels]
-    : model.reasoning
-      ? ["low", "medium", "high"]
-      : ["off"];
 }
 
 export type HostCall = <T = unknown>(
@@ -162,10 +160,16 @@ export type VendorOAuthDeps = {
     message: string,
     data?: Record<string, unknown>,
   ) => void;
+  /** Stable local installation identity, owned by Host secrets. */
+  getInstallationId?: () => Promise<string>;
+  /** Share account-owned Models with the catalog without duplicating credentials. */
+  onAccountModels?: (providerId: string, models: MutableModels) => void;
+  onAccountRemoved?: (providerId: string) => void;
   /** Test seam: build the pi-ai collection without touching the real flows. */
   createModels?: (credentials: CredentialStore) => MutableModels;
   /** Model configuration is supplied by the main-process models.dev catalog. */
   modelConfigFor?: (input: {
+    providerId: string;
     vendorKey: string;
     option: OAuthModelOption;
   }) => Promise<ModelConfig | undefined>;
@@ -193,6 +197,7 @@ type AccountModels = {
   providerId: string;
   vendorId: string;
   models: MutableModels;
+  pinnedProvider?: Provider;
 };
 
 type LoginSession = {
@@ -242,9 +247,11 @@ export class VendorOAuth {
   private readonly chains = new Map<string, Promise<unknown>>();
   private catalogPromise?: Promise<MutableModels>;
   private oauthFlowsRegistered = false;
+  private readonly getInstallationId: () => Promise<string>;
 
   constructor(deps: VendorOAuthDeps) {
     this.deps = deps;
+    this.getInstallationId = deps.getInstallationId ?? createInstallationIdentity(deps.call);
     installProviderHeadersFetch();
   }
 
@@ -363,10 +370,11 @@ export class VendorOAuth {
       this.cancel(running.loginId);
       await running.finished?.catch(() => undefined);
     }
+    await this.deps.call("providers.delete", { id: providerId });
     this.accountModels.delete(providerId);
+    this.deps.onAccountRemoved?.(providerId);
     this.liveModelCache.delete(providerId);
     this.liveModelLoads.delete(providerId);
-    await this.deps.call("providers.delete", { id: providerId });
   }
 
   /**
@@ -397,8 +405,6 @@ export class VendorOAuth {
       if (!account) throw new Error(`unknown vendor account provider: ${providerId}`);
       // Dynamic catalogs (radius) are empty until refreshed.
       await account.models.refresh({ providers: [account.vendorId] });
-      const live = await this.liveAccountModels(account);
-      if (live) return live;
       const available = await account.models.getAvailable(account.vendorId);
       return available.map((model) => this.optionFor(model));
     });
@@ -436,19 +442,8 @@ export class VendorOAuth {
   ): Promise<VendorModelBinding | undefined> {
     const account = await this.accountForProvider(providerId);
     if (!account) return undefined;
-    let model = account.models.getModel(account.vendorId, modelId);
-    if (!model) {
-      await account.models.refresh({ providers: [account.vendorId] });
-      model = account.models.getModel(account.vendorId, modelId);
-    }
-    const live = await this.liveAccountModels(account);
-    if (live) {
-      const option = live.find((item) => item.modelId === modelId);
-      // A successful account list replaces the pinned catalog. An id it did
-      // not return is not offered, even when pi-ai still ships that id.
-      if (!option) return undefined;
-      return this.bindingFromOption(account, option);
-    }
+    await account.models.refresh({ providers: [account.vendorId] });
+    const model = account.models.getModel(account.vendorId, modelId);
     if (!model) return undefined;
     return this.bindingFromOption(account, this.optionFor(model));
   }
@@ -470,17 +465,19 @@ export class VendorOAuth {
     const pending = this.liveModelLoads.get(account.providerId);
     if (pending) return pending;
     const load = this.loadLiveAccountModels(account).finally(() => {
-      this.liveModelLoads.delete(account.providerId);
+      if (this.liveModelLoads.get(account.providerId) === load) this.liveModelLoads.delete(account.providerId);
     });
     this.liveModelLoads.set(account.providerId, load);
     return load;
   }
 
   private rememberLiveModels(
-    providerId: string,
+    account: AccountModels,
     models: OAuthModelOption[] | null,
   ): OAuthModelOption[] | undefined {
-    this.liveModelCache.set(providerId, { at: Date.now(), models });
+    if (this.accountModels.get(account.providerId) === account) {
+      this.liveModelCache.set(account.providerId, { at: Date.now(), models });
+    }
     return models ?? undefined;
   }
 
@@ -509,8 +506,8 @@ export class VendorOAuth {
     try {
       const body = await readVendorModelList(request, this.deps.fetch ?? globalThis.fetch);
       const ids = parseVendorModelIds(account.vendorId, body, request.allowPolicyFallback);
-      if (!ids || ids.length === 0) return this.rememberLiveModels(account.providerId, null);
-      const pinned = await account.models.getAvailable(account.vendorId);
+      if (!ids || ids.length === 0) return this.rememberLiveModels(account, null);
+      const pinned = account.pinnedProvider?.getModels() ?? await account.models.getAvailable(account.vendorId);
       const known = new Map(pinned.map((model) => [model.id, model]));
       const wires = pinned.map((model) => ({
         id: model.id,
@@ -528,14 +525,17 @@ export class VendorOAuth {
           baseUrl: wire.baseUrl,
         }];
       });
-      if (models.length === 0) return this.rememberLiveModels(account.providerId, null);
-      return this.rememberLiveModels(account.providerId, models);
+      if (models.length === 0) return this.rememberLiveModels(account, null);
+      return this.rememberLiveModels(account, models);
     } catch (error) {
       this.log("warn", "vendor account model list failed", {
         vendorId: account.vendorId,
         message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof VendorModelListError
+          ? { status: error.status, responseExcerpt: error.responseExcerpt }
+          : {}),
       });
-      return this.rememberLiveModels(account.providerId, null);
+      return this.rememberLiveModels(account, null);
     }
   }
 
@@ -544,10 +544,13 @@ export class VendorOAuth {
     option: OAuthModelOption,
   ): Promise<VendorModelBinding> {
     const published = await this.deps.modelConfigFor?.({
+      providerId: account.providerId,
       vendorKey: account.vendorId,
       option,
     }).catch(() => undefined);
-    const modelConfig = await this.withPinnedSiblingFallback(account, option, published);
+    const modelConfig = withMappedThinkingLevels(
+      published ?? genericModelConfig(option.modelId, option.baseUrl),
+    );
     const capabilities = capabilitiesFromModelConfig(modelConfig);
     return {
       apiStyle: option.apiStyle,
@@ -557,53 +560,16 @@ export class VendorOAuth {
     };
   }
 
-  /**
-   * models.dev is the metadata source when it already knows the id. A model
-   * that exists only on the live list otherwise inherits limits and thinking
-   * levels from a pinned sibling of the same tier. xAI uses an explicit
-   * newest-first order so pin order cannot pick an older Grok.
-   */
-  private async withPinnedSiblingFallback(
-    account: AccountModels,
-    option: OAuthModelOption,
-    published: ModelConfig | undefined,
-  ): Promise<ModelConfig> {
-    const config = published ?? genericModelConfig(option.modelId, option.baseUrl);
-    if (config.source !== "generic") return config;
-    const pinned = await account.models.getAvailable(account.vendorId);
-    if (pinned.some((model) => model.id === option.modelId)) return config;
-    const siblingId = pinnedSiblingId(
-      account.vendorId,
-      option.modelId,
-      pinned.map((model) => model.id),
-    );
-    const sibling = siblingId ? pinned.find((model) => model.id === siblingId) : undefined;
-    if (!sibling) return config;
-    const input = (sibling.input ?? []).filter(
-      (modality): modality is "text" | "image" => modality === "text" || modality === "image",
-    );
-    return {
-      ...config,
-      reasoning: sibling.reasoning,
-      input: input.length > 0 ? input : config.input,
-      contextWindow: sibling.contextWindow,
-      maxTokens: sibling.maxTokens,
-      limit: {
-        context: sibling.contextWindow,
-        input: sibling.contextWindow,
-        output: sibling.maxTokens,
-      },
-      supportedThinkingLevels: thinkingLevelsFromPiModel(sibling),
-    };
-  }
-
   private async run(session: LoginSession, provider: Provider): Promise<void> {
     try {
+      const installationId = await this.getInstallationId();
+      session.controller.signal.throwIfAborted();
       await this.withRowHeaders(session.providerId, () =>
         session.account.models.login(
           session.vendorId,
           "oauth",
           this.interactionFor(session),
+          { getDeviceId: () => installationId },
         ),
       );
       const accountLabel = provider.auth.oauth?.name || provider.name;
@@ -686,9 +652,12 @@ export class VendorOAuth {
 
   private async discardRow(session: LoginSession): Promise<void> {
     if (!session.createdRow) return;
-    this.accountModels.delete(session.providerId);
     try {
       await this.deps.call("providers.delete", { id: session.providerId });
+      this.accountModels.delete(session.providerId);
+      this.liveModelCache.delete(session.providerId);
+      this.liveModelLoads.delete(session.providerId);
+      this.deps.onAccountRemoved?.(session.providerId);
     } catch (error) {
       this.log("warn", "could not remove the half-created provider row", {
         vendorId: session.vendorId,
@@ -829,6 +798,7 @@ export class VendorOAuth {
     }
     return builtinModels({
       credentials,
+      authContext: { env: async () => undefined, fileExists: async () => false },
       modelsStore: new InMemoryModelsStore(),
     });
   }
@@ -836,12 +806,50 @@ export class VendorOAuth {
   private createAccount(vendorId: string, providerId: string): AccountModels {
     const existing = this.accountModels.get(providerId);
     if (existing) return existing;
-    const account = {
+    const account: AccountModels = {
       providerId,
       vendorId,
       models: this.createModels(this.credentialsFor(providerId, vendorId)),
     };
+    const original = account.models.getProvider(vendorId);
+    account.pinnedProvider = original;
+    if (original && vendorId !== "radius") {
+      let offered: Model<Api>[] | undefined;
+      account.models.setProvider({
+        ...original,
+        getModels: () => offered ?? original.getModels(),
+        getAllModels: () => [...(offered ?? original.getModels()), ...(original.getAllModels?.() ?? []).filter(model => model.type && model.type !== "chat")],
+        // The successful live list is the account's entitlement authority.
+        filterModels: (models, credential) => offered ? models : original.filterModels?.(models, credential) ?? models,
+        refreshModels: async context => {
+          await original.refreshModels?.(context);
+          if (!context.allowNetwork) return;
+          context.signal.throwIfAborted();
+          if (context.force) this.liveModelCache.delete(providerId);
+          const live = await this.withRowHeaders(providerId, () => this.liveAccountModels(account));
+          if (!live) return;
+          const projected = await Promise.all(live.map(async option => {
+            const config = withMappedThinkingLevels(await this.deps.modelConfigFor?.({
+              providerId,
+              vendorKey: account.vendorId,
+              option,
+            }).catch(() => undefined) ?? genericModelConfig(option.modelId, option.baseUrl));
+            return {
+              ...config, id: option.modelId, provider: vendorId,
+              api: wireApiForStyle(option.apiStyle), baseUrl: option.baseUrl,
+              // Generic limits and zero-price defaults are not published data.
+              cost: config.source === "generic"
+                ? { input: NaN, output: NaN, cacheRead: NaN, cacheWrite: NaN }
+                : config.cost ?? { input: NaN, output: NaN, cacheRead: NaN, cacheWrite: NaN },
+            } as Model<Api>;
+          }));
+          context.signal.throwIfAborted();
+          await context.publish({ update: () => { offered = projected; } });
+        },
+      });
+    }
     this.accountModels.set(providerId, account);
+    this.deps.onAccountModels?.(providerId, account.models);
     return account;
   }
 
@@ -856,8 +864,6 @@ export class VendorOAuth {
   private async accountForProvider(
     providerId: string,
   ): Promise<AccountModels | undefined> {
-    const existing = this.accountModels.get(providerId);
-    if (existing) return existing;
     const row = (await this.rows()).find(
       (candidate) =>
         candidate.id === providerId &&

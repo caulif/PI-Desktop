@@ -203,6 +203,7 @@ export function createSessionCoordination({
     });
     rememberSessionCompactions(summary.id, session);
     void get().restorePendingPlan(summary.id);
+    void get().restorePendingInteractive(summary.id);
   }
 
   function revealEmptyCreatingSession(intent: number): void {
@@ -285,6 +286,7 @@ export function createSessionCoordination({
       draft: draftConfig,
       settings,
       providers: state.providers,
+      recentModels: state.recentModels,
     });
     const defaultProvider = state.providers.find(
       (provider) => provider.id === inherited.providerId,
@@ -297,7 +299,7 @@ export function createSessionCoordination({
           sameComposerModelId(candidate.modelId, inherited.modelId ?? ""),
         )
       : undefined;
-    const defaultThinkingLevel = catalogModel
+    const defaultThinkingLevel = catalogModel?.catalogSource === "models.dev"
       ? initialThinkingLevelForBinding(
           inheritedBinding,
           defaultProvider?.supportedThinkingLevels,

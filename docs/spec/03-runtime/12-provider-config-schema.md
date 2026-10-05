@@ -420,7 +420,8 @@ Presets only prefill form defaults; they are not a closed world.
 
 These rows are created from the add-provider **Service** select, not from a
 new protocol. They remain `type: "openai_compatible"`. The common path is
-Service + API key; the published host is a summary, and the display name is
+Service + API key; the summary shows the endpoint host and path so subscription
+routes remain visible (wrapping when needed), and the display name is
 editable in Advanced. Custom endpoint shows Name beside Base URL, then API key
 beside API format. `vendorKey` is the models.dev provider key.
 
@@ -453,6 +454,15 @@ Qwen Token Plan (`alibaba-token-plan`, aliases `qwen-token-plan` /
 `qwen-token-plan-individual`), Qwen Token Plan (China)
 (`alibaba-token-plan-cn`, alias `qwen-token-plan-cn`), Xiaomi Token Plan
 (`xiaomi-token-plan-cn` / `-ams` / `-sgp`).
+
+StepFun Plan uses the `stepfun-plan` preset with catalog vendor key
+`stepfun-step-plan`, Base URL `https://api.stepfun.com/step_plan/v1`, and
+`anthropic_messages`. The existing Anthropic adapter removes the trailing
+`/v1` before the SDK appends `/v1/messages`, preserving the subscription path.
+Step 5 Preview capabilities come from the bundled first-party models.dev
+record; no supplemental catalog or hard-coded limits are needed. The ordinary
+StepFun API and existing custom-provider rows retain their configuration.
+
 
 Zhipu / Z.AI Completions requests still receive `thinkingFormat: "zai"` and
 `zaiToolStream: true`. pi-ai `zai-coding-cn` remains an alias of
@@ -620,13 +630,16 @@ The canonical DDL lives in [04-data-storage](04-data-storage.md) (D086). Summary
 ### `providers.listModels`
 - renderer IPC in: `{ providerId, source?: "cache"|"refresh" }`; `cache`
   returns the durable catalog without provider network access, while `refresh`
-  reads the local models.dev snapshot and runs provider endpoint discovery only for IDs absent from it
+  probes the provider for selectable IDs and decorates the answer with the
+  local models.dev snapshot; the catalog list is used only when discovery has
+  no usable answer
 - host RPC in: `{ providerId?: string }`; reads only the Rust-owned `models`
   table
 - for an `authKind: "oauth"` row Electron main reads the signed-in account's
-  model list (see `03-runtime/11-provider-model-system.md`) instead of the
-  pinned catalog. pi-ai `models.getAvailable` is used only when that request
-  fails. Each returned model carries the apiStyle its wire API implies.
+  model IDs (see `03-runtime/11-provider-model-system.md`) instead of the
+  published catalog. pi-ai `models.getAvailable` may provide fallback IDs only
+  when that request fails; it never supplies chat-model limits or capabilities.
+  Each returned model carries the apiStyle its wire API implies.
   `openai-codex` calls `GET {base}/codex/models`, so an account id such as
   `gpt-6-luna` appears without a pin update; models.dev does not invent those
   IDs. Copilot still hides models the account did not enable.

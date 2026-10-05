@@ -60,3 +60,16 @@ The library bundle `service.mjs` can be imported without starting any process.
 Required predecessor changes are explicitly included in this branch: reviewed
 plugin prompts/schedules, scoped completion capabilities and their migration
 extractions. They are not assumed to be released on upstream main.
+
+## Integration with current main
+
+Upstream schemas 20 (voice queue identity) and 21 (Todo checklist) collided with
+the earlier development Bot schema numbering. The combined schema is 25:
+upstream migrations retain 19→20→21; Bot bindings, retry ledger, frozen
+authorization and tool policy occupy 21→22→23→24→25. The final migration also
+applies upstream idempotent voice/Todo additions for old development profiles
+20–23. Table/column validation preserves existing ownership and fails incomplete
+retry/authorization layouts. Each step takes a readable migration backup.
+Real official-21 and development-23 fixtures preserve session/artifact data,
+ownership ceilings, integrity/foreign keys and survive reopening. Production
+profiles are never used by this acceptance work.

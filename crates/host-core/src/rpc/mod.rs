@@ -2,6 +2,7 @@ mod config_sync_rpc;
 mod plugin_verification_rpc;
 mod scheduled_rpc;
 mod scheduled_tools;
+mod todos;
 
 use std::io::{self, BufRead, BufReader as StdBufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -419,7 +420,13 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
 
                 request_tasks.spawn(async move {
                     let _permit = permit;
-                    let out = match handle_request(state, &method, params, tx.clone()).await {
+                    let budget = request_budget_ms(&method, &params);
+                    let out = match with_request_budget(
+                        budget,
+                        handle_request(state, &method, params, tx.clone()),
+                    )
+                    .await
+                    {
                         Ok(result) => JsonRpcResponse {
                             jsonrpc: "2.0",
                             id,
@@ -483,6 +490,90 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
     input_error
         .map(|error| Err(anyhow!("{error}")))
         .unwrap_or(Ok(()))
+}
+
+/// Wall-clock budget for a single non-tool RPC request. The JS client gives
+/// its calls ~130s before it rejects locally without ever telling the host
+/// (issue #1071), so a request stuck waiting on the global state lock keeps
+/// its in-flight slot after the caller has moved on. 135s sits just past that
+/// client budget: the slot is guaranteed to come back within seconds of the
+/// client giving up, instead of never.
+const RPC_REQUEST_BUDGET_MS: u64 = 135_000;
+
+/// Grace window added on top of a tool's own effective timeout. A
+/// `tools.execute` may legitimately run for hours (Bash allows up to 6h), so
+/// its budget is derived from the tool timeout rather than the fixed budget;
+/// the grace covers host-side bookkeeping around the actual execution.
+const RPC_TOOL_BUDGET_GRACE_MS: u64 = 90_000;
+
+/// Cap added to the `tools.execute` budget for the permission prompt. Before
+/// the tool runs, the handler may legitimately wait for the user to answer an
+/// ask prompt for tens of seconds — that wait must not eat the tool's own
+/// execution budget, or "slow approval + full-length Bash" would be killed
+/// mid-execution. Unattended callers reject at their own ask budget (~120s),
+/// so the cap matches that order.
+const RPC_PERMISSION_WAIT_CAP_MS: u64 = 120_000;
+
+/// Budget for one request. `tools.execute` follows its own effective tool
+/// timeout (plus permission cap and grace); a tool without an effective
+/// timeout keeps the old unbounded behavior. Every other method gets the
+/// fixed budget.
+fn request_budget_ms(method: &str, params: &Value) -> Option<u64> {
+    if method != "tools.execute" {
+        return Some(RPC_REQUEST_BUDGET_MS);
+    }
+    // `ToolsExecuteParams` is `#[serde(rename_all = "camelCase")]`, so the wire
+    // carries `toolName` / `timeoutMs`. Reading the snake_case spellings here
+    // would see an empty tool name and no timeout on every real request,
+    // leaving tools.execute unbounded again (review on #1208). Accept the
+    // snake_case spelling as a fallback so the helper stays honest about both
+    // shapes.
+    let tool_name = params
+        .get("toolName")
+        .or_else(|| params.get("tool_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let timeout_ms = params
+        .get("timeoutMs")
+        .or_else(|| params.get("timeout_ms"))
+        .and_then(|v| v.as_u64());
+    crate::tools::effective_timeout_ms(tool_name, timeout_ms).map(|timeout| {
+        timeout
+            .saturating_add(RPC_PERMISSION_WAIT_CAP_MS)
+            .saturating_add(RPC_TOOL_BUDGET_GRACE_MS)
+    })
+}
+
+/// Wrap one request's handler future in its wall-clock budget (issue #1071).
+///
+/// The timeout can only fire at an `await` point, so a handler stuck inside a
+/// long *synchronous* call is not interrupted — that class needs the sync work
+/// moved off the async workers instead. What this does guarantee is that a
+/// handler waiting on the global state lock (the dominant queueing case) is
+/// cut loose with its slot, and that one wedged request can no longer hold
+/// every other caller forever: each waiting request fails with its own
+/// `HOST_RPC_TIMEOUT` instead of piling up until `HOST_OVERLOADED`.
+async fn with_request_budget<F>(budget: Option<u64>, fut: F) -> Result<Value, JsonRpcError>
+where
+    F: std::future::Future<Output = Result<Value, JsonRpcError>>,
+{
+    let Some(budget) = budget else {
+        return fut.await;
+    };
+    match tokio::time::timeout(Duration::from_millis(budget), fut).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                budget_ms = budget,
+                "rpc request exceeded its wall-clock budget; slot released"
+            );
+            Err(JsonRpcError {
+                code: -32030,
+                message: format!("host rpc budget of {budget}ms exceeded"),
+                data: Some(json!({ "errorCode": "HOST_RPC_TIMEOUT" })),
+            })
+        }
+    }
 }
 
 fn rpc_err(code: i64, message: impl Into<String>, error_code: &str) -> JsonRpcError {
@@ -922,6 +1013,27 @@ fn validate_settings_value(value: &Value) -> Result<(), JsonRpcError> {
                 "lastNotifiedUpdateVersion must contain 1 to 128 characters",
                 "INVALID_PARAMS",
             ));
+        }
+    }
+    if let Some(version) = object.get("updateDismissedVersion") {
+        match version {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(version) => {
+                if version.trim().is_empty() || version.len() > 128 {
+                    return Err(rpc_err(
+                        1002,
+                        "updateDismissedVersion must contain 1 to 128 characters",
+                        "INVALID_PARAMS",
+                    ));
+                }
+            }
+            _ => {
+                return Err(rpc_err(
+                    1002,
+                    "updateDismissedVersion must be a string or null",
+                    "INVALID_PARAMS",
+                ));
+            }
         }
     }
     if let Some(infinite_retry) = object.get("infiniteProviderRetry") {
@@ -1878,27 +1990,6 @@ async fn handle_request(
                     "CONFLICT",
                 ));
             }
-            // A path that belongs to a multi-folder project group must stay put:
-            // deleting one root would orphan the rest of the group, so callers
-            // remove the folder from the group first. A single-folder stored
-            // group is just a wrapper around one project, so removing that
-            // project also removes the now-empty group record.
-            if let Some(group) = st
-                .db
-                .stored_project_group_for_path(&path)
-                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
-            {
-                if group.roots.len() > 1 {
-                    return Err(rpc_err(
-                        1002,
-                        "project belongs to a multi-folder project group; remove the folder from the group first",
-                        "INVALID_PARAMS",
-                    ));
-                }
-                st.db
-                    .delete_project_group_record(&group.id)
-                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
-            }
             let session_ids = st
                 .db
                 .project_session_ids(&path)
@@ -1911,6 +2002,29 @@ async fn handle_request(
                     .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
                 {
                     return Err(rpc_err(1008, "project has running sessions", "CONFLICT"));
+                }
+            }
+            // Check for a running session before changing group membership.
+            // A busy project must remain in its original group.
+            // Once the project is known to be idle, detach its root as part of
+            // this delete because the group editor keeps its primary root
+            // fixed and preserves chats on detached non-primary roots (#1358).
+            // If the primary is removed, the first remaining root becomes primary. A
+            // single-folder group is just a wrapper around one project, so
+            // deleting that project also removes the now-empty group record.
+            if let Some(group) = st
+                .db
+                .stored_project_group_for_path(&path)
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+            {
+                if group.roots.len() > 1 {
+                    st.db
+                        .remove_project_from_group(&group.id, &path)
+                        .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
+                } else {
+                    st.db
+                        .delete_project_group_record(&group.id)
+                        .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
                 }
             }
             crate::scheduled::project::pause(&st.db, &path)
@@ -2449,6 +2563,15 @@ async fn handle_request(
             .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
             Ok(json!({ "session": session }))
         }
+        "todos.get" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_ARGUMENT"))?;
+            let st = state.lock().await;
+            todos::get_from(&st, session_id)
+        }
+
         "session.configure" => {
             if params.get("toolPolicy").is_some() {
                 return Err(rpc_err(1002, "toolPolicy is immutable", "INVALID_PARAMS"));
@@ -2942,6 +3065,23 @@ async fn handle_request(
             }
             .map_err(session_collaboration_rpc_err)?;
             Ok(json!({ "turnId": turn_id }))
+        }
+        "session.recordUsage" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_PARAMS"))?;
+            let turn_id = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "turnId required", "INVALID_PARAMS"))?;
+            let usage = params
+                .get("usage")
+                .ok_or_else(|| rpc_err(1002, "usage required", "INVALID_PARAMS"))?;
+            let st = state.lock().await;
+            let recorded = sessions::record_usage(&st.db, session_id, turn_id, usage)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            Ok(json!({ "ok": recorded }))
         }
         "session.endTurn" => {
             let turn_id = params
@@ -3629,7 +3769,6 @@ async fn handle_request(
                     if st.shutting_down {
                         return Err(rpc_err(1001, "host is shutting down", "HOST_SHUTTING_DOWN"));
                     }
-                    st.permissions.expire_stale();
                     // Effective permission mode (D115): per-session override
                     // unless it is `inherit`, then the global settings default,
                     // then `ask`. A subagent's tool call carries its own scope
@@ -3777,8 +3916,7 @@ async fn handle_request(
                             "toolName": req.tool_name,
                             "risk": req.risk,
                             "argsPreview": req.args_preview,
-                            "reason": req.reason,
-                            "timeoutMs": req.timeout_ms
+                            "reason": req.reason
                         });
                         if let Some(shell_id) = req.command_shell_id.as_deref() {
                             permission_params["commandShellId"] = json!(shell_id);
@@ -3804,14 +3942,9 @@ async fn handle_request(
                         d
                     }
                 } else if let Some(rx) = pending_rx {
-                    let permission_wait = tokio::time::timeout(
-                        std::time::Duration::from_millis(crate::permissions::PERMISSION_TIMEOUT_MS),
-                        rx,
-                    );
-                    tokio::pin!(permission_wait);
                     tokio::select! {
-                        outcome = &mut permission_wait => match outcome {
-                            Ok(Ok(d)) => d,
+                        outcome = rx => match outcome {
+                            Ok(d) => d,
                             _ => PermissionDecision::Deny,
                         },
                         _ = wait_for_bash_cancellation(&mut permission_cancellation) => {
@@ -4012,7 +4145,11 @@ async fn handle_request(
                     });
                 }
 
-                let mut result = if tools::is_desktop_dispatched(&p.tool_name) {
+                let mut result = if p.tool_name == "TodoWrite" {
+                    // The checklist body owns its own trusted-transport checks,
+                    // the atomic write, and the after-commit notification.
+                    todos::execute_write(&state, &tx, &p, call_started).await?
+                } else if tools::is_desktop_dispatched(&p.tool_name) {
                     // Plugin and MCP dispatch has its own bounded default, sized
                     // to outlast Electron's budgets; command-shell timeout
                     // semantics apply only to Bash.
@@ -4963,14 +5100,218 @@ mod tests {
 
     use super::{
         capability_err, handle_request, parse_capability_query, parse_capability_target,
-        peek_jsonrpc_id, provider_rpc_err, resolve_plan_workspace, resolve_tool_workspace,
-        resolve_tool_workspace_for_call, scope_err, skill_err,
+        peek_jsonrpc_id, provider_rpc_err, request_budget_ms, resolve_plan_workspace,
+        resolve_tool_workspace, resolve_tool_workspace_for_call, scope_err, skill_err,
+        with_request_budget, JsonRpcError, RPC_REQUEST_BUDGET_MS,
     };
     use crate::agent_capabilities::CapabilityLevel;
     use crate::plans::{PlanResolveParams, PlanSubmitParams};
     use crate::scheduled;
     use crate::sessions;
     use crate::state::AppState;
+    use std::time::Duration;
+
+    // Issue #1071: the per-request wall-clock budget must cut loose requests
+    // stuck on the global state lock (the dominant queueing case) so their
+    // in-flight slots come back, without ever shortening a legitimate
+    // long-running tool execution.
+
+    #[test]
+    fn request_budget_is_fixed_for_non_tool_methods() {
+        assert_eq!(
+            request_budget_ms("session.get", &json!({})),
+            Some(RPC_REQUEST_BUDGET_MS)
+        );
+        assert_eq!(
+            request_budget_ms("providers.list", &json!({})),
+            Some(RPC_REQUEST_BUDGET_MS)
+        );
+    }
+
+    #[test]
+    fn request_budget_for_tools_execute_follows_tool_timeout() {
+        // The real wire shape: ToolsExecuteParams is serde-renamed to
+        // camelCase, so the runtime sends toolName / timeoutMs (review on
+        // #1208 — the snake_case spellings are never on the wire).
+        let bash = json!({"toolName": "Bash", "timeoutMs": 60000});
+        assert_eq!(
+            request_budget_ms("tools.execute", &bash),
+            Some(60_000 + 120_000 + 90_000)
+        );
+        // Bash without an explicit timeout falls back to the Bash default.
+        let bash_default = json!({"toolName": "Bash"});
+        assert_eq!(
+            request_budget_ms("tools.execute", &bash_default),
+            Some(60_000 + 120_000 + 90_000)
+        );
+        // A tool with no effective timeout keeps the old unbounded behavior.
+        let read = json!({"toolName": "Read"});
+        assert_eq!(request_budget_ms("tools.execute", &read), None);
+    }
+
+    #[test]
+    fn request_budget_reads_the_camel_case_wire_shape_regression_1208() {
+        // Regression for the #1208 review: the runtime's real Bash payload —
+        // `toolName` / `timeoutMs` — must produce the tool-timeout budget,
+        // not an unbounded one. A 6h Bash must never be clipped to the fixed
+        // budget, and an unknown snake/camel mixture must still resolve.
+        let six_hours = json!({"toolName": "Bash", "timeoutMs": 21600000});
+        assert_eq!(
+            request_budget_ms("tools.execute", &six_hours),
+            Some(21_600_000 + 120_000 + 90_000)
+        );
+        // The snake_case fallback keeps hand-rolled callers honest.
+        let snake = json!({"tool_name": "Bash", "timeout_ms": 60000});
+        assert_eq!(
+            request_budget_ms("tools.execute", &snake),
+            Some(60_000 + 120_000 + 90_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_passes_fast_results_through() {
+        let result = with_request_budget(Some(1_000), async {
+            Ok::<_, JsonRpcError>(json!({"ok": true}))
+        })
+        .await
+        .expect("fast future must pass through untouched");
+        assert_eq!(result, json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn budget_ends_slow_request_with_host_rpc_timeout() {
+        let started = std::time::Instant::now();
+        let error = with_request_budget(Some(50), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok::<_, JsonRpcError>(json!(null))
+        })
+        .await
+        .expect_err("a future past its budget must end with HOST_RPC_TIMEOUT");
+        assert_eq!(error.code, -32030);
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|d| d.get("errorCode"))
+                .and_then(|c| c.as_str()),
+            Some("HOST_RPC_TIMEOUT")
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout must fire at the budget, not the inner future's own duration"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_cuts_loose_a_request_waiting_on_the_global_lock() {
+        let state = Arc::new(Mutex::new(()));
+        // Hold the global lock like a wedged handler would.
+        let holder = state.clone();
+        let guard = holder.lock().await;
+
+        // A queued request waiting for that lock: with the budget it fails
+        // on its own instead of piling up behind the wedged holder.
+        let waiter_state = state.clone();
+        let error = with_request_budget(Some(50), async move {
+            let _st = waiter_state.lock().await;
+            Ok::<_, JsonRpcError>(json!(null))
+        })
+        .await
+        .expect_err("a lock waiter past its budget must fail with HOST_RPC_TIMEOUT");
+        assert_eq!(error.code, -32030);
+
+        // The cancelled waiter held no guard: once the wedged holder lets go,
+        // the lock is immediately available again for everyone else.
+        drop(guard);
+        let lock_state = state.clone();
+        let acquired = tokio::time::timeout(Duration::from_millis(500), lock_state.lock()).await;
+        assert!(
+            acquired.is_ok(),
+            "lock must be acquirable right after the holder drops; a cancelled waiter must not be holding it"
+        );
+    }
+
+    // Deep-dive: issue #1071's failure mode is many requests queueing on one
+    // wedged handler. Every queued request must time out **independently** —
+    // one waiter's timeout must not extend or reset another's — and after the
+    // wedged holder lets go, a fresh request must go straight through.
+
+    #[tokio::test]
+    async fn budget_times_out_concurrent_lock_waiters_independently() {
+        let state = Arc::new(Mutex::new(()));
+        let holder = state.clone();
+        let guard = holder.lock().await;
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let waiter_state = state.clone();
+            handles.push(tokio::spawn(with_request_budget(Some(60), async move {
+                let _st = waiter_state.lock().await;
+                Ok::<_, JsonRpcError>(json!(null))
+            })));
+        }
+        for (index, handle) in handles.into_iter().enumerate() {
+            let result = handle.await.expect("budgeted task must not panic");
+            assert_eq!(
+                result.as_ref().err().map(|e| e.code),
+                Some(-32030),
+                "waiter #{index} must fail with HOST_RPC_TIMEOUT, got {:?}",
+                result
+            );
+        }
+        drop(guard);
+        let lock_state = state.clone();
+        let acquired = tokio::time::timeout(Duration::from_millis(500), lock_state.lock()).await;
+        assert!(acquired.is_ok(), "lock must be free after holder drops");
+    }
+
+    #[tokio::test]
+    async fn budget_recovery_lets_a_fresh_request_through_after_the_holder_releases() {
+        let state = Arc::new(Mutex::new(()));
+        let holder = state.clone();
+
+        // First: a wedged holder starves one budgeted request.
+        {
+            let _guard = holder.lock().await;
+            let waiter_state = state.clone();
+            let error = with_request_budget(Some(40), async move {
+                let _st = waiter_state.lock().await;
+                Ok::<_, JsonRpcError>(json!(null))
+            })
+            .await
+            .expect_err("starved while the holder wedges the lock");
+            assert_eq!(error.code, -32030);
+        }
+
+        // Then the holder releases: the very next request must succeed on the
+        // normal path — the budget must not have left any lingering damage.
+        let recovered = {
+            let request_state = state.clone();
+            with_request_budget(Some(1_000), async move {
+                let _st = request_state.lock().await;
+                Ok::<_, JsonRpcError>(json!({ "recovered": true }))
+            })
+            .await
+            .expect("a request after the holder releases must succeed")
+        };
+        assert_eq!(recovered, json!({ "recovered": true }));
+    }
+
+    #[test]
+    fn tools_execute_budget_covers_bash_max_and_unbounded_tools() {
+        // Bash may legally run up to 6h: the budget must never clip it to the
+        // fixed 135s, only pad the tool's own timeout with grace. Wire shape
+        // is camelCase (see the #1208 regression test).
+        let six_hours = json!({"toolName": "Bash", "timeoutMs": 21600000});
+        assert_eq!(
+            request_budget_ms("tools.execute", &six_hours),
+            Some(21_600_000 + 120_000 + 90_000)
+        );
+        // A tool without an effective timeout stays unbounded (None), exactly
+        // like before this change.
+        let unbounded = json!({"toolName": "Glob"});
+        assert_eq!(request_budget_ms("tools.execute", &unbounded), None);
+    }
 
     #[test]
     fn capability_errors_keep_their_protocol_code() {
@@ -5142,6 +5483,118 @@ mod tests {
         .unwrap();
         assert_eq!(updated["group"]["name"], "Adjusted");
         assert_eq!(updated["group"]["roots"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn grouped_folder_with_chats_can_be_detached_and_deleted_separately() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let primary = data_dir.path().join("primary");
+        let member = data_dir.path().join("member");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&member).unwrap();
+        let primary_input = primary.to_string_lossy().to_string();
+        let member_input = member.to_string_lossy().to_string();
+        let mut app_state = AppState::open(data_dir.path()).unwrap();
+        app_state.handshook = true;
+        let state = Arc::new(Mutex::new(app_state));
+
+        let group_response = handle_request(
+            state.clone(),
+            "project.group.create",
+            json!({ "name": "Grouped", "folders": [primary_input, member_input] }),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        let group_id = group_response["group"]["id"].as_str().unwrap().to_string();
+        let primary_path = group_response["group"]["primaryPath"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let member_path = group_response["group"]["roots"][1]["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // This chat predates removing the member from the group.
+        let session_id = {
+            let st = state.lock().await;
+            sessions::create_session_with_options(
+                &st.db,
+                sessions::SessionCreateOptions {
+                    project_path: Some(member_path.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+
+        let updated = handle_request(
+            state.clone(),
+            "project.group.update",
+            json!({ "groupId": group_id, "name": "Grouped", "folders": [primary_path] }),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .expect("a member with chats can be detached from the group");
+        assert_eq!(updated["group"]["roots"].as_array().unwrap().len(), 1);
+
+        let detached_groups = handle_request(
+            state.clone(),
+            "project.groups.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert!(detached_groups["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| {
+                group["legacy"] == json!(true) && group["roots"][0]["path"] == json!(member_path)
+            }));
+
+        let removed = handle_request(
+            state.clone(),
+            "projects.remove",
+            json!({ "path": member_path }),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .expect("the detached project can then be deleted through the project action");
+        assert_eq!(removed["removed"], json!(true));
+        assert_eq!(removed["sessionsRemoved"], json!(1));
+        assert!(member.exists());
+
+        let groups_after_delete = handle_request(
+            state.clone(),
+            "project.groups.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(groups_after_delete["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            groups_after_delete["groups"][0]["roots"][0]["path"],
+            json!(primary_path)
+        );
+
+        let sessions_after_delete = handle_request(
+            state,
+            "session.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert!(sessions_after_delete["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["id"] != json!(session_id)));
     }
 
     #[tokio::test]
@@ -5480,7 +5933,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projects_remove_refuses_stored_group_root() {
+    async fn projects_remove_detaches_stored_group_root_and_promotes_next_root() {
         let data_dir = tempfile::tempdir().unwrap();
         let grouped_dir = data_dir.path().join("grouped");
         let extra_dir = data_dir.path().join("extra");
@@ -5489,47 +5942,57 @@ mod tests {
         let mut app_state = AppState::open(data_dir.path()).unwrap();
         app_state.handshook = true;
         let grouped_path = grouped_dir.to_string_lossy().to_string();
+        let extra_path = extra_dir.to_string_lossy().to_string();
         app_state
             .db
-            .create_project_group(
-                "Grouped",
-                &[
-                    grouped_path.clone(),
-                    extra_dir.to_string_lossy().to_string(),
-                ],
-            )
+            .create_project_group("Grouped", &[grouped_path.clone(), extra_path.clone()])
             .unwrap();
         let state = Arc::new(Mutex::new(app_state));
 
-        let error = handle_request(
+        let removed = handle_request(
             state.clone(),
             "projects.remove",
-            json!({ "path": grouped_path }),
+            json!({ "path": grouped_path.clone() }),
             mpsc::unbounded_channel().0,
         )
         .await
-        .expect_err("a stored project group root must not be removed");
-        assert_eq!(error.code, 1002);
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("errorCode")),
-            Some(&json!("INVALID_PARAMS"))
-        );
+        .expect("deleting a grouped project root also detaches it");
+        assert_eq!(removed["removed"], json!(true));
 
-        let canonical =
-            crate::db::canonical_project_path(&grouped_path).expect("canonical project path");
+        let canonical_grouped =
+            crate::db::canonical_project_path(&grouped_path).expect("deleted project path");
+        let canonical_extra =
+            crate::db::canonical_project_path(&extra_path).expect("remaining project path");
         let projects = handle_request(
-            state,
+            state.clone(),
             "projects.list",
             json!({}),
             mpsc::unbounded_channel().0,
         )
         .await
         .unwrap();
+        assert!(!projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["path"].as_str() == Some(canonical_grouped.as_str())));
         assert!(projects["projects"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|project| project["path"].as_str() == Some(canonical.as_str())));
+            .any(|project| project["path"].as_str() == Some(canonical_extra.as_str())));
+
+        let groups = handle_request(
+            state,
+            "project.groups.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(groups["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(groups["groups"][0]["primaryPath"], json!(canonical_extra));
+        assert_eq!(groups["groups"][0]["roots"].as_array().unwrap().len(), 1);
     }
 
     /// A single-folder stored project group is just a wrapper around one
@@ -5580,13 +6043,23 @@ mod tests {
     /// A running turn owns its session's tools, working directory, and
     /// transcript writes, so the bulk delete waits until the project is idle.
     #[tokio::test]
-    async fn projects_remove_refuses_while_a_session_is_running() {
+    async fn projects_remove_refuses_while_a_session_is_running_without_detaching_group() {
         let data_dir = tempfile::tempdir().unwrap();
         let project_dir = data_dir.path().join("busy-project");
+        let remaining_dir = data_dir.path().join("remaining-project");
         fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(&remaining_dir).unwrap();
         let mut app_state = AppState::open(data_dir.path()).unwrap();
         app_state.handshook = true;
         let project_path = project_dir.to_string_lossy().to_string();
+        let remaining_path = remaining_dir.to_string_lossy().to_string();
+        app_state
+            .db
+            .create_project_group(
+                "Busy group",
+                &[project_path.clone(), remaining_path.clone()],
+            )
+            .unwrap();
         let session_id = sessions::create_session_with_options(
             &app_state.db,
             sessions::SessionCreateOptions {
@@ -5637,6 +6110,25 @@ mod tests {
             .unwrap()
             .iter()
             .any(|project| project["path"].as_str() == Some(canonical.as_str())));
+        let groups_while_busy = handle_request(
+            state.clone(),
+            "project.groups.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            groups_while_busy["groups"][0]["roots"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            groups_while_busy["groups"][0]["primaryPath"],
+            json!(canonical)
+        );
         let listed = handle_request(
             state.clone(),
             "session.list",
@@ -5660,7 +6152,7 @@ mod tests {
         .await
         .unwrap();
         let removed = handle_request(
-            state,
+            state.clone(),
             "projects.remove",
             json!({ "path": project_path }),
             mpsc::unbounded_channel().0,
@@ -5669,6 +6161,28 @@ mod tests {
         .unwrap();
         assert_eq!(removed["removed"], json!(true));
         assert_eq!(removed["sessionsRemoved"], json!(1));
+        let groups_after_delete = handle_request(
+            state,
+            "project.groups.list",
+            json!({}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        let remaining_canonical =
+            crate::db::canonical_project_path(&remaining_path).expect("remaining project path");
+        assert_eq!(groups_after_delete["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            groups_after_delete["groups"][0]["roots"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            groups_after_delete["groups"][0]["primaryPath"],
+            json!(remaining_canonical)
+        );
     }
 
     #[tokio::test]
@@ -6729,6 +7243,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_set_round_trips_live_voice_without_changing_dictation_settings() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app_state = AppState::open(data_dir.path()).unwrap();
+        app_state.handshook = true;
+        let state = Arc::new(Mutex::new(app_state));
+        let tx = mpsc::unbounded_channel().0;
+        let live_voice = json!({
+            "enabled": false,
+            "selectedBindingId": "codex-main",
+            "bindings": [{
+                "id": "codex-main",
+                "adapterId": "codex-live",
+                "providerId": "codex-account-a",
+                "voice": "cove"
+            }]
+        });
+        let dictation = json!({
+            "enabled": true,
+            "deviceId": "microphone-1",
+            "languages": ["en"],
+            "chineseVariant": "simplified",
+            "modelId": "local-model"
+        });
+
+        handle_request(
+            state.clone(),
+            "settings.set",
+            json!({ "liveVoice": live_voice, "voice": dictation }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        handle_request(
+            state.clone(),
+            "settings.set",
+            json!({ "theme": "light" }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        let stored = handle_request(state, "settings.get", json!({}), tx)
+            .await
+            .unwrap();
+
+        assert_eq!(stored["liveVoice"], live_voice);
+        assert_eq!(stored["voice"], dictation);
+        assert_eq!(stored["theme"], "light");
+    }
+
+    #[tokio::test]
     async fn settings_set_preserves_stored_shell_when_shell_is_omitted() {
         let Some(current_shell) = available_test_shell_id() else {
             return;
@@ -7509,6 +8073,7 @@ mod tests {
             .unwrap();
         let permission: Value = serde_json::from_str(&permission).unwrap();
         assert_eq!(permission["method"], "permissions.request");
+        assert!(permission["params"].get("timeoutMs").is_none());
         let request_id = permission["params"]["requestId"]
             .as_str()
             .unwrap()
@@ -7527,11 +8092,9 @@ mod tests {
         assert_eq!(requests[0]["requestId"], request_id);
         assert_eq!(requests[0]["sessionId"], session.id);
         assert_eq!(requests[0]["toolName"], "Bash");
-        assert_eq!(requests[0]["timeoutMs"], 120000);
-        assert!(
-            requests[0]["expiresAt"].as_str().unwrap() > requests[0]["createdAt"].as_str().unwrap()
-        );
-        assert!(requests[0]["remainingMs"].as_u64().unwrap() <= 120000);
+        assert!(requests[0].get("timeoutMs").is_none());
+        assert!(requests[0].get("expiresAt").is_none());
+        assert!(requests[0].get("remainingMs").is_none());
 
         let other = handle_request(
             state.clone(),
@@ -9284,6 +9847,8 @@ mod update_settings_tests {
             json!({"updatePreference": "automatic"}),
             json!({"updatePreference": "manual"}),
             json!({"lastNotifiedUpdateVersion": "0.15.9"}),
+            json!({"updateDismissedVersion": "0.15.9"}),
+            json!({"updateDismissedVersion": null}),
         ] {
             assert!(validate_settings_value(&value).is_ok(), "{value}");
         }
@@ -9293,6 +9858,9 @@ mod update_settings_tests {
             json!({"lastNotifiedUpdateVersion": "  "}),
             json!({"lastNotifiedUpdateVersion": 12}),
             json!({"lastNotifiedUpdateVersion": "x".repeat(129)}),
+            json!({"updateDismissedVersion": "  "}),
+            json!({"updateDismissedVersion": 12}),
+            json!({"updateDismissedVersion": "x".repeat(129)}),
         ] {
             assert!(validate_settings_value(&value).is_err(), "{value}");
         }

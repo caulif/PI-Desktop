@@ -214,6 +214,7 @@ export const RacpEventEnvelopeSchema = Type.Object({
   kind: RacpEventKindSchema,
   occurredAt: Type.String(),
   parentToolCallId: Type.Optional(Type.String()),
+  nestedParentToolCallId: Type.Optional(Type.String()),
   agentName: Type.Optional(Type.String()),
   payload: Type.Unknown(),
 });
@@ -238,6 +239,7 @@ export const RacpItemSummarySchema = Type.Object({
   sequence: Type.Optional(Type.Integer({ minimum: 1 })),
   createdAt: Type.String(),
   parentToolCallId: Type.Optional(Type.String()),
+  nestedParentToolCallId: Type.Optional(Type.String()),
   agentName: Type.Optional(Type.String()),
   content: Type.Unknown(),
 });
@@ -271,6 +273,7 @@ export const RacpApprovalRequestSchema = Type.Object({
   risk: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")])),
   agentName: Type.Optional(Type.String()),
   parentToolCallId: Type.Optional(Type.String()),
+  nestedParentToolCallId: Type.Optional(Type.String()),
   title: Type.Optional(Type.String()),
   question: Type.Optional(Type.String()),
   artifact: Type.Optional(
@@ -327,6 +330,7 @@ export const RacpInputRequestSchema = Type.Object({
   expiresAt: Type.String(),
   agentName: Type.Optional(Type.String()),
   parentToolCallId: Type.Optional(Type.String()),
+  nestedParentToolCallId: Type.Optional(Type.String()),
   questions: Type.Array(
     Type.Object({
       id: Type.String({ minLength: 1 }),
@@ -683,6 +687,8 @@ export function racpKindForAgentEvent(
       return { kind: options.interrupted ? "turn.interrupted" : "turn.completed", durable: true };
     case "error":
       return { kind: "turn.failed", durable: true };
+    case "usage":
+      return { kind: "turn.activity", durable: false };
     case "turn_start":
     case "turn_end":
     case "status":
@@ -723,6 +729,7 @@ export const LOCAL_AGENT_EVENT_TYPES: readonly AgentEvent["type"][] = [
   "agent_end",
   "turn_start",
   "turn_end",
+  "usage",
   "message_start",
   "message_update",
   "message_end",

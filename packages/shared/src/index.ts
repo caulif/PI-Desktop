@@ -8,6 +8,7 @@ export * from "./transcript-truncation.js";
 export * from "./keyboard-shortcuts.js";
 export * from "./changelog.js";
 export * from "./composer-trigger.js";
+export * from "./session-link.js";
 export * from "./fuzzy.js";
 export * from "./mcp-import.js";
 export * from "./mcp-catalog.js";
@@ -73,3 +74,8 @@ export { PLUGIN_FS_MODES, FS_DENY_DIR_SEGMENTS, FS_DENY_FILE_PATTERNS, normalize
 export type { PluginFsRoot, PluginFsMode, MatchFsGlobOptions, ResolvedFsAccess } from "./plugin-fs-policy.js";
 
 export * from "./bot-node.js";
+
+export * from "./session-todos.js";
+export * from "./tool-call-lineage.js";
+export * from "./event-usage.js";
+export * from "./storage.js";

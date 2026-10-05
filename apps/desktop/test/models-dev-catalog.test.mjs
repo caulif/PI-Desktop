@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createModels, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { buildProviderModel } from "../../../packages/agent-runtime/dist/provider-binding.js";
 import {
   apiStyleForAdapter,
   bindingForCustomModelInfo,
   catalogModelIdsMatch,
   modelIdsMatch,
+  resolveApiStyle,
 } from "@pi-desktop/shared";
 import {
   MODELS_DEV_API_URL,
@@ -102,6 +106,83 @@ async function loadFixtureCatalog(t, fixture = catalogFixture) {
   assert.equal(await catalog.ensureLoaded(), true);
   return catalog;
 }
+
+test("published metadata retains exact Pi transcript transport bindings through runtime launch", async (t) => {
+  const pi = createModels({ modelsStore: new InMemoryModelsStore(),
+    authContext: { env: async () => undefined, fileExists: async () => false } });
+  for (const provider of builtinProviders()) pi.setProvider(provider);
+  for (const [vendorKey, modelId] of [
+    ["deepseek", "deepseek-flash"], ["anthropic", "claude-opus-5-5"],
+    ["openai", "gpt-6.1-sol"], ["openai-codex", "gpt-6.1-sol"],
+  ]) {
+    const original = pi.getModel(vendorKey, modelId);
+    assert.ok(original, `${vendorKey}/${modelId}`);
+    const catalog = await loadFixtureCatalog(t, { [vendorKey]: {
+      name: vendorKey, api: original.baseUrl, models: { [modelId]: {
+        id: modelId, limit: { context: 543_210, output: 40_000 }, cost: { input: 1.25, output: 2.5 },
+      } },
+    } });
+    const target = { providerId: "account", vendorKey, modelId, baseUrl: original.baseUrl,
+      apiStyle: resolveApiStyle(original.api) };
+    const config = catalog.modelConfigFor(target);
+    assert.equal(config.source, "models.dev");
+    assert.equal(config.contextWindow, 543_210);
+    assert.equal(config.maxTokens, 40_000);
+    assert.equal(config.cost.input, 1.25);
+    assert.deepEqual(config.transcriptBinding, { modelId, api: original.api, baseUrl: original.baseUrl });
+    const provider = { ...target, id: "account", name: "Fixture", apiKey: "", authKind: "none",
+      supportsReasoning: false, supportedThinkingLevels: ["off"], modelConfig: config };
+    const wire = buildProviderModel(provider);
+    assert.equal(wire.compat.supportsMidConvoSystemMessages, true, vendorKey);
+    assert.equal(wire.compat.supportsMidConvoToolChanges, original.compat?.supportsMidConvoToolChanges === true);
+    assert.equal(wire.compat.supportsAdditionalTools, original.compat?.supportsAdditionalTools === true);
+    const relay = { ...target, baseUrl: "https://relay.invalid/v1" };
+    assert.equal(buildProviderModel({ ...provider, ...relay, modelConfig: catalog.modelConfigFor(relay) })
+      .compat.supportsMidConvoSystemMessages, false);
+    assert.equal(buildProviderModel({ ...provider, modelId: `${modelId}-alias` })
+      .compat.supportsMidConvoSystemMessages, false);
+  }
+});
+
+test("the bundled models.dev OpenAI record supplies the selected model limits", async () => {
+  const catalogPath = fileURLToPath(new URL("../resources/models.dev/api.json", import.meta.url));
+  const catalog = new ModelsDevCatalog({ catalogPath });
+  assert.equal(await catalog.ensureLoaded(), true);
+  const model = catalog.findModel({ vendorKey: "openai", modelId: "gpt-6.1-sol" });
+  assert.ok(model);
+  const config = catalogModelConfigFor(catalog, {
+    providerId: "chatgpt-account",
+    vendorKey: "openai-codex",
+    baseUrl: "https://chatgpt.com/backend-api",
+    modelId: "gpt-6.1-sol",
+  });
+  assert.equal(model.limit.context, 1_050_000);
+  assert.equal(model.limit.output, 128_000);
+  assert.equal(config.source, "models.dev");
+  assert.equal(config.contextWindow, 1_050_000);
+  assert.equal(config.maxTokens, 128_000);
+});
+
+test("explicit account limits stay pinned over a later models.dev value", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    openai: {
+      name: "OpenAI",
+      api: "https://api.openai.com/v1",
+      models: { model: { id: "model", limit: { context: 1_000_000, output: 100_000 } } },
+    },
+  });
+  const info = modelInfoFromModelsDev(catalog.findModel({ vendorKey: "openai", modelId: "model" }), "account");
+  const binding = bindingForCustomModelInfo("model", info);
+  binding.contextWindow = 40_000;
+  binding.contextWindowSource = "user";
+  binding.maxTokens = 4_000;
+  binding.maxTokensSource = "user";
+  catalog.configureAccount({ id: "account", vendorKey: "openai", models: [binding] });
+  const config = catalog.modelConfigFor({ providerId: "account", vendorKey: "openai", modelId: "model" });
+  assert.equal(config.contextWindow, 40_000);
+  assert.equal(config.maxTokens, 4_000);
+  assert.equal(config.source, "models.dev");
+});
 
 function observeModelIdReads(model) {
   const modelId = model.modelId;
@@ -659,11 +740,17 @@ test("resellers still answer for an id no shipped publisher states", async (t) =
   assert.equal(match.limit.context, 262_144);
 });
 
-test("a route prefix reaches a unique leaf while deployment markers stay unmatched", async (t) => {
+test("route prefixes and official deployment markers resolve without rewriting served IDs", async (t) => {
   // Exact last-segment match allows `test/mimo-v2.5` → `mimo-v2.5`.
   // Markers like `-thinking` / `-test` are part of the leaf and do not strip.
   const catalog = await loadFixtureCatalog(t, {
     gateway: { api: "https://gateway.example/v1", models: {} },
+    google: { models: {
+      "gemini-2.5-pro": {
+        id: "gemini-2.5-pro", tool_call: true,
+        limit: { context: 1_048_576, output: 65_536 },
+      },
+    } },
     xiaomi: { models: {
       "mimo-v2.5": {
         id: "mimo-v2.5", tool_call: true,
@@ -688,6 +775,7 @@ test("a route prefix reaches a unique leaf while deployment markers stay unmatch
   assert.equal(relay("mimo-v2.5-thinking"), undefined);
   assert.equal(relay("test/mimo-v2.5-pro-test"), undefined);
   assert.equal(relay("mimo-v2.5-asr"), undefined);
+  assert.equal(relay("gemini-2.5-pro-1m")?.modelId, "gemini-2.5-pro");
 });
 
 test("a shipped publisher answers first for a row anchored to a reseller", async (t) => {

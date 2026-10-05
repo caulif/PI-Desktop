@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn migrate_v21_to_v22(conn: &Connection, path: &Path) -> Result<()> {
-    let backup = create_migration_backup(conn, path, 21)?;
+pub(crate) fn migrate_v23_to_v24(conn: &Connection, path: &Path) -> Result<()> {
+    let backup = create_migration_backup(conn, path, 23)?;
     let tx = conn.unchecked_transaction()?;
     let columns = tx
         .prepare("PRAGMA table_info(plugin_schedule_bindings)")?
@@ -28,7 +28,7 @@ pub(crate) fn migrate_v21_to_v22(conn: &Connection, path: &Path) -> Result<()> {
              UPDATE scheduled_tasks SET enabled=0 WHERE id IN (SELECT task_id FROM plugin_schedule_bindings);",
         )?;
     }
-    tx.pragma_update(None, "user_version", 22i64)?;
+    tx.pragma_update(None, "user_version", 24i64)?;
     tx.commit().with_context(|| {
         format!(
             "commit schema v21 to v22 migration; backup {} remains",

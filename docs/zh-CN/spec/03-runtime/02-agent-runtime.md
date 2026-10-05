@@ -87,7 +87,7 @@ pi 消费排队输入时保留渲染器提供的消息 id；即使补充输入�
 1. 加载持久会话，会话缺失则拒绝
 2. 解析该会话的 mode/provider/model 与项目绑定（app/当前工作区默认值仅作为
    旧版回退）
-3. 针对该确切的 provider/API URL 与 model 解析完整的 models.dev 元数据记录，
+3. 针对该确切的 provider/API URL 与 model 解析完整的 Pi catalog 元数据记录，
    并把持久会话的思考级别钳制到它最接近的受支持值；快照中不存在的 id 使用
    显式的通用回退
 4. 验证 model/secret 可用性
@@ -96,6 +96,9 @@ pi 消费排队输入时保留渲染器提供的消息 id；即使补充输入�
 6. 在 Electron main 的会话绑定路径边界上校验结构化附件，按 SHA-256 持久化
    图片字节，持久用户消息中只保留附件引用。只有处于视觉模型 10 MB 内联上限
    之内的图片才会被读进内存；更大的图片走流式哈希/复制以及既有的安全路径回退
+   草稿里的 `pi-desktop://session/<id>` 链接在同一步骤里解析成有界摘录附件：只限
+   同一项目，当前对话在任何读取之前就被跳过；运行时随后把它作为一个
+   `<session_reference name="…" session="…">` 块排在用户自己的话之前引用给模型
 7. 为本回合快照有效的 shell ID 与方言
 8. 用解析出的会话配置和有效思考级别启动 pi 回合；HTTP 429 的建连与流式失败
    使用运行时自有的静默 10 次重试预算，其他瞬时的 transport/provider 失败则在
@@ -278,11 +281,12 @@ E2E-SESSION-completion-notice-allows-silence。
 同一个会话。持久检查点总结了旧模型上下文，同时
 渲染器继续显示每个原始用户、助手和工具行。
 
-PI-Desktop 复用 pi-agent-core 的 `buildSessionContext`、`convertToLlm`、
-`estimateContextTokens`、`prepareCompaction` 和 `compact` 原语。桌面运行时拥有
-这些原语的运行时机，以及结果如何穿过 Rust 存储
-边界； OpenCode DCP 仅是 AGPL-3.0 行为参考，不是链接或
-复制的依赖关系。
+pi-agent-core 提供 Agent 循环及稳定的 agent/event/tool 类型，pi-ai 提供面向
+提供商的请求与消息估算。由于旧版实验性 harness API 已被移除，运行时自行维护
+上下文投影、LLM 消息转换、token 估算适配器、压缩切点选择和摘要生成。这些实现
+保留现有会话与检查点行为，并继续由 Rust host 独占持久会话状态；OpenCode DCP
+仅作为 AGPL-3.0 行为参考，不是链接或复制的依赖关系。详细依赖边界见
+[pi 运行时依赖边界](../02-architecture/06-pi-runtime-dependency-boundary.md)。
 
 压缩遵循 Codex 的机制 (ADR 0064)：它总是内联发生在
 回合边界，模型可以通过`new_context`请求，每次compaction
@@ -323,11 +327,9 @@ pi 0.84.4+ 只在循环将要在同一次运行中开启另一个助手回合时
 发出 `compaction_end`。阻塞路径将两者背靠背组成。
 
 **在检查点中幸存下来的内容。** 成功检查点留下的模型上下文是
-摘要以及最多一条**用户**消息；助手和工具消息是
-从模型上下文中删除并保留在可见的转录本中。圆周率
-`prepareCompaction` 仍然选择切点，因此其回合边界和
-保留分割回合处理，但运行时会折叠分割回合
-前缀和最近的尾部返回到摘要输入中，因此摘要涵盖
+摘要以及最多一条**用户**消息；助手和工具消息会从模型上下文中删除，
+但仍保留在可见的转录本中。运行时自有的准备逻辑选择切点并保留回合边界
+和分割回合处理，然后把分割回合前缀和最近尾部折叠回摘要输入，因此摘要涵盖
 整个紧凑的范围内，没有任何东西跨越边界而未被覆盖。
 
 **保留尾部回退**是例外，因为没有摘要覆盖它负责的范围：它保留真实的近期窗口——
@@ -508,6 +510,12 @@ Plan 和 Goal 是两种 **合约模式** (D198)。他们共用一个耐用的
 已提交且 queued/running 执行被中断，持久模式
 仍然是 Agent 并且不会重播执行。
 
+历史 SubmitPlan/SubmitGoal 显示只读卡片：可展开完整 Markdown、查看真实审批状态、打开
+计划文件；同类型后续提交出现后，旧版本标记为已被替代。审批操作仍只在实时审批栏中。
+历史元数据与规划事件按提案身份及版本合并，迟到的 pending 工具回显不能覆盖审批结果。
+继续聊天、上下文压缩、切换会话及重启后仍可阅读；文件被删除也不影响数据库中的正文。
+缺少审批元数据的旧主机仅显示快照并标注状态不可用，不把旧 pending 当作当前状态。
+
 手动模式和配置选择可以由渲染器上演，同时
 轮运行，但主机持久性仅保持空闲状态。选择 Agent 是
 故意的用户覆盖并且不综合计划或批准。每个
@@ -540,16 +548,16 @@ Goal 批准所承诺的内容与 Plan 批准所承诺的内容完全相同：`mo
   和 `max`。会话（及子智能体）选择器还接受 `omit`，它不是目录/绑定能力：
   运行时把智能体记账保持为 `off`，走低层 provider 流，不合成思考覆盖
   （ADR 0194 / ADR 0295）。
-- 随包的 models.dev 发布快照对于已发布的推理支持具有权威性，
+- 随包的 Pi catalog 发布快照对于已发布的推理支持具有权威性，
   思维层面的映射、限制、输入模式、定价、标题和适配器
   每个已解决的已知模型的兼容性。
 - 提供商配置不能覆盖已知模型语义。未知
   自由格式的 id 仍然可以通过通用的纯文本、非推理的方式运行
   模型，因此仅公开 `off`。
-- 不支持的请求级别采用所选 models.dev 模型的最近受支持级别规则：先向上扫描
+- 不支持的请求级别采用所选 Pi catalog 模型的最近受支持级别规则：先向上扫描
   先向上，然后向下。非推理提供商总是决心
   `off`。
-- 视觉支持由同一条 models.dev 记录解析：只有 `input.includes("image")` 才启用
+- 视觉支持由同一条 Pi catalog 记录解析：只有 `input.includes("image")` 才启用
   图片传输。未知/自定义模型 id 保持为保守的 text/path 模型，即使发现到的元数据
   声称支持 `vision`。
 - 有效级别会传给 pi `Agent`；特定于提供商的请求
@@ -636,7 +644,10 @@ Frontmatter 新增 `permission: inherit | ask | accept-edits | auto`（默认
   `Task` 工具接受一个可选的 `model` 参数（`"provider/modelId"`），用于在本次
   运行中覆盖该委托的模型。解析优先级：Task.model 参数 → 定义 frontmatter 的
   引脚 → 会话模型。父 agent 会在系统提示中看到一份模型摘要，列出提供商设置里
-  所有标记为 `availableForSubagents` 的模型。若委托目录为空，提示会告诉模型
+  所有标记为 `availableForSubagents` 的模型。空目录下的系统摘要、Task 说明和
+  覆盖请求错误均指向「设置 → 模型 → 编辑服务或账号 → 模型高级设置 →
+  可供 AI 自动调度 → 保存」，要求使用目录中的准确键，避免猜测 provider/model。
+  若委托目录为空，提示会告诉模型
   省略 `model`，使用定义的固定模型，无固定模型时继承会话模型；显式给出的键如果正好就是当前会话的
   provider/model，同样按继承处理。其他显式模型键必须已配置并已为委托启用。
   Electron 单独传递 `subagentModelKeys` 与 `subagentProviders`：后者可含仅供定义
@@ -695,9 +706,14 @@ Stop / 运行时销毁。主 Agent 用 `TaskStop` 判断要不要取消；运行
 回合打开，等委托完成后再把报告塞回父级。父级收工不会中止它们。
 
 致命的 provider/stream 错误（包括耗尽的 HTTP 429）、父级中止，仍分别保留它们既有的
-`failed` 和 `aborted` 结果。
+`failed` 和 `aborted` 结果。如果助手响应在提供程序输出 token 上限处结束（`stopReason: "length"`
+或 `"max_tokens"`），且已经产生报告文本，该委派会以 `failed`、
+`SUBAGENT_OUTPUT_TRUNCATED` 和 `outputTruncated: true` 结算；有界的部分报告会保留在失败说明
+下，供诊断截断原因。后续以正常原因结束的委派回合会清除该标记并可以成功完成。
 父级终态错误还会中止残留委托、跳过续跑提示，并把会话恢复为空闲，这样
-“继续”不会变成 `AGENT_BUSY`（D352）。
+“继续”不会变成 `AGENT_BUSY`（D352）。 被系统中断的委托以
+`failed` 和 `SUBAGENT_PARENT_FAILED` 结算，保留基于历史的恢复资格，但不会自动重启。
+用户 Stop、TaskStop 与运行时销毁仍按不可恢复的取消处理。
 
 **可恢复的委托（ADR 0279）。** `Task` 接受一个可选的 `resume` 参数，携带同一会话中
 某个已结算委托的 `delegationId`。恢复后的委托是一个新的 `SubagentRun`，以该链此前的
@@ -746,7 +762,7 @@ transcript 把一条链渲染成它最新 `Task` 卡片下的一段连续多轮�
 “已恢复”标记。
 
 **模型引脚。** Frontmatter 中的 `model: <provider>/<model>` 在每次启动时于
-Electron main 里解析一次——凭据与 models.dev 快照都在那里——匹配提供商 id、
+Electron main 里解析一次——凭据与 Pi catalog 快照都在那里——匹配提供商 id、
 厂商键或显示名称，且最多 `MAX_SUBAGENT_PROVIDERS`（8）个不同的提供商。无法
 解析的引脚会被有意地排除在绑定映射之外；运行时把这个缺失的条目转成一个点名
 该引脚的工具错误，绝不回退到会话模型。定义中的 `thinkingLevel` 会按第 5c 节
@@ -888,6 +904,15 @@ agent 运行时的职责，与官方 Pi 编码 agent 的归属层保持一致；
 上。该请求携带会话自己的对话 id，而不是 harness 否则会生成的按次 id，这样摘要
 就与它所压缩的对话落在同一个网关后端。
 
+同一接缝也会补回对话标识本身：pi-agent-core 对摘要请求要求
+`cacheRetention: "none"`，而 Responses 形状的适配器据此不发送
+`prompt_cache_key`，于是只有摘要请求会丢掉其他回合都会携带的身份；对接 Codex
+后端的网关会以 400 `invalid_responses_request` 拒绝这种请求。因此对
+`openai-responses` 与 `openai-codex-responses`，摘要载荷会带上会话 id 作为
+`prompt_cache_key`（按适配器的 64 字符上限截断），除非适配器或调用方已设置过。
+其他线协议的载荷保持适配器构造的原样；该键添加在副本上，因此调用方的载荷钩子仍
+保留自己的对象，其返回值仍然生效。
+
 
 ## 7. 系统提示组成
 
@@ -967,15 +992,21 @@ sidecar 最多激活四个匹配项，并将名称写入 canonical
 模式。具有本机延迟工具搜索的提供商可在该负载点接收定义；其他
 提供商通常会收到活动定义。
 
-每个新用户提示前都会清除延迟激活集，再从有效上下文重建。成功的
-`ToolSearch` 结果读取 canonical `details.addedToolNames`；为兼容历史
-数据，也接受 `details.activated` 和顶层 `addedToolNames`。成功的延迟
-工具结果会贡献其工具名。仅恢复当前模式延迟目录中仍存在的名称；失败、
-中断、缺少结果的占位行以及助手/用户文本不会激活工具。工具注册表、主机
-权限路径、工具超时和工作区包含规则保持不变。`ToolSearch` 是 sidecar 的
-本地工具，不跨越主机 RPC 边界。激活标记保留在持久化工具结果中，因此
-只要证据仍在有效上下文，运行时重启或新提示都可以复用能力；证据被压缩
-或消失后仍需重新搜索。
+Deferred activation remains sticky within a live runtime. Restoration uses
+successful activation evidence and the current catalog; old declarations do not
+re-grant tools revoked from the live activation set. For official bound Flash,
+full declarations and execution activation are independent: versioned
+`tool_activation` sections carry the account/model/API/endpoint/catalog identity
+and active names through restart and compaction. Only matching, valid state and
+newer successful ToolSearch results restore activation; malformed or changed
+epochs fail closed. Inactive declared tools are blocked before extension/Host
+execution, and activation never bypasses mode or approval checks. The full
+catalog is deterministic from the first request. More than 128 tools or an
+insufficient context budget falls back to on-demand declarations with a
+diagnostic, without truncation. Other bindings retain their existing projection.
+Fixed declarations may increase total cost for short conversations. See the
+English section 7.1 and the chronological-system-transcript ADR for the complete
+contract.
 
 对于用户可见的 HTML 可交付成果，默认系统提示要求代理
 创建页面或创建第一个页面后激活 `BrowserPreview` 一次
@@ -1150,3 +1181,18 @@ System/Direct/Custom 代理路由保持不变。
 终态。结构化原因会穿过 adapter 的错误扁平化，保留在最终错误行中，也不会触发
 provider transport 重建。`EPROTO` 等协议错误继续使用原有重试行为。详见
 [证书信任 ADR](../../../adr/provider-system-certificates.md)。
+
+## Pi 1.0.1 execution boundary
+
+Published model metadata and account entitlement come from one account-scoped
+Pi Models collection. Effective binding projection is shared by launch, delegates
+and compaction. Dispatch thinking normalization uses the resolved physical Pi
+model; native null/unsupported mappings remain unavailable without mutating
+saved preferences. Agent bookkeeping and omitted request reasoning are distinct.
+
+Every physical stream attempt has an operation identity before dispatch. Usage
+survives stream/result projection and events through Host/remote/renderer paths;
+retries and images retain physical account/model attribution. Nested immediate
+parent and owning Task remain distinct. The migration does not add coding-agent
+AgentSession, Codemode or virtual routing. See the coding-agent design review for
+future adoption conditions.

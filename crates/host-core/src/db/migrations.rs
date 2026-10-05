@@ -1,8 +1,8 @@
 mod plugin_automation;
-pub(crate) use plugin_automation::migrate_v21_to_v22;
+pub(crate) use plugin_automation::migrate_v23_to_v24;
 
 mod tool_policy;
-pub(crate) use tool_policy::migrate_v22_to_v23;
+pub(crate) use tool_policy::migrate_v24_to_v25;
 
 use super::*;
 
@@ -22,6 +22,13 @@ impl Database {
         )?;
         let _ = self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_turns_ended_at ON turns(ended_at DESC)",
+            [],
+        );
+        // Session summaries and session search both ask whether a run owns a
+        // session, so the probe wants an index of the sessions that have one.
+        let _ = self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_runs_session ON task_runs(session_id)
+             WHERE session_id IS NOT NULL",
             [],
         );
         let tx = self.conn.unchecked_transaction()?;
@@ -854,8 +861,85 @@ pub(crate) fn migrate_v18_to_v19(conn: &Connection, path: &Path) -> Result<()> {
     result
 }
 
+/// v20 persists stable user-message identity and Live Voice provenance on
+/// queued turns so a restart cannot lose source metadata before dispatch.
+pub(crate) fn migrate_v19_to_v20_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let has_queue: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turn_queue')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_queue {
+        for (column, definition) in [("user_message_id", "TEXT"), ("voice_origin_json", "TEXT")] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('turn_queue') WHERE name = ?1)",
+                [column],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE turn_queue ADD COLUMN {column} {definition};"
+                ))?;
+            }
+        }
+    }
+    tx.pragma_update(None, "user_version", 20i64)?;
+    Ok(())
+}
+
 pub(crate) fn migrate_v19_to_v20(conn: &Connection, path: &Path) -> Result<()> {
     let backup = create_migration_backup(conn, path, 19)?;
+    let tx = conn.unchecked_transaction()?;
+    migrate_v19_to_v20_tx(&tx)?;
+    tx.commit().with_context(|| {
+        format!(
+            "commit schema v19 to v20 migration; backup {} remains",
+            backup.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// v21 adds the per-session Todo checklist: the `todo_revision` /
+/// `todo_updated_at` stamps on `sessions` and the ordered `session_todo`
+/// rows that the `TodoWrite` tool replaces atomically.
+///
+/// The table DDL is shared verbatim with the fresh schema, and both the
+/// column probe and `IF NOT EXISTS` keep a second run harmless: an existing
+/// test fixture that downgrades `user_version` in place already carries the
+/// table and columns.
+pub(crate) fn migrate_v20_to_v21_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let has_todo_revision: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'todo_revision')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_todo_revision {
+        tx.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN todo_revision INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN todo_updated_at INTEGER;",
+        )?;
+    }
+    tx.execute_batch(SESSION_TODO_DDL)?;
+    tx.pragma_update(None, "user_version", 21i64)?;
+    Ok(())
+}
+
+pub(crate) fn migrate_v20_to_v21(conn: &Connection, path: &Path) -> Result<()> {
+    let backup = create_migration_backup(conn, path, 20)?;
+    let tx = conn.unchecked_transaction()?;
+    migrate_v20_to_v21_tx(&tx)?;
+    tx.commit().with_context(|| {
+        format!(
+            "commit schema v20 to v21 migration; backup {} remains",
+            backup.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn migrate_v21_to_v22(conn: &Connection, path: &Path) -> Result<()> {
+    let backup = create_migration_backup(conn, path, 21)?;
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS plugin_schedule_bindings (
@@ -899,18 +983,18 @@ pub(crate) fn migrate_v19_to_v20(conn: &Connection, path: &Path) -> Result<()> {
            UNIQUE(occurrence_id)
          );",
     )?;
-    tx.pragma_update(None, "user_version", 20i64)?;
+    tx.pragma_update(None, "user_version", 22i64)?;
     tx.commit().with_context(|| {
         format!(
-            "commit schema v19 to v20 migration; backup {} remains",
+            "commit schema v21 to v22 migration; backup {} remains",
             backup.display()
         )
     })?;
     Ok(())
 }
 
-pub(crate) fn migrate_v20_to_v21(conn: &Connection, path: &Path) -> Result<()> {
-    let backup = create_migration_backup(conn, path, 20)?;
+pub(crate) fn migrate_v22_to_v23(conn: &Connection, path: &Path) -> Result<()> {
+    let backup = create_migration_backup(conn, path, 22)?;
     let tx = conn.unchecked_transaction()?;
     let column_exists = |table: &str, name: &str| -> Result<bool> {
         let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -963,10 +1047,10 @@ pub(crate) fn migrate_v20_to_v21(conn: &Connection, path: &Path) -> Result<()> {
          ALTER TABLE plugin_automation_intents_v21 RENAME TO plugin_automation_intents;",
         )?;
     }
-    tx.pragma_update(None, "user_version", 21i64)?;
+    tx.pragma_update(None, "user_version", 23i64)?;
     tx.commit().with_context(|| {
         format!(
-            "commit schema v20 to v21 migration; backup {} remains",
+            "commit schema v22 to v23 migration; backup {} remains",
             backup.display()
         )
     })?;
