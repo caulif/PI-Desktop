@@ -1,6 +1,8 @@
-# ADR 0311: Native-approved fixed-command engineering verification
+# ADR 0320: Native-approved fixed-command engineering verification
 
-Status: Implemented candidate; native GUI acceptance pending
+## Status
+
+Implemented candidate; native GUI acceptance pending.
 
 ## Context
 

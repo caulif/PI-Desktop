@@ -20,10 +20,13 @@ Each ADR includes:
 
 | ID | Title | Status |
 |---|---|---|
-| 0311 | [Plugin approved verification checks](0311-plugin-approved-verification-checks.md) | Implemented candidate |
-| 0312 | [Development scheduled calendar preview](0312-dev-scheduled-calendar-preview.md) | Implemented candidate |
-| 0313 | [Relay thinking transport](0313-relay-thinking-transport.md) | Implemented candidate |
-| 0314 | [Scoped Bot session tool policy](0314-plugin-bot-session-tool-policy.md) | Implemented candidate |
+| 0320 | [Plugin approved verification checks](0320-plugin-approved-verification-checks.md) | Implemented candidate |
+| 0321 | [Development scheduled calendar preview](0321-dev-scheduled-calendar-preview.md) | Implemented candidate |
+| 0322 | [Relay thinking transport](0322-relay-thinking-transport.md) | Implemented candidate |
+| 0323 | [Scoped Bot session tool policy](0323-plugin-bot-session-tool-policy.md) | Implemented candidate |
+| 0324 | [Headless first-party Bot runtime](0324-headless-first-party-bot-runtime.md) | Accepted for implementation |
+| plugin-prompt-intents | [Plugin prompt request identity](plugin-prompt-intents.md) | Implemented candidate |
+| plugin-scheduled-routines | [Plugin-owned scheduled Routines](plugin-scheduled-routines.md) | Implemented candidate |
 | composer-mcp-invocations | [Composer MCP Invocations](composer-mcp-invocations.md) | Accepted |
 | chronological-system-transcript | [Preserve chronological model system state](chronological-system-transcript.md) | Accepted |
 | mcp-tool-approval-risk | [User MCP tools keep the normal approval path](mcp-tool-approval-risk.md) | Accepted |

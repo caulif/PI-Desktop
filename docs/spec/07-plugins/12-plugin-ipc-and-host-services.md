@@ -1,6 +1,6 @@
 # 12. Plugin IPC and Host Services
 
-## Isolated native calendar diagnostic (ADR 0312)
+## Isolated native calendar diagnostic (ADR 0321)
 
 `scheduled.devCalendarPreview` is a native Host development RPC, never a Plugin
 SDK service, plugin bridge handler, or MCP tool. Its `pluginId` is supplied by

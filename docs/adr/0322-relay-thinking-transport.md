@@ -1,4 +1,4 @@
-# ADR 0313: Explicit relay thinking transport
+# ADR 0322: Explicit relay thinking transport
 
 - Status: Accepted
 - Date: 2026-10-04

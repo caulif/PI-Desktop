@@ -29,7 +29,7 @@ receipt. Completion requires measured output and after-snapshot; cleanup failure
 timeout, truncation, cancellation or missing measurements stays incomplete.
 Execution exit success is not editorial or engineering human review.
 
-Bot sessions have the immutable scoped tool policy described in ADR 0314.
+Bot sessions have the immutable scoped tool policy described in ADR 0323.
 File calls use their invoking session's project; a missing project cannot borrow
 the visible window workspace. Directory lists apply realpath containment to the
 directory and every returned child.

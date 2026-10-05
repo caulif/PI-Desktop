@@ -1,6 +1,19 @@
-# Plugin-owned scheduled Routines
+# ADR: Plugin-owned scheduled Routines
 
-The isolated native development RPC `scheduled.devCalendarPreview` (ADR 0312)
+## Status
+
+Implemented candidate; calendar, actual execution and human review have separate
+acceptance evidence and do not enable experimental companion mode by default.
+
+## Context
+
+Persistent companion Routines need restart-safe scheduling and exact human
+authorization while the browser is absent. Schedule forecasts and plugin-defined
+identity must not substitute for native execution receipts or trusted ownership.
+
+## Decision
+
+The isolated native development RPC `scheduled.devCalendarPreview` (ADR 0321)
 projects an exact owned stored revision with the production calendar algorithm.
 It is not a plugin service and never enables a binding or creates occurrences.
 See the plugin Host-service specification for its strict temporary-profile guard
@@ -37,8 +50,8 @@ record binds the exact definition, plugin-owned session, goal hash and prompt
 template hash. Background `pluginUpsert` cannot forge native authorization; it
 returns `consentRequired` without writing an enabled task. A same-definition
 reconciliation while the task remains enabled is idempotent. Disable or plugin
-unload clears authorization, so reenable requires fresh consent. The v21 to
-v22 migration disables old plugin schedules lacking this authorization and
+unload clears authorization, so reenable requires fresh consent. The combined
+schema v23 to v24 migration disables old plugin schedules lacking this authorization and
 preserves their bindings and occurrence history.
 
 The host polls pending occurrences and sends only the owning loaded plugin

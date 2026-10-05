@@ -1,4 +1,8 @@
-# ADR 0314: Immutable scoped tool policy for Bot sessions
+# ADR 0323: Immutable scoped tool policy for Bot sessions
+
+## Status
+
+Implemented candidate; native/model acceptance remains a separate gate.
 
 ## Context
 
@@ -27,7 +31,7 @@ policy does not claim a new OS sandbox or remove explicitly configured context.
 
 Prompt-only instructions and catalog-only filtering leave an executable bypass.
 A separate execution engine would duplicate existing task and lifecycle code.
-The policy reuses those engines and narrows their inputs instead. Schema 23 uses
+The policy reuses those engines and narrows their inputs instead. Combined schema 25 uses
 the normal upgrade backup and preserves existing unrestricted non-Bot sessions.
 
 Original experimental changes are reviewed selectively; unrelated worktree

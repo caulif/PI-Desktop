@@ -1,6 +1,6 @@
 # 04. E2E Test Plan
 
-## E2E-HOST-isolated-calendar-preview (ADR 0312)
+## E2E-HOST-isolated-calendar-preview (ADR 0321)
 
 Run `node scripts/dev-scheduled-calendar-preview.mjs --host <candidate-host>`
 against the candidate executable. The runner creates only dedicated temporary

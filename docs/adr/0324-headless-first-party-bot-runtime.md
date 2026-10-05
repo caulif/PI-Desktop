@@ -1,4 +1,4 @@
-# ADR 0316: Headless first-party Bot runtime
+# ADR 0324: Headless first-party Bot runtime
 
 - Status: Accepted for implementation
 - Date: 2026-10-05

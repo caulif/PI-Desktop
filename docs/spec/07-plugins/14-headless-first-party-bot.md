@@ -43,7 +43,10 @@ RPC, plugin identity, shell bridge or authority flag endpoint. Native tools keep
 Host permissions, budgets and plans, then invoke the central Bot callback through
 an opaque token bound to the active native invocation and attached connection.
 Turn end, disconnect and device revocation invalidate that token. Revocation is
-checked on every frame of an already-open RACP connection.
+checked on every frame of an already-open RACP connection. Revoking a device
+also immediately disconnects its idle connections and prevents further
+server-initiated requests. Revocation removes connection authority; it does not
+abort a turn that has already been admitted. Cancel that exact turn separately.
 
 Session addresses are `node:<actual-host-id>:<native-session-id>`. Conversion is
 restricted to session fields and the fixed catalog's explicit positional session

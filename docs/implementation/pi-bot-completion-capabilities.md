@@ -12,7 +12,7 @@ unrelated edits remain untouched. No production profile was opened.
 This candidate supplies the Host dependencies for pi-bot A-G completion:
 native-approved fixed checks, durable prompt claims/cancellation, immutable Bot
 tool scope, isolated calendar preview, and explicit relay thinking transport.
-ADRs 0311-0314 and plugin service specs define the contracts and limitations.
+ADR 0320, ADR 0321, ADR 0322 and ADR 0323 and plugin service specs define the contracts and limitations.
 
 ## Executed validation
 

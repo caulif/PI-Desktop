@@ -1,4 +1,16 @@
-# Plugin prompt request identity
+# ADR: Plugin prompt request identity
+
+## Status
+
+Implemented candidate; native and model acceptance are separate gates.
+
+## Context
+
+Plugin prompt transport may lose its response after accepting a turn. A durable
+request identity is needed to distinguish a confirmed receipt from uncertainty
+without admitting duplicate work or treating request arguments as permission.
+
+## Decision
 
 First-party plugins may add `requestIntentId` to `agent/prompt`. Electron main
 binds the authenticated plugin identity, session ID, and SHA-256 of the exact
