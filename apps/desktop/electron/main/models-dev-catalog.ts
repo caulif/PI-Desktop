@@ -1,5 +1,16 @@
 import { readFile } from "node:fs/promises";
 import {
+  createModels,
+  InMemoryModelsStore,
+  type Model as PiModel,
+  type MutableModels,
+  type ModelType,
+  type ModelTypeMap,
+  type Provider,
+} from "@earendil-works/pi-ai";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { PI_VENDOR_ALIASES, settingsOperationMetadata } from "./pi-model-metadata.ts";
+import {
   MODEL_VENDOR_PREFIXES,
   NAMED_ENDPOINT_PRESETS,
   catalogModelIdsMatch,
@@ -19,8 +30,10 @@ import type {
   ModelReasoningOption,
   ThinkingLevel,
   ThinkingProtocol,
+  ModelBinding,
 } from "@pi-desktop/shared";
-import { genericModelConfig, type ModelConfig } from "@pi-desktop/agent-runtime";
+import { genericModelConfig, modelConfigWithBinding, transcriptConfigFromPi, type ModelConfig } from "@pi-desktop/agent-runtime";
+import { resolveBindingLimits } from "@pi-desktop/shared";
 
 export const MODELS_DEV_API_URL = "https://models.dev/api.json";
 export const MODELS_DEV_TIMEOUT_MS = 10_000;
@@ -114,6 +127,24 @@ export type ModelsDevCatalogOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   now?: () => number;
+  /** Optional Pi providers used only for executable non-chat operations. */
+  providers?: readonly Provider[];
+};
+
+export type CatalogAccount = {
+  id: string;
+  vendorKey?: string;
+  baseUrl?: string;
+  apiStyle?: string;
+  models?: ModelBinding[];
+};
+
+type CatalogTarget = {
+  providerId?: string;
+  vendorKey?: string;
+  baseUrl?: string;
+  apiStyle?: string;
+  modelId: string;
 };
 
 function asRecord(value: unknown): JsonRecord | null {
@@ -827,14 +858,15 @@ export function modelConfigFromModelsDev(
  * stay generic because they describe the deployment (#990).
  */
 export function catalogModelConfigFor(
-  catalog: Pick<ModelsDevCatalog, "findModel" | "anthropicThinkingFor">,
-  input: { vendorKey?: string; baseUrl?: string; apiStyle?: string; modelId: string },
+  catalog: Pick<ModelsDevCatalog, "findModel"> & Partial<Pick<ModelsDevCatalog, "anthropicThinkingFor" | "modelConfigFor">>,
+  input: CatalogTarget,
 ): ModelConfig {
+  if (catalog.modelConfigFor) return catalog.modelConfigFor(input);
   const model = catalog.findModel(input);
   if (!model) {
     const generic = genericModelConfig(input.modelId, input.baseUrl ?? "");
     const thinking = input.apiStyle === "anthropic_messages"
-      ? catalog.anthropicThinkingFor(input.modelId)
+      ? catalog.anthropicThinkingFor?.(input.modelId)
       : undefined;
     return thinking ? { ...generic, ...thinking } : generic;
   }
@@ -847,7 +879,7 @@ export function catalogModelConfigFor(
     and losing that would put a rejected shape on the wire (#990).
   */
   const thinking = input.apiStyle === "anthropic_messages" && !config.reasoningOptions?.length
-    ? catalog.anthropicThinkingFor(input.modelId)
+    ? catalog.anthropicThinkingFor?.(input.modelId)
     : undefined;
   return thinking ? { ...config, ...thinking } : config;
 }
@@ -1254,12 +1286,40 @@ export class ModelsDevCatalog {
   private readonly catalogPath: string;
   private localLoadAttempted = false;
   private localLoadPromise: Promise<boolean> | undefined;
+  private readonly operationModels: MutableModels;
+  private readonly accountModels = new Map<string, MutableModels>();
+  private readonly accountRows = new Map<string, CatalogAccount>();
+  private readonly removedAccounts = new Set<string>();
 
   constructor(options: ModelsDevCatalogOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? MODELS_DEV_TIMEOUT_MS;
     this.now = options.now ?? (() => Date.now());
     this.catalogPath = options.catalogPath;
+    this.operationModels = createModels({
+      modelsStore: new InMemoryModelsStore(),
+      authContext: { env: async () => undefined, fileExists: async () => false },
+    });
+    for (const provider of options.providers ?? builtinProviders()) {
+      this.operationModels.setProvider(provider);
+    }
+  }
+
+  /** Pi Models are retained only to execute typed non-chat provider operations. */
+  setAccountModels(providerId: string, models: MutableModels): void {
+    if (!this.removedAccounts.has(providerId)) this.accountModels.set(providerId, models);
+  }
+
+  deleteAccount(providerId: string): void {
+    this.removedAccounts.add(providerId);
+    this.accountModels.delete(providerId);
+    this.accountRows.delete(providerId);
+  }
+
+  /** Persisted per-model limits remain user-owned overrides over catalog data. */
+  configureAccount(row: CatalogAccount): void {
+    if (this.removedAccounts.has(row.id)) return;
+    this.accountRows.set(row.id, structuredClone(row));
   }
 
   /** Load the bundled release snapshot; this never performs network I/O. */
@@ -1350,6 +1410,35 @@ export class ModelsDevCatalog {
     };
   }
 
+  modelConfigFor(input: CatalogTarget, unpublishedConfig?: ModelConfig): ModelConfig {
+    const model = this.findModel(input);
+    const binding = input.providerId
+      ? this.accountRows.get(input.providerId)?.models?.find(
+          (entry) => entry.id.trim().toLowerCase() === input.modelId.trim().toLowerCase(),
+        )
+      : undefined;
+    let baseline = model
+      ? modelConfigFromModelsDev(model, input.baseUrl)
+      : unpublishedConfig ?? genericModelConfig(input.modelId, input.baseUrl ?? "");
+    if (!model && !unpublishedConfig && input.apiStyle === "anthropic_messages") {
+      const thinking = this.anthropicThinkingFor(input.modelId);
+      if (thinking) baseline = { ...baseline, ...thinking };
+    }
+    // Pi owns wire capabilities, independently of models.dev's limits/prices.
+    // Use the original published record, never an account/relay projection.
+    const key = input.vendorKey?.trim().toLowerCase();
+    const vendor = (key ? PI_VENDOR_ALIASES[key] ?? key : undefined) ?? this.providerKeyForRow(input);
+    const transport = vendor ? this.operationModels.getModel(vendor, input.modelId) : undefined;
+    if (transport) {
+      const transcript = transcriptConfigFromPi(transport);
+      baseline = { ...baseline, transcriptBinding: transcript.transcriptBinding,
+        compat: { ...baseline.compat, ...transcript.compat } };
+    }
+    if (!binding) return baseline;
+    const limits = resolveBindingLimits(baseline, binding);
+    return modelConfigWithBinding(limits.catalogConfig, limits.binding);
+  }
+
   private providerFor(input: { vendorKey?: string; baseUrl?: string }): ModelsDevProvider | undefined {
     const candidates = new Set(providerKeyCandidates(input.vendorKey));
     const apiProviders = [...this.providers.values()].filter((provider) =>
@@ -1409,7 +1498,8 @@ export class ModelsDevCatalog {
     return bucket?.length === 1 ? bucket[0] : undefined;
   }
 
-  findModel(input: { vendorKey?: string; baseUrl?: string; modelId: string }): ModelsDevModel | undefined {
+  findModel(input: CatalogTarget): ModelsDevModel | undefined {
+    if (input.providerId && this.removedAccounts.has(input.providerId)) return undefined;
     const requested = normalizedModelId(input.modelId);
     if (!requested) return undefined;
     // Resolve through the index of the current catalog generation. The candidate
@@ -1453,6 +1543,9 @@ export class ModelsDevCatalog {
       : official.length === 1
         ? official[0].model
         : modelWithSharedCapabilities(candidates.map(({ model }) => model));
+    const deploymentFallback = result
+      ? undefined
+      : this.modelForDeploymentMarker(input.modelId, preferredProvider);
     /* The row's own catalog provider did not publish this id. Borrowing needs a
        known provider identity to anchor on: the row resolved to a catalog
        provider whose own records are authoritative, so anything missing from it
@@ -1465,13 +1558,66 @@ export class ModelsDevCatalog {
        behaviour: a unique unambiguous match, official disambiguation, shared
        capabilities, or nothing. Deployment-marker / variant-suffix fallbacks
        are intentionally not applied here (approved #1047 matching rules). */
-    const borrowed = result ??
+    const borrowed = result ?? deploymentFallback ??
       (preferredProvider ? this.borrowedAcrossProviders(input) : undefined);
     // Cache the result (a miss included) so a repeated miss is also O(1) and
     // cannot grow the candidate index with query-dependent keys.
     this.lookupMemo.set(memoKey, borrowed);
     if (this.lookupMemo.size > LOOKUP_MEMO_LIMIT) this.lookupMemo.clear();
     return borrowed;
+  }
+
+  /** Resolve only a whitelisted deployment marker, preserving the served ID. */
+  private modelForDeploymentMarker(
+    modelId: string,
+    preferredProvider: ModelsDevProvider | undefined,
+  ): ModelsDevModel | undefined {
+    const leaf = modelId.slice(modelId.lastIndexOf("/") + 1);
+    // Only context-size deployment labels are safe to project onto a model's
+    // published record. Semantic suffixes such as `latest` and `thinking`
+    // remain distinct model IDs even if the broader catalog matcher knows them.
+    const marker = /[-_:](?:1|2|4|32|64|128|200|256|512)k$|[-_:](?:1|2|4)m$/i;
+    if (!marker.test(leaf)) return undefined;
+    const lookupId = leaf.replace(marker, "");
+
+    const candidates = (this.lookupIndex?.candidates(normalizedModelId(lookupId)) ?? [])
+      .filter(({ model }) => normalizedModelId(model.modelId) === normalizedModelId(lookupId));
+    if (preferredProvider) {
+      const own = candidates.filter(({ provider }) => provider === preferredProvider);
+      if (own.length === 1) return own[0].model;
+      return own.length > 1 ? modelWithSharedCapabilities(own.map(({ model }) => model)) : undefined;
+    }
+
+    const official = candidates.filter(isOfficialSourceProvider);
+    if (official.length === 1) return official[0].model;
+    if (official.length === 0) return undefined;
+    return modelWithSharedCapabilities(official.map(({ model }) => model));
+  }
+
+  publishedModelFor(input: CatalogTarget): ModelsDevModel | undefined {
+    return this.findModel(input);
+  }
+
+  /**
+   * The models.dev snapshot owns published chat metadata. Pi is consulted here
+   * only to obtain a typed executable operation model such as image generation.
+   */
+  findModelOfType<T extends ModelType>(type: T, input: CatalogTarget): ModelTypeMap[T] | undefined {
+    if (type === "chat") return undefined;
+    if (input.providerId && this.removedAccounts.has(input.providerId)) return undefined;
+    const collection = (input.providerId && this.accountModels.get(input.providerId)) || this.operationModels;
+    const key = input.vendorKey?.trim().toLowerCase();
+    const alias = key ? PI_VENDOR_ALIASES[key] ?? key : undefined;
+    const providerId = alias && collection.getProvider(alias)
+      ? alias
+      : this.providerKeyForRow(input);
+    if (!providerId || !collection.getProvider(providerId)) return undefined;
+    return collection.getModelOfType(type, providerId, input.modelId);
+  }
+
+  settingsMetadataFor(input: CatalogTarget): ModelInfo | undefined {
+    const vendor = this.providerKeyForRow(input);
+    return settingsOperationMetadata(input.providerId ?? "", vendor, input.modelId)[0];
   }
 
   /**
@@ -1558,6 +1704,7 @@ export class ModelsDevCatalog {
      */
     includeNonChat?: boolean;
   }): ModelInfo[] {
+    if (this.removedAccounts.has(input.providerId)) return [];
     const preferredProvider = this.providerFor(input);
     const providers = preferredProvider
       ? [preferredProvider]
@@ -1565,7 +1712,7 @@ export class ModelsDevCatalog {
           provider.models.some((model) => modelMatchesProvider(model, input.vendorKey)),
         );
     const seen = new Set<string>();
-    return providers.flatMap((provider) =>
+    const chatAndPublished = providers.flatMap((provider) =>
       provider.models
         .filter((model) => {
           const key = normalizedModelId(model.modelId);
@@ -1577,6 +1724,16 @@ export class ModelsDevCatalog {
         })
         .map((model) => modelInfoFromModelsDev(model, input.providerId)),
     );
+    if (!input.includeNonChat) return chatAndPublished;
+    const seenIds = new Set(chatAndPublished.map((model) => normalizedModelId(model.modelId)));
+    const operationRows = settingsOperationMetadata(input.providerId, preferredProvider?.providerKey)
+      .filter((model) => {
+        const key = normalizedModelId(model.modelId);
+        if (seenIds.has(key)) return false;
+        seenIds.add(key);
+        return true;
+      });
+    return [...chatAndPublished, ...operationRows];
   }
 
   /** models.dev provider key for a configured row, when the catalog knows it. */

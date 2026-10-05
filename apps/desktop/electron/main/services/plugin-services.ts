@@ -33,7 +33,6 @@ import { createFsConsentService } from "../plugin-fs-consent";
 import { pluginWorkspaceInfo } from "../workspace-roots";
 import { createDesktopConsentService } from "../plugin-desktop-consent";
 import { PluginRuntime } from "../plugin-runtime";
-import { PluginScheduleDisableOutbox } from "../plugin-schedule-disable-outbox";
 import { createSpeechService } from "./speech-service";
 import { PluginShortcutRegistry } from "../plugin-shortcut-registry";
 import { PluginWebSocketRegistry } from "../plugin-websocket";
@@ -102,7 +101,6 @@ export function createPluginServices({
   const isHostUnavailable = (error: unknown): boolean =>
     (error as { errorCode?: string } | null | undefined)?.errorCode ===
     ErrorCodes.HOST_UNAVAILABLE;
-  const scheduleDisableOutbox = new PluginScheduleDisableOutbox(dataDir);
   const pluginPanels = new PluginPanelHost(
     async (pluginId, channel, payload, context) =>
       plugins.invokePanelBridge(pluginId, channel, payload, context),
@@ -455,7 +453,7 @@ export function createPluginServices({
     },
     // Hot reload happens without anyone asking for it, so it has to report
     // itself: the plugins page reads status from the host, not from the edit.
-    onPluginReloaded: ({ pluginId, name, ok, message }) => {
+    onPluginReloaded: async ({ pluginId, name, ok, message }) => {
       logger.app("plugin", ok ? "info" : "error", "development plugin reloaded", {
         pluginId,
         data: { ok, message },
@@ -463,8 +461,9 @@ export function createPluginServices({
       sendToRenderer(IPC.event.toast, {
         message: ok ? `Reloaded ${name}` : `Reload failed: ${name} — ${message ?? ""}`,
       });
-      // Views were loaded from the previous revision of the plugin's files.
+      // Views and panels were loaded from the previous revision of the plugin's files.
       pluginViews.closePlugin(pluginId);
+      await pluginPanels.close(pluginId, { force: true });
       if (pluginId === BROWSER_PLUGIN_ID) browserHost.disposeGuest();
       sendToRenderer(IPC.event.pluginChanged,{ reason: "reload", pluginId });
     },
@@ -633,9 +632,8 @@ export function createPluginServices({
       console: (limit) => browserHost.console(limit),
       cdp: (method, params) => browserHost.cdpCommand(method, params),
     },
-    onPluginUnload: async (pluginId) => {
+    onPluginUnload: (pluginId) => {
       if (pluginId === BROWSER_PLUGIN_ID) browserHost.disposeGuest();
-      await scheduleDisableOutbox.enqueue(pluginId, getHost);
     },
   });
   const speech = createSpeechService({
@@ -656,6 +654,5 @@ export function createPluginServices({
     pluginViews,
     browserHost,
     speech,
-    scheduleDisableOutbox,
   };
 }

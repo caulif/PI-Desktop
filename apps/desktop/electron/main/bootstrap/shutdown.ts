@@ -14,7 +14,7 @@ import type { UserMcpRuntime } from "../user-mcp";
 import type { McpControlServer } from "../mcp-control";
 import type { McpOAuthManager } from "../mcp-oauth";
 import { getActiveRemoteHostsBoot, setActiveRemoteHostsBoot } from "./remote-hosts";
-import { lockQuitTurnAborts } from "./quit-turn-aborts";
+import type { LiveCallService } from "../live-voice/call-service";
 
 const QUIT_TURN_SETTLE_BUDGET_MS = 2_000;
 
@@ -36,11 +36,10 @@ export type ShutdownDependencies = {
   getSidecar: () => AgentSidecar | null;
   getMcpControl: () => McpControlServer | null;
   activeTurns: Map<string, string>;
-  lockAbortReason: (sessionId: string, turnId: string) => void;
   persistenceOutbox: PersistenceOutbox;
   inflightCheckpointer: InflightCheckpointer;
   pluginPanels: Pick<PluginPanelHost, "closeAll">;
-  plugins: Pick<PluginRuntime, "quiesceForShutdown" | "disposeAll">;
+  plugins: Pick<PluginRuntime, "disposeAll">;
   userMcp: Pick<UserMcpRuntime, "disposeAll">;
   mcpOAuth?: Pick<McpOAuthManager, "disposeAll">;
   browserHost: Pick<BrowserHost, "dispose">;
@@ -49,6 +48,7 @@ export type ShutdownDependencies = {
   logger: Pick<Logger, "app">;
   confirmQuitDialog: () => Promise<boolean>;
   disposePowerSaveBlockers: () => void;
+  liveCallService?: Pick<LiveCallService, "endForLifecycle">;
 };
 
 /** Register the last-window and before-quit resource lifecycle handlers. */
@@ -59,7 +59,6 @@ export function registerShutdownHandlers({
   getSidecar,
   getMcpControl,
   activeTurns,
-  lockAbortReason,
   persistenceOutbox,
   inflightCheckpointer,
   pluginPanels,
@@ -72,6 +71,7 @@ export function registerShutdownHandlers({
   logger,
   confirmQuitDialog,
   disposePowerSaveBlockers,
+  liveCallService,
 }: ShutdownDependencies): void {
   app.on("window-all-closed", () => {
     // The D216 tray is resident on every platform, so its presence says nothing
@@ -100,7 +100,6 @@ export function registerShutdownHandlers({
     const isAutomatedMode =
       process.env.PI_DESKTOP_BOOT_PROBE === "1" ||
       process.env.PI_DESKTOP_SUPERVISION_PROBE === "1" ||
-      process.env.PI_DESKTOP_PLUGIN_NAVIGATION_PROBE === "1" ||
       process.env.PI_DESKTOP_CAPTURE === "1";
     // Skip confirmation for the quit that an in-app update performs. The
     // installer for that update was already spawned before app.quit(), and it
@@ -134,10 +133,7 @@ export function registerShutdownHandlers({
       state.toggleWindowAccelerator = null;
     }
     state.shutdownPromise = (async () => {
-      // Abort emits turn-ended events. Close plugin admission synchronously
-      // first so a deferred queue cannot start a new paid turn during quit.
-      // Keep the runtime alive until panels close and pending metadata settles.
-      plugins.quiesceForShutdown();
+      await liveCallService?.endForLifecycle("app-quit");
       // Close every paired remote host before the local host-core so any
       // in-flight remote turn's abort still goes over a live socket. Bounded
       // parallelism inside `closeAll`; safe to run before local disposals.
@@ -149,7 +145,6 @@ export function registerShutdownHandlers({
       // (D299). Bounded: a quit must not hang on an unresponsive provider.
       await settleRunningTurnsForQuit({
         activeTurns,
-        lockAbortReason,
         getHost,
         getSidecar,
         inflightCheckpointer,
@@ -205,7 +200,6 @@ export function registerShutdownHandlers({
 
 type TurnSettlementDependencies = {
   activeTurns: Map<string, string>;
-  lockAbortReason: (sessionId: string, turnId: string) => void;
   getHost: () => HostProcess | null;
   getSidecar: () => AgentSidecar | null;
   inflightCheckpointer: InflightCheckpointer;
@@ -215,28 +209,27 @@ type TurnSettlementDependencies = {
 
 async function settleRunningTurnsForQuit({
   activeTurns,
-  lockAbortReason,
   getHost,
   getSidecar,
   inflightCheckpointer,
   persistenceOutbox,
   logger,
 }: TurnSettlementDependencies): Promise<void> {
-  const targets = lockQuitTurnAborts(activeTurns, lockAbortReason);
+  const sessions = [...activeTurns.keys()];
   const deadline = Date.now() + QUIT_TURN_SETTLE_BUDGET_MS;
   // The newest snapshot of every streaming reply lands first: it is the
   // fallback if the abort below does not produce a final row in time.
   await inflightCheckpointer.flushAll();
-  if (targets.length === 0) {
+  if (sessions.length === 0) {
     await persistenceOutbox.flush(getHost);
     return;
   }
   const sidecar = getSidecar();
   if (sidecar) {
     await Promise.allSettled(
-      targets.map(({ sessionId, turnId }) =>
+      sessions.map((sessionId) =>
         Promise.race([
-          sidecar.call("agent.abort", { sessionId, turnId }),
+          sidecar.call("agent.abort", { sessionId }),
           new Promise((resolve) => setTimeout(resolve, 800)),
         ]),
       ),

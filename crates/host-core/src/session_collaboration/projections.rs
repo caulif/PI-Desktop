@@ -165,38 +165,6 @@ pub(super) fn result(db: &Database, input: &Value) -> Result<Value> {
     Ok(json!({"ready":ready,"message":message}))
 }
 
-pub(super) fn lookup(db: &Database, input: &Value) -> Result<Value> {
-    let message_id = string(input, "messageId", 256)?;
-    let plugin_id = string(input, "pluginId", 256)?;
-    let Some(message) = repository::get(db, message_id)? else {
-        return Err(anyhow!("NOT_FOUND: session message"));
-    };
-    if message.plugin_id != plugin_id || message.kind == "completion" {
-        return Err(anyhow!("NOT_FOUND: outgoing session message"));
-    }
-    let callback: Option<(String, String, Option<String>, String)> = db
-        .conn()
-        .query_row(
-            "SELECT id,status,turn_id,target_session_id FROM session_collaboration_messages
-         WHERE reply_to_message_id=?1 AND plugin_id=?2 AND kind='completion'
-         ORDER BY created_at LIMIT 1",
-            params![message_id, plugin_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let ready = !matches!(message.status.as_str(), "queued" | "running");
-    Ok(json!({
-        "ready": ready, "messageId": message.id,
-        "sessionId": message.target_session_id, "turnId": message.turn_id,
-        "status": message.status, "result": message.result, "error": message.error,
-        "replyToMessageId": callback.as_ref().map(|_| message_id),
-        "completionMessageId": callback.as_ref().map(|value| &value.0),
-        "completionStatus": callback.as_ref().map(|value| &value.1),
-        "completionTurnId": callback.as_ref().and_then(|value| value.2.as_ref()),
-        "completionSessionId": callback.as_ref().map(|value| &value.3),
-    }))
-}
-
 pub(super) fn summary(db: &Database, id: &str) -> Result<Value> {
     let title = repository::title(db, id)?;
     let creator = creator(db, id)?;

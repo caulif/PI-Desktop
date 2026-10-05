@@ -14,7 +14,7 @@ import type {
   PluginLlmContext,
   PluginModelInfo,
 } from "@pi-desktop/plugin-sdk";
-import type { AppSettings, ContextCompactionRecord, SessionThinkingLevel, ThinkingLevel, UiMessage } from "@pi-desktop/shared";
+import type { AppSettings, ContextCompactionRecord, ThinkingLevel, UiMessage } from "@pi-desktop/shared";
 import { THINKING_LEVELS } from "@pi-desktop/shared";
 
 export function parsePluginModelKey(modelKey: string): { providerId: string; modelId: string } | null {
@@ -26,8 +26,7 @@ export function parsePluginModelKey(modelKey: string): { providerId: string; mod
   };
 }
 
-export function asPluginThinkingLevel(value: unknown): SessionThinkingLevel {
-  if (value === "omit") return "omit";
+export function asPluginThinkingLevel(value: unknown): ThinkingLevel {
   return THINKING_LEVELS.includes(value as ThinkingLevel) ? (value as ThinkingLevel) : "off";
 }
 

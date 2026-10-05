@@ -39,11 +39,6 @@ export const SESSION_COLLABORATION_OPERATIONS: McpControlOperation[] = [
     pluginOnly: true,
   },
   {
-    id: "session/collaboration/lookup", channel: "internal:session-collaboration", risk: "read",
-    description: "Read one outgoing delivery and its completion receipt by stable message ID.",
-    argumentShape: ["{messageId}"], pluginOnly: true,
-  },
-  {
     id: "session/collaboration/cancel", channel: "internal:session-collaboration", risk: "write",
     description: "Cancel this plugin's received task without deleting the reusable session or transcript.",
     argumentShape: ["{sessionId,messageId?}"],

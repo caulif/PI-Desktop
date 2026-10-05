@@ -1,23 +1,5 @@
 # 03. Plugin API
 
-## Main view context (ADR 0310)
-
-Sandboxed UI pages can feature-detect `window.pluginBridge.getViewContext()`.
-It returns `{placement:'main'|'workpanel'|'standalone',active,location,itemId?,
-sectionId?,appearance:'light'|'dark'}`. Placement is authored by the host at view
-creation. Location and appearance follow host events; focus refresh must never
-revert to an obsolete entry URL or startup theme. Raw `ui.getAppearance` and
-`appearance:changed` remain the authoritative richer theme APIs.
-
-Main navigation keeps the existing `piViewOpen` URL and `view:open {path}` event.
-`path` is a JSON wrapper `{placement:'main',sectionId,itemId,location}`; the getter
-unwraps the plugin's domain location. `view:context` emits the same unwrapped
-subject plus `active` on activation/deactivation and changes without reloading
-the page. Navigation is not a send/dispatch operation. Main route identities
-remain independent from Host Session IDs, with back/forward and restart recovery
-using the fresh provider projection. Missing items/plugins display an unavailable
-surface and permit returning to host conversation navigation.
-
 ## Theme variables
 
 `pi.themes.setVariables(themeId, values)` requires `ui.theme`. The host accepts
@@ -591,27 +573,21 @@ plugin panel cannot invoke the mutation operations outside this gateway.
 ```ts
 pi.agent.complete(input: {
   modelKey: string
-  thinkingLevel?: SessionThinkingLevel
+  thinkingLevel?: ThinkingLevel
   system?: string
   messages?: Array<{ role: "user" | "assistant"; content: string }>
   includeSessionContext?: boolean
 }): Promise<{
   text: string
   modelKey: string
-  thinkingLevel?: SessionThinkingLevel
+  thinkingLevel?: ThinkingLevel
   usage?: MessageUsage
 }>
 ```
 
 The host resolves credentials and runs a one-shot completion with `tools: []`
 through the same path as Composer prompt enhancement. The plugin never receives
-a secret. Explicit `thinkingLevel: "omit"` is preserved separately from `off`;
-omitting the input keeps the existing `off` default. For a provider explicitly
-configured with `thinkingRequestProtocol: "deepseek"`, off serializes as
-`thinking: { type: "disabled" }` with no `reasoning_effort`, and omit removes both
-fields, including when its binding reports no reasoning capability. An
-unconfigured provider retains the existing capability clamping and request
-defaults. `includeSessionContext: true` also requires `session.read` and an
+a secret. `includeSessionContext: true` also requires `session.read` and an
 in-flight tool session; the host serializes that context and, if `messages` is
 empty, appends `Please respond to the request.` System prompt
 ≤ 32 KiB; combined messages ≤ 200k characters; eight calls per plugin per

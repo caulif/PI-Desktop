@@ -131,7 +131,7 @@ function workPanelTools(
       label: t("panel.tabs.review"),
       icon: IconDiff,
     },
-    ...pluginViews.filter(view => view.placement !== "main").map((view) => {
+    ...pluginViews.map((view) => {
       const Icon = pluginViewIcon(view.icon);
       return {
         id: view.ref,

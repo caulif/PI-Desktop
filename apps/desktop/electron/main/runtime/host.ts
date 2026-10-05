@@ -3,7 +3,6 @@ import { assertLinuxGlibcSupported } from "../linux-glibc";
 import { HostProcess } from "../host-process";
 import type { Logger } from "../logger";
 import type { PersistenceOutbox } from "../persistence-outbox";
-import type { PluginScheduleDisableOutbox } from "../plugin-schedule-disable-outbox";
 import type { PluginRuntime } from "../plugin-runtime";
 import type { UserMcpRuntime } from "../user-mcp";
 import type { RuntimeState } from "./context";
@@ -14,7 +13,6 @@ export type HostRuntimeDependencies = {
   dataDir: string;
   logger: Logger;
   persistenceOutbox: PersistenceOutbox;
-  scheduleDisableOutbox: PluginScheduleDisableOutbox;
   activeToolCalls: Map<string, any>;
   activeToolCallKey: (sessionId: string, toolCallId: string) => string;
   sessionProjects: Map<string, string | null>;
@@ -50,7 +48,6 @@ export function createHostRuntime({
   dataDir,
   logger,
   persistenceOutbox,
-  scheduleDisableOutbox,
   activeToolCalls,
   activeToolCallKey,
   sessionProjects,
@@ -135,6 +132,9 @@ export function createHostRuntime({
             ...(asking?.agentName ? { agentName: asking.agentName } : {}),
             ...(asking?.parentToolCallId
               ? { parentToolCallId: asking.parentToolCallId }
+              : {}),
+            ...(asking?.nestedParentToolCallId
+              ? { nestedParentToolCallId: asking.nestedParentToolCallId }
               : {}),
           },
         },
@@ -307,6 +307,8 @@ export function createHostRuntime({
       );
     } else if (method === "plans.changed") {
       sendToRenderer(IPC.event.plansChanged, params);
+    } else if (method === "todos.changed") {
+      sendToRenderer(IPC.event.todosChanged, params);
     } else if (method === "configSync.changed") {
       sendToRenderer(IPC.event.configSyncChanged, params);
     } else if (method === "configSync.progress") {
@@ -365,7 +367,6 @@ export function createHostRuntime({
   runtimeState.host = h;
   try {
     await h.handshake();
-    await scheduleDisableOutbox.flush(h);
     logger.app("runtime", "info", "host-core handshake ok", {
       data: { generation: h.generation },
     });

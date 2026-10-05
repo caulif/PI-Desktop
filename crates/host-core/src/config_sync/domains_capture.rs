@@ -25,10 +25,6 @@ fn capture_providers(st: &AppState) -> Result<Vec<PortableEntity>> {
             continue;
         }
         let mut payload = serde_json::to_value(&provider)?;
-        // A cleared override must clear an existing row on the receiving host.
-        // Older payloads without this field retain their old update semantics.
-        payload["thinkingRequestProtocol"] =
-            serde_json::to_value(&provider.thinking_request_protocol)?;
         strip_keys(
             &mut payload,
             &[
@@ -520,11 +516,6 @@ fn read_instruction_file(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let bytes = fs::read(path)?;
-    if bytes.len() > MAX_INSTRUCTION_BYTES {
-        return Err(anyhow::anyhow!(
-            "CONFIG_SYNC_LIMIT_EXCEEDED: instruction file is too large"
-        ));
-    }
     let content = String::from_utf8(bytes)
         .map_err(|_| anyhow::anyhow!("CONFIG_SYNC_INVALID: instruction file is not UTF-8"))?;
     if content.trim().is_empty() {
@@ -539,11 +530,6 @@ pub(crate) fn global_instruction_path_for_sync() -> Result<PathBuf> {
 }
 
 pub(crate) fn write_instruction_file(path: &Path, content: &str) -> Result<()> {
-    if content.len() > MAX_INSTRUCTION_BYTES {
-        return Err(anyhow::anyhow!(
-            "CONFIG_SYNC_LIMIT_EXCEEDED: instruction file is too large"
-        ));
-    }
     if fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)

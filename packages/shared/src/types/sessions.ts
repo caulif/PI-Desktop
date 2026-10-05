@@ -3,7 +3,7 @@ import type { Mode } from "./common.js";
 import type { SessionThinkingLevel, ThinkingLevel } from "./models.js";
 import type { PermissionMode } from "./permissions.js";
 import type { UiMessage } from "./messages.js";
-import type { PlanningState } from "./plans.js";
+import type { PlanHistoryEntry, PlanningState } from "./plans.js";
 
 /**
  * Which authority owns a session's transcript.
@@ -16,7 +16,6 @@ import type { PlanningState } from "./plans.js";
  *   from a display badge; the local/remote split is resolved in Electron main.
  */
 export type SessionSource = "desktop" | "pi-native" | "remote";
-export type SessionToolPolicy = "unrestricted" | "plugin-bot-scoped";
 
 export type SessionCapabilities = {
   canPrompt: boolean;
@@ -42,19 +41,26 @@ export type SessionSummary = {
   thinkingLevel: SessionThinkingLevel;
   /** Per-session permission mode; `inherit` follows the global default (D115). */
   permissionMode: PermissionMode;
-  /** Host-persisted tool restriction; forks inherit it and configure cannot change it. */
-  toolPolicy?: SessionToolPolicy;
   /** Effective capability for this session's exact provider/model pair. */
   supportsReasoning?: boolean;
   /** Effective image-input capability for this session's exact model. */
   supportsVision?: boolean;
   supportedThinkingLevels?: ThinkingLevel[];
+  /**
+   * True when this session is the transcript owned by a scheduled-task run.
+   * The automation owns it: the SessionList and global session search hide it,
+   * and the Scheduled page is its entry point (`todos`-style automation output).
+   * Older hosts omit it, so `undefined` means an ordinary conversation.
+   */
+  scheduledRun?: boolean;
   updatedAt: string;
   createdAt: string;
 };
 
 export type SessionDetail = SessionSummary & {
   messages: UiMessage[];
+  /** Authoritative metadata scoped to the submitted contracts in this page. */
+  planHistory?: PlanHistoryEntry[];
   /** Owning Task for a nested search target; context only, outside page cursors. */
   navigationParent?: UiMessage;
   /** Zero-based offset of the first message returned by a bounded history read. */

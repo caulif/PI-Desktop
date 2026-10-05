@@ -1,34 +1,7 @@
 # 12. 插件 IPC 和主机服务
 
-## 隔离的受控 due 诊断（ADR 0315）
-
-`scheduled.devPluginDueAt` 仅供原生开发诊断，不开放 Plugin SDK/MCP。
-`PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` 与 `PI_DESKTOP_DEV_SCHEDULE_DUE_DIR`
-必须同时指向同一个规范化的专属 Temp profile；打开 SQLite 前及每次调用都核对。
-输入绑定 exact plugin、external key、定义版本、时区、RFC3339 `now` 和一次性的
-`seedAfter`；未知字段、旧版本、时间回退、多绑定、未启用/未批准定义及重复 seed 均拒绝。
-
-仅无 occurrence 历史时允许 seed，且不得早于 now 超过七天；nextRunAt 使用生产日历。
-事务覆盖时间游标、seed、生产 due 写入和最终读取；occurrence savepoint 在独立调用
-及外层事务下都保持原子。不创建授权、不改系统时间、不启动模型，也不改变 prompt
-admission 和插件 policy 的现有时间源。
-
-runner 在变更前保存 journal，unknown 只读查询。存储授权标记本身不证明真实原生批准；
-没有绑定 hash 的原生观察回执时验收保持 incomplete。受控 due 持久化、实际墙钟触发
-与插件 Run/Attempt 是分别记录的证据。
-
 > **翻译说明：** 本页是与 [英文源规格](/spec/07-plugins/12-plugin-ipc-and-host-services) 一一对应的机器辅助翻译。代码、协议字段和标识符保持原文；如翻译与英文源事实有歧义，以英文版本为准。
 
-
-## 隔离的原生日历诊断（ADR 0312）
-
-`scheduled.devCalendarPreview` 是原生 Host 开发 RPC，不是 Plugin SDK 服务、插件 bridge handler 或 MCP 工具。其 `pluginId` 由原生诊断 runner 提供，不能从插件参数转发。请求包含 `externalKey`、`expectedDefinitionRevision`、显式 RFC3339 `after` 与 `count`（1–16）。未知字段、过期版本以及缺失的所属绑定均被拒绝。
-
-诊断使用生产日历算法，按存储的 cadence、schedule 与 IANA timezone 推算，返回身份、版本、存储的 `enabled`、规范化为毫秒 UTC 的 `after`，以及 `points[{scheduledFor,localTime}]` 中的 UTC 和当地 offset 时间。返回结果不包含授权或执行能力。
-
-显式 `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` 必须等于实际 profile 的规范路径。该目录必须预先存在，是操作系统临时目录的直接子目录，并以 `pi-bot-calendar-preview-*` 命名。启用诊断时，Host 在打开 SQLite 前核对目录；每次诊断 RPC 还会核对实际 main 数据库文件。默认或生产 profile、路径不匹配、嵌套 profile 与数据库重定向均被拒绝。未显式启用时 RPC 被拒绝，普通启动行为保持不变。
-
-Preview 可在无需同意的情况下读取 disabled 绑定，但不会写入、重新调度、创建 occurrence、派发定时事件或准入 prompt。原生日历预测与实际 Routine 执行验收是两种证据。
 
 ## 1. 目标
 
@@ -229,7 +202,7 @@ toast 加上 `pluginChanged` 到渲染器。
 1.模型调用`plugin_<pluginIdSafe>_<toolName>`； sidecar 转发它
    像任何内置工具一样托管 `tools.execute`。
 2. host-core 首先解析持久操作模式。在 Agent 中，它运行
-   正常权限流程（风险、会话授予、120 秒超时），然后发出
+   正常权限流程（风险、会话授予、无自动截止时间），然后发出
    通知 `plugins.execute`
    `{ executionId, sessionId, toolCallId, toolName, args, turnId }`。`turnId` 是
    运行时回合身份，原样转发，以便插件工具上下文能与
@@ -243,8 +216,8 @@ toast 加上 `pluginChanged` 到渲染器。
    （`DESKTOP_TOOL_DISPATCH_TIMEOUT_MS`，高于 110 秒的插件工具预算，也高于最宽的
    MCP 支路：10 秒惰性握手 + 30 秒 `tools/list` 遍历 + 100 秒调用），超时映射到
    `TOOL_TIMEOUT`；unknown/unloaded 工具映射到 `TOOL_NOT_FOUND`。这类调用的传输截止
-   时间覆盖 120 秒权限等待、30 秒准入排队、上述调度和 10 秒余量（`rpcTimeoutMs`），
-   因此外层不会在 host-core 报告结果之前先放弃。
+   等待明确权限决定时，`tools.execute` 传输没有截止时间；批准后仍以 host-core 的工具
+   执行预算为准。
 
 面向模型的注册表根据提示获得插件工具：已注册主要通道
 defs（`fullName`、描述、JSON 架构参数）到 `agent.prompt`，以及

@@ -16,30 +16,7 @@ import {
 // built-in window palette from the same table main and the panel host use.
 import { builtinWindowBackground } from "@pi-desktop/shared/theme";
 
-const viewPlacement = process.argv.includes("--pi-plugin-view-placement=main") ? "main" : process.argv.includes(PLUGIN_PANEL_EMBEDDED_ARGUMENT) ? "workpanel" : "standalone";
-let viewLocation: string | null = new URL(window.location.href).searchParams.get("piViewOpen");
-let viewAppearance: "light" | "dark" = process.argv.includes("--pi-plugin-panel-theme=light") ? "light" : "dark";
-let viewActive = false;
-ipcRenderer.on("pi-plugin-panel-event:view:open", (_event, payload) => { if (typeof payload?.path === "string") viewLocation = payload.path; });
-ipcRenderer.on("pi-plugin-panel-event:view:context", (_event, payload) => {
-  viewActive = payload?.active === true;
-  if (viewPlacement === "main" && payload?.placement === "main") viewLocation = JSON.stringify({ placement: "main", itemId: payload.itemId, sectionId: payload.sectionId, location: payload.location });
-});
-ipcRenderer.on("pi-plugin-panel-event:appearance:changed", (_event, payload) => { if (payload?.base === "light" || payload?.base === "dark") viewAppearance = payload.base; });
-
 const bridge = {
-  /** Host-authored immutable placement; never inferred from viewport width. */
-  getViewContext: () => {
-    const placement = viewPlacement;
-    const raw = viewLocation;
-    let location: unknown = raw;
-    let itemId: string | undefined;
-    let sectionId: string | undefined;
-    if (placement === "main" && raw) {
-      try { const data = JSON.parse(raw); location = data.location; itemId = data.itemId; sectionId = data.sectionId; } catch { /* Opaque locations remain strings. */ }
-    }
-    return { placement, active: viewActive, location, itemId, sectionId, appearance: viewAppearance };
-  },
   invoke: async (channel: string, payload?: Record<string, unknown>) => {
     return ipcRenderer.invoke("pi-plugin-panel-invoke", channel, payload ?? {});
   },
@@ -151,6 +128,23 @@ function pluginOwnsTitlebarSpacing(): boolean {
   // A floating widget publishes a titlebar height of 0 and draws edge to edge,
   // so the host must not add the legacy 46px offset either.
   return isWidgetPanel() || pluginChromeMode() !== "legacy";
+}
+
+/**
+ * A docked view is composited inside the host work panel rather than rendered
+ * as a standalone window. Remove the document's default canvas edge so the
+ * host panel and plugin theme own the surface without an unconfigurable frame.
+ */
+function resetEmbeddedSurfaceChrome(): void {
+  const root = document.documentElement;
+  const body = document.body;
+  if (!root || !body) return;
+  for (const element of [root, body]) {
+    element.style.setProperty("box-sizing", "border-box");
+    element.style.setProperty("margin", "0");
+    element.style.setProperty("border", "0");
+    element.style.setProperty("background", "transparent");
+  }
 }
 
 /**
@@ -610,6 +604,7 @@ function installPanelChrome(): void {
   // toolbar offset resolves to the right value in both placements.
   if (isEmbeddedPanel()) {
     document.documentElement.style.setProperty("--pi-plugin-titlebar-height", "0px");
+    resetEmbeddedSurfaceChrome();
     return;
   }
 

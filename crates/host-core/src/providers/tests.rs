@@ -10,113 +10,6 @@ fn test_context() -> (tempfile::TempDir, Database, SecretStore) {
 }
 
 #[test]
-fn relay_thinking_protocol_roundtrips_preserves_absent_and_clears_null() {
-    let (_dir, db, secrets) = test_context();
-    let input: ProviderCreateInput = serde_json::from_value(json!({
-        "name": "Relay", "authKind": "none", "apiStyle": "chat_completions",
-        "supportsReasoning": false, "thinkingRequestProtocol": "deepseek"
-    }))
-    .unwrap();
-    let provider = create_provider(&db, &secrets, input).unwrap();
-    assert_eq!(
-        provider.thinking_request_protocol.as_deref(),
-        Some("deepseek")
-    );
-    assert_eq!(provider.supports_reasoning, Some(false));
-    let update: ProviderUpdateInput =
-        serde_json::from_value(json!({ "id": provider.id, "name": "Relay renamed" })).unwrap();
-    assert_eq!(update.thinking_request_protocol, None);
-    let updated = update_provider(&db, &secrets, update).unwrap().unwrap();
-    assert_eq!(
-        updated.thinking_request_protocol.as_deref(),
-        Some("deepseek")
-    );
-    let reloaded = get_provider(&db, &secrets, &provider.id).unwrap().unwrap();
-    assert_eq!(
-        reloaded.thinking_request_protocol.as_deref(),
-        Some("deepseek")
-    );
-    let update: ProviderUpdateInput =
-        serde_json::from_value(json!({ "id": provider.id, "thinkingRequestProtocol": null }))
-            .unwrap();
-    assert_eq!(update.thinking_request_protocol, Some(None));
-    let cleared = update_provider(&db, &secrets, update).unwrap().unwrap();
-    assert_eq!(cleared.thinking_request_protocol, None);
-    assert_eq!(cleared.supports_reasoning, Some(false));
-    let raw: String = db
-        .conn()
-        .query_row(
-            "SELECT config_json FROM providers WHERE id = ?1",
-            params![provider.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(config_value(&raw).unwrap()["compatibility"]
-        .get("thinkingRequestProtocol")
-        .is_none());
-}
-
-#[test]
-fn relay_thinking_protocol_rejects_invalid_dialects_and_api_changes_before_writing() {
-    let (_dir, db, secrets) = test_context();
-    for payload in [
-        json!({ "name": "Bad dialect", "thinkingRequestProtocol": "arbitrary" }),
-        json!({ "name": "Bad API", "thinkingRequestProtocol": "deepseek", "apiStyle": "responses" }),
-    ] {
-        let input = serde_json::from_value(payload).unwrap();
-        assert!(create_provider(&db, &secrets, input)
-            .unwrap_err()
-            .to_string()
-            .contains("PROVIDER_INVALID"));
-    }
-    assert!(list_providers(&db, &secrets, true).unwrap().is_empty());
-    let input =
-        serde_json::from_value(json!({ "name": "Relay", "thinkingRequestProtocol": "deepseek" }))
-            .unwrap();
-    let provider = create_provider(&db, &secrets, input).unwrap();
-    let update =
-        serde_json::from_value(json!({ "id": provider.id, "apiStyle": "anthropic_messages" }))
-            .unwrap();
-    assert!(update_provider(&db, &secrets, update)
-        .unwrap_err()
-        .to_string()
-        .contains("requires Chat Completions"));
-    assert_eq!(
-        get_provider(&db, &secrets, &provider.id)
-            .unwrap()
-            .unwrap()
-            .api_style,
-        None
-    );
-    let update = serde_json::from_value(
-        json!({ "id": provider.id, "apiStyle": "responses", "thinkingRequestProtocol": null }),
-    )
-    .unwrap();
-    assert_eq!(
-        update_provider(&db, &secrets, update)
-            .unwrap()
-            .unwrap()
-            .thinking_request_protocol,
-        None
-    );
-}
-
-#[test]
-fn relay_thinking_protocol_config_merge_preserves_unrelated_fields() {
-    let raw = json!({ "compatibility": { "supportsReasoning": false, "customFlag": true }, "custom": { "nested": 42 } }).to_string();
-    let set = config_with_thinking_request_protocol(&raw, Some("deepseek")).unwrap();
-    assert_eq!(
-        config_thinking_request_protocol(&set).as_deref(),
-        Some("deepseek")
-    );
-    let cleared =
-        config_value(&config_with_thinking_request_protocol(&set, None).unwrap()).unwrap();
-    assert_eq!(cleared["custom"]["nested"], 42);
-    assert_eq!(cleared["compatibility"]["customFlag"], true);
-    assert_eq!(cleared["compatibility"]["supportsReasoning"], false);
-}
-
-#[test]
 fn reasoning_override_roundtrips_and_preserves_provider_config() {
     let (_dir, db, secrets) = test_context();
     let provider = create_provider(
@@ -139,7 +32,6 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(true),
-            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec!["off".into(), "high".into()]),
         },
     )
@@ -188,7 +80,6 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(false),
-            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec!["off".into(), "low".into()]),
             enabled: None,
         },
@@ -241,7 +132,6 @@ fn reasoning_override_roundtrips_and_preserves_provider_config() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -309,7 +199,6 @@ fn model_bindings_roundtrip_and_legacy_model_migrates_on_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -372,7 +261,6 @@ fn model_bindings_roundtrip_and_legacy_model_migrates_on_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -490,7 +378,6 @@ fn alias_survives_provider_create_and_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -518,7 +405,6 @@ fn alias_survives_provider_create_and_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -587,7 +473,6 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -617,7 +502,6 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -646,7 +530,6 @@ fn over_long_alias_leaves_stored_secrets_untouched() {
             oauth_account_label: None,
             headers: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             context_window: None,
             max_output_tokens: None,
@@ -688,7 +571,6 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -716,7 +598,6 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -742,7 +623,6 @@ fn over_long_alias_is_rejected_by_the_write_paths() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -775,7 +655,6 @@ fn limit_overrides_roundtrip_and_clear_with_zero() {
             max_output_tokens: Some(32_000),
             temperature: Some(0.7),
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -806,7 +685,6 @@ fn limit_overrides_roundtrip_and_clear_with_zero() {
             max_output_tokens: None,
             temperature: Some(0.0),
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -841,7 +719,6 @@ fn provider_without_override_omits_reasoning_capability() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -876,7 +753,6 @@ fn thinking_levels_override_normalizes_and_can_clear() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: Some(true),
-            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec![
                 "high".into(),
                 "off".into(),
@@ -913,7 +789,6 @@ fn thinking_levels_override_normalizes_and_can_clear() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: Some(vec![]),
             enabled: None,
         },
@@ -959,7 +834,6 @@ fn discovered_models_are_cached_without_overwriting_user_rows() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1016,7 +890,9 @@ fn discovered_models_are_cached_without_overwriting_user_rows() {
     .unwrap();
 
     let models = list_models(&db, Some(&provider.id)).unwrap();
-    assert_eq!(models.len(), 3);
+    // The second answer names model-a and the user's row only, so the model it
+    // stopped publishing goes with the answer it belonged to.
+    assert_eq!(models.len(), 2);
     let alpha = models
         .iter()
         .find(|model| model.model_id == "model-a")
@@ -1024,7 +900,7 @@ fn discovered_models_are_cached_without_overwriting_user_rows() {
     assert_eq!(alpha.display_name, "Alpha updated");
     assert_eq!(alpha.capabilities, vec!["text", "reasoning"]);
     assert_eq!(alpha.context_window, Some(256_000));
-    assert!(models.iter().any(|model| model.model_id == "model-b"));
+    assert!(!models.iter().any(|model| model.model_id == "model-b"));
     let custom = models
         .iter()
         .find(|model| model.model_id == "user-model")
@@ -1032,6 +908,273 @@ fn discovered_models_are_cached_without_overwriting_user_rows() {
     assert_eq!(custom.display_name, "Custom label");
     assert_eq!(custom.source, "user");
     assert_eq!(custom.capabilities, vec!["tools"]);
+}
+
+/// A model the user deleted and saved is no longer part of the configuration,
+/// so the parameters recorded for it go with it: keeping the row handed the
+/// deleted model's context window back to the next add of the same id, and kept
+/// it in the picker's cache-first paint.
+#[test]
+fn deleting_a_binding_and_saving_forgets_its_cached_parameters() {
+    let (_dir, db, secrets) = test_context();
+    let provider = create_provider(
+        &db,
+        &secrets,
+        ProviderCreateInput {
+            name: "Catalog".into(),
+            vendor_key: None,
+            provider_type: None,
+            protocol: None,
+            base_url: Some("http://localhost:11434/v1".into()),
+            auth_kind: Some("none".into()),
+            models: Some(vec![
+                binding_with_limits("model-a", 128_000, 8_192),
+                binding_with_limits("model-b", 32_000, 4_096),
+            ]),
+            default_model_id: Some("model-a".into()),
+            secret_value: None,
+            api_style: Some("chat_completions".into()),
+            oauth_account_label: None,
+            headers: None,
+            context_window: None,
+            max_output_tokens: None,
+            temperature: None,
+            supports_reasoning: None,
+            supported_thinking_levels: None,
+        },
+    )
+    .unwrap();
+    cache_discovered_models(
+        &db,
+        &provider.id,
+        &[
+            DiscoveredModelInput {
+                model_id: "model-a".into(),
+                display_name: "Alpha".into(),
+                capabilities: vec!["text".into()],
+                context_window: Some(128_000),
+            },
+            // The service spells it differently from the binding that drops it.
+            DiscoveredModelInput {
+                model_id: "MODEL-B".into(),
+                display_name: "Beta".into(),
+                capabilities: vec!["text".into()],
+                context_window: Some(32_000),
+            },
+            DiscoveredModelInput {
+                model_id: "model-c".into(),
+                display_name: "Gamma".into(),
+                capabilities: vec!["text".into()],
+                context_window: Some(64_000),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(list_models(&db, Some(&provider.id)).unwrap().len(), 3);
+
+    update_provider(
+        &db,
+        &secrets,
+        ProviderUpdateInput {
+            id: provider.id.clone(),
+            name: None,
+            vendor_key: None,
+            provider_type: None,
+            protocol: None,
+            base_url: None,
+            auth_kind: None,
+            models: Some(vec![binding_with_limits("model-a", 128_000, 8_192)]),
+            default_model_id: None,
+            secret_value: None,
+            api_style: None,
+            oauth_account_label: None,
+            headers: None,
+            context_window: None,
+            max_output_tokens: None,
+            temperature: None,
+            supports_reasoning: None,
+            supported_thinking_levels: None,
+            enabled: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let cached = list_models(&db, Some(&provider.id)).unwrap();
+    assert_eq!(
+        cached
+            .iter()
+            .map(|model| model.model_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["model-a", "model-c"]
+    );
+}
+
+/// The cache is the service's answer, so an answer that no longer publishes a
+/// model drops that model's row — while a row the user owns survives it: a
+/// hand-typed id and a configured binding are the user's configuration, not the
+/// service's answer.
+#[test]
+fn a_probe_answer_forgets_models_it_no_longer_publishes() {
+    let (_dir, db, secrets) = test_context();
+    let provider = create_provider(
+        &db,
+        &secrets,
+        ProviderCreateInput {
+            name: "Catalog".into(),
+            vendor_key: None,
+            provider_type: None,
+            protocol: None,
+            base_url: Some("http://localhost:11434/v1".into()),
+            auth_kind: Some("none".into()),
+            models: Some(vec![binding_with_limits("custom-model", 8_000, 1_024)]),
+            default_model_id: Some("custom-model".into()),
+            secret_value: None,
+            api_style: Some("chat_completions".into()),
+            oauth_account_label: None,
+            headers: None,
+            context_window: None,
+            max_output_tokens: None,
+            temperature: None,
+            supports_reasoning: None,
+            supported_thinking_levels: None,
+        },
+    )
+    .unwrap();
+    // A hand-typed id the service never published, recorded as the user's own.
+    db.conn()
+        .execute(
+            "INSERT INTO models (
+                    provider_id, model_id, display_name, source,
+                    capabilities_json, updated_at
+                 ) VALUES (?1, 'pinned-model', 'Pinned', 'user', '[]', ?2)",
+            params![provider.id, now_ms()],
+        )
+        .unwrap();
+    let answer = |discovered: &[&str]| -> Vec<DiscoveredModelInput> {
+        discovered
+            .iter()
+            .map(|id| DiscoveredModelInput {
+                model_id: (*id).to_string(),
+                display_name: (*id).to_string(),
+                capabilities: vec!["text".into()],
+                context_window: Some(64_000),
+            })
+            .collect()
+    };
+
+    // This answer publishes the hand-typed id too, so its row is discovered.
+    cache_discovered_models(
+        &db,
+        &provider.id,
+        &answer(&["model-a", "model-b", "custom-model"]),
+    )
+    .unwrap();
+    assert_eq!(list_models(&db, Some(&provider.id)).unwrap().len(), 4);
+
+    // The endpoint stopped publishing model-b.
+    cache_discovered_models(&db, &provider.id, &answer(&["model-a"])).unwrap();
+
+    let mut cached: Vec<String> = list_models(&db, Some(&provider.id))
+        .unwrap()
+        .into_iter()
+        .map(|model| model.model_id)
+        .collect();
+    cached.sort();
+    assert_eq!(
+        cached,
+        vec!["custom-model", "model-a", "pinned-model"],
+        "the unpublished model goes with the answer; the user's rows stay"
+    );
+}
+
+/// The discovered answer belongs to the endpoint that produced it: saving a new
+/// address drops the previous one's answer, while the models the user configured
+/// stay exactly as saved.
+#[test]
+fn changing_the_endpoint_forgets_the_discovered_answer() {
+    let (_dir, db, secrets) = test_context();
+    let provider = create_provider(
+        &db,
+        &secrets,
+        ProviderCreateInput {
+            name: "Relay".into(),
+            vendor_key: None,
+            provider_type: None,
+            protocol: None,
+            base_url: Some("http://localhost:11434/v1".into()),
+            auth_kind: Some("none".into()),
+            models: Some(vec![binding_with_limits("model-a", 128_000, 8_192)]),
+            default_model_id: Some("model-a".into()),
+            secret_value: None,
+            api_style: Some("chat_completions".into()),
+            oauth_account_label: None,
+            headers: None,
+            context_window: None,
+            max_output_tokens: None,
+            temperature: None,
+            supports_reasoning: None,
+            supported_thinking_levels: None,
+        },
+    )
+    .unwrap();
+    cache_discovered_models(
+        &db,
+        &provider.id,
+        &[
+            DiscoveredModelInput {
+                model_id: "model-a".into(),
+                display_name: "Alpha".into(),
+                capabilities: vec!["text".into()],
+                context_window: Some(128_000),
+            },
+            DiscoveredModelInput {
+                model_id: "model-b".into(),
+                display_name: "Beta".into(),
+                capabilities: vec!["text".into()],
+                context_window: Some(32_000),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(list_models(&db, Some(&provider.id)).unwrap().len(), 2);
+
+    // A URL-only edit: the model list is untouched, so only the endpoint rule can
+    // be what drops the old answer.
+    update_provider(
+        &db,
+        &secrets,
+        ProviderUpdateInput {
+            id: provider.id.clone(),
+            name: None,
+            vendor_key: None,
+            provider_type: None,
+            protocol: None,
+            base_url: Some("http://localhost:9000/v1".into()),
+            auth_kind: None,
+            models: None,
+            default_model_id: None,
+            secret_value: None,
+            api_style: None,
+            oauth_account_label: None,
+            headers: None,
+            context_window: None,
+            max_output_tokens: None,
+            temperature: None,
+            supports_reasoning: None,
+            supported_thinking_levels: None,
+            enabled: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let cached: Vec<String> = list_models(&db, Some(&provider.id))
+        .unwrap()
+        .into_iter()
+        .map(|model| model.model_id)
+        .collect();
+    assert_eq!(cached, vec!["model-a"]);
 }
 
 #[test]
@@ -1057,7 +1200,6 @@ fn an_oauth_credential_alone_makes_the_provider_ready() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1101,7 +1243,6 @@ fn an_oauth_credential_alone_makes_the_provider_ready() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
             enabled: None,
         },
@@ -1159,7 +1300,6 @@ fn a_provider_can_hold_both_an_api_key_and_a_vendor_account() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1205,7 +1345,6 @@ fn blank_update(id: String) -> ProviderUpdateInput {
         max_output_tokens: None,
         temperature: None,
         supports_reasoning: None,
-        thinking_request_protocol: None,
         supported_thinking_levels: None,
         enabled: None,
     }
@@ -1237,7 +1376,6 @@ fn headers_roundtrip_migrate_user_agent_clear_and_reject() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1378,7 +1516,6 @@ fn a_stored_array_survives_an_entry_that_lost_a_field() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1461,7 +1598,6 @@ fn degraded_model_array_cannot_be_overwritten_by_update() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1549,7 +1685,6 @@ fn header_values_fold_fullwidth_and_reject_non_latin1() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1583,7 +1718,6 @@ fn header_values_fold_fullwidth_and_reject_non_latin1() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )
@@ -1683,7 +1817,6 @@ fn provider_api_keys_fold_fullwidth_on_write_and_read() {
             max_output_tokens: None,
             temperature: None,
             supports_reasoning: None,
-            thinking_request_protocol: None,
             supported_thinking_levels: None,
         },
     )

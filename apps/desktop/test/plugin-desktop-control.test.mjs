@@ -137,48 +137,6 @@ test("desktop control is permission-gated and uses the shared controller", async
   assert.deepEqual(calls, [{ operation: "project/set", args: ["/tmp/project"], confirm: false, source: "plugin", pluginContext: { pluginId: "demo.desktop" } }]);
 });
 
-test("quit wins over a late native consent without invoking a new operation", async (t) => {
-  const calls = [];
-  const runtime = createRuntime(t, calls, { confirmDesktopControl: async () => {
-    runtime.quiesceForShutdown();
-    return true;
-  } });
-  const dir = writePlugin("demo.quit.consent", ["desktop.control"], DANGEROUS_PLUGIN);
-  await runtime.loadFromPath(dir, ["desktop.control"]);
-  const result = await runtime.invokePanelBridge("demo.quit.consent", "desktop.test", {});
-  assert.equal(result.ok, false);
-  assert.equal(result.code, "PLUGIN_UNLOADED");
-  assert.deepEqual(calls, []);
-});
-
-test("quit blocks late execution but permits exact abort and lookup during unload", async (t) => {
-  const calls = [];
-  const runtime = createRuntime(t, calls, { desktopControl: {
-    operations: [
-      { id: "agent/prompt", description: "Start", risk: "write" },
-      { id: "agent/abort", description: "Abort", risk: "write" },
-      { id: "agent/promptLookup", description: "Lookup", risk: "read" },
-      { id: "verification/cancelExecution", description: "Cancel exact check", risk: "write" },
-    ],
-    invoke: async input => { calls.push(input); return { ok: true }; },
-  } });
-  const dir = writePlugin("demo.quit.cleanup", ["desktop.control"], `
-    module.exports = { onUnload: async () => {
-      try { await pi.desktop.invoke({operation:"agent/prompt",args:[]}); }
-      catch (error) { await pi.ui.showToast(error.code); }
-      await pi.desktop.invoke({operation:"agent/abort",args:[{sessionId:"s",turnId:"t"}]});
-      await pi.desktop.invoke({operation:"agent/promptLookup",args:[{key:"original"}]});
-      await pi.desktop.invoke({operation:"verification/cancelExecution",args:[{executionId:"owned-execution"}]});
-    } };
-  `);
-  await runtime.loadFromPath(dir, ["desktop.control"]);
-  runtime.quiesceForShutdown();
-  await runtime.disposeAll();
-  assert.deepEqual(runtime.drainToasts(), ["PLUGIN_UNLOADED"]);
-  assert.deepEqual(calls.map(call => call.operation), ["agent/abort", "agent/promptLookup", "verification/cancelExecution"]);
-  assert.deepEqual(calls[0].args, [{ sessionId: "s", turnId: "t" }]);
-});
-
 test("permission inheritance is bound to the current plugin tool session", async (t) => {
   const calls = [];
   const runtime = createRuntime(t, calls);

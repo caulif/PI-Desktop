@@ -11,10 +11,9 @@ import {
   type NativeMenuAction,
 } from "@pi-desktop/shared";
 import { installApplicationMenu } from "../application-menu";
-import {
-  installPluginAssetProtocol,
-  registerPluginAssetScheme,
-} from "../plugin-asset-protocol";
+import { installPluginAssetProtocol } from "../plugin-asset-protocol";
+import { installPluginRendererProtocol } from "../plugin-renderer-protocol";
+import { registerPluginSchemes } from "../plugin-schemes";
 import { applyNetworkProxyFromAppSettings } from "../network-proxy";
 import { readCloseBehavior } from "../window-preferences";
 import { createAgentHostBridge, type AgentHostBridge } from "../agent-host-bridge";
@@ -110,9 +109,6 @@ export type StartupDependencies = {
   flushPendingApplicationMenuCommands: () => void;
   getSidecar?: () => unknown;
   invokeSessionCollaboration?: (input: McpControlInvokeInput) => Promise<unknown>;
-  invokePluginSchedule?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
-  invokePluginPrompt?: (input: McpControlInvokeInput, invoke: IpcInvoker) => Promise<unknown>;
-  invokePluginVerification?: (input: McpControlInvokeInput) => Promise<unknown>;
   onSessionQueueChange?: () => void;
 };
 
@@ -124,7 +120,7 @@ export type StartupDependencies = {
 export function registerApplicationStartup(deps: StartupDependencies): void {
   // Electron only accepts scheme privileges before the app is ready, and this
   // runs from the composition root, before the `whenReady` promise can settle.
-  registerPluginAssetScheme();
+  registerPluginSchemes();
   // Crashpad ships with Electron, so the reporter needs no native dependency.
   // Dumps stay local (`uploadToServer: false`) under the installation data
   // directory so a `PI_DESKTOP_DATA_DIR` profile does not share them. Started
@@ -193,6 +189,11 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
     // scheme itself was reserved in `registerApplicationStartup`.
     installPluginAssetProtocol((pluginId, assetPath) =>
       plugins.resolveThemeAsset(pluginId, assetPath),
+    );
+    // Serve renderer entry modules the same way — the current load of a
+    // plugin that declared `manifest.renderer` and holds `renderer.extension`.
+    installPluginRendererProtocol((pluginId, generation, requestPath) =>
+      plugins.resolveRendererSource(pluginId, generation, requestPath),
     );
     // Load the close-behavior preference before the first window exists: the
     // close handler reads `closeBehavior` synchronously, and a window created
@@ -268,24 +269,7 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
       invoke: invokeIpc,
       channels: IPC.invoke,
       invokeSessionCollaboration: deps.invokeSessionCollaboration,
-      invokePluginVerification: deps.invokePluginVerification,
-      invokePluginSchedule: deps.invokePluginSchedule
-        ? (input) => deps.invokePluginSchedule!(input, invokeIpc)
-        : undefined,
-      invokePluginPrompt: deps.invokePluginPrompt
-        ? (input) => deps.invokePluginPrompt!(input, invokeIpc)
-        : undefined,
-      onOperationComplete: async (operation, result, args, source, input) => {
-        if (operation.id === "session/create" && source === "plugin" && input?.pluginContext?.pluginId) {
-          const sessionId = (result as { session?: { id?: string } })?.session?.id;
-          if (sessionId) {
-            const host = getHost();
-            if (!host) throw new Error("host unavailable while recording plugin session owner");
-            await host.call("scheduled.pluginRegisterCreatedSession", {
-              pluginId: input.pluginContext.pluginId, sessionId,
-            });
-          }
-        }
+      onOperationComplete: async (operation, result, args, source) => {
         const event = mcpControlRendererEvent(operation, result, args, source);
         if (event) sendToRenderer(IPC.event.sessionsChanged, event);
       },
@@ -311,7 +295,6 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
     const scheduledRunner = createScheduledRunner({
       getHost,
       execute: (id) => invokeIpc(IPC.invoke.scheduledExecute, [id, true]),
-      deliverPluginDue: (occurrence) => { plugins.deliverPluginScheduleDue(occurrence.pluginId, occurrence); },
       report: (error) => logger.app("runtime", "warn", "scheduled task dispatch failed", { data: String(error) }),
     });
     scheduledRunner.start();

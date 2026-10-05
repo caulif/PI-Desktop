@@ -125,7 +125,6 @@ export type PluginPermissionReview = {
  * is a token from the SDK's closed list, not plugin markup.
  */
 export type PluginViewMeta = {
-  placement?: "workpanel" | "main";
   pluginId: string;
   /** Plugin-local view id from `contributes.views[].id`. */
   viewId: string;
@@ -137,18 +136,6 @@ export type PluginViewMeta = {
   pluginName: string;
   icon?: string;
   order: number;
-};
-
-export type PluginSidebarSectionMeta = {
-  pluginId: string;
-  sectionId: string;
-  title: string;
-  icon?: string;
-  order: number;
-  viewId: string;
-  items: Array<{ id: string; title: string; description?: string; badge?: string; location?: unknown }>;
-  /** Provider errors remain visible instead of masquerading as an empty roster. */
-  error?: string;
 };
 
 /** A data-only scenic Settings destination rendered by the host React tree. */
@@ -212,7 +199,36 @@ export type PluginCapability =
   | "services"
   | "bus"
   /** `contributes.agentExtensions`: ExtensionAPI modules in the agent process. */
-  | "agentExtension";
+  | "agentExtension"
+  /** `manifest.renderer`: the plugin ships a renderer slot entry (`docs/plugin-plan/ui/`). */
+  | "rendererUi";
+
+/**
+ * A loaded plugin's renderer extension as the renderer host sees it
+ * (`docs/plugin-plan/ui/`). The main process builds it from the live load, so
+ * it never outlives the plugin: unload, crash, or a revoked permission drops
+ * it from the next plugin list.
+ */
+export type PluginRendererDescriptor = {
+  /** Renderer module path relative to the plugin root. */
+  entry: string;
+  /**
+   * Load generation. Every load of the plugin gets a new one, and module URLs
+   * carry it (`plugin-renderer://<id>/g<generation>/<entry>`), so a reload
+   * evaluates fresh modules instead of the ES module cache's stale copy and a
+   * stale generation is refused outright.
+   */
+  generation: number;
+  /** `manifest.rendererActions`: the outbound actions dispatch accepts. */
+  actions: string[];
+  /** `manifest.rendererCallMethods`: the `plugin.call` method whitelist. */
+  callMethods: string[];
+  /**
+   * Bare `contributes.agentTools[].name`s. A `toolCard` registration must
+   * name one of these; the card then serves only that tool's calls.
+   */
+  tools: string[];
+};
 
 export type PluginSettingType =
   | "string"
@@ -261,6 +277,8 @@ export type PluginTheme = {
    * and holds `ui.window.appearance` (ADR 0248).
    */
   windowBackground?: { light?: string; dark?: string };
+  /** Validated `contributes.windowAppearance.cornerRadius`, in DIP. */
+  windowCornerRadius?: number;
 };
 
 export type PluginServiceState = "starting" | "running" | "stopped" | "failed";
@@ -298,6 +316,12 @@ export type PluginSummary = {
   path?: string;
   /** Derived from the manifest by the host: which contribution kinds exist. */
   capabilities?: PluginCapability[];
+  /**
+   * Present only while the plugin is loaded, holds `renderer.extension`, and
+   * declares `manifest.renderer`: everything the renderer host needs to load
+   * the plugin's slot module and gate what it registers and dispatches.
+   */
+  renderer?: PluginRendererDescriptor;
   description?: string;
   author?: string;
   installedAt?: string;

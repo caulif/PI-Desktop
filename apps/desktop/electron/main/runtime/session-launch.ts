@@ -6,7 +6,6 @@ import {
   imageGenerationBindings,
   isImageGenerationModel,
   normalizeMode,
-  resolveBindingLimits,
   trustedExtensionAgentKeyFromProviderId,
   type CommandShellCatalog,
   type McpServerRecord,
@@ -19,7 +18,7 @@ import {
 } from "@pi-desktop/shared";
 import {
   capabilitiesFromModelConfig,
-  clampProviderThinkingLevel,
+  clampThinkingLevel,
   loadCustomSystemPrompt,
   loadInstructionChain,
   loadSubagentDefinitions,
@@ -69,7 +68,7 @@ export type SessionLaunchRuntimeDependencies = {
     modelId: string,
   ) => ModelBinding | undefined;
   effectiveSubagentModelConfig: (
-    provider: Pick<RuntimeProvider, "models">,
+    provider: RuntimeProvider,
     modelId: string,
     catalogModelConfig: Parameters<typeof modelConfigWithBinding>[0],
   ) => {
@@ -270,6 +269,7 @@ export function createSessionLaunchRuntime({
       "providers.list",
       { includeDisabled: false },
     );
+    for (const row of providers.providers) modelsDevCatalog.configureAccount(row);
     const requestedProviderId = overrides.providerId ?? session.providerId;
     const extensionAgentKey = requestedProviderId
       ? trustedExtensionAgentKeyFromProviderId(requestedProviderId)
@@ -282,7 +282,9 @@ export function createSessionLaunchRuntime({
           authKind: "none",
           extensionAgentKey,
         }
-      : providers.providers.find((item) => item.id === requestedProviderId) ||
+      : requestedProviderId
+        ? providers.providers.find((item) => item.id === requestedProviderId && item.enabled !== false)!
+        :
         providers.providers.find((item) => item.id === settings.defaultProviderId) ||
         providers.providers.find(
           (item) => item.hasSecret || item.hasOauth || item.authKind === "none",
@@ -293,6 +295,7 @@ export function createSessionLaunchRuntime({
         errorCode: ErrorCodes.MODEL_NOT_CONFIGURED,
       });
     }
+    modelsDevCatalog.configureAccount(provider);
     // Plugin-owned agents resolve credentials and transport inside the trusted
     // extension; the host never reads or injects a secret for them.
     const isExtensionAgent = Boolean(extensionAgentKey);
@@ -350,19 +353,16 @@ export function createSessionLaunchRuntime({
     const baseUrl = vendorBinding?.baseUrl ?? provider.baseUrl;
     const catalogModelConfig = vendorBinding?.modelConfig ??
       catalogModelConfigFor(modelsDevCatalog, {
+        providerId: provider.id,
         vendorKey: provider.vendorKey,
         baseUrl,
         apiStyle,
         modelId,
       });
-    const resolvedLimits = resolveBindingLimits(catalogModelConfig, storedModel);
-    const modelConfig = modelConfigWithBinding(
-      resolvedLimits.catalogConfig,
-      resolvedLimits.binding,
-    );
+    const modelConfig = catalogModelConfig;
     const thinkingCapabilities = capabilitiesFromModelConfig(modelConfig);
-    const thinkingLevel = clampProviderThinkingLevel(
-      { ...thinkingCapabilities, thinkingRequestProtocol: provider.thinkingRequestProtocol },
+    const thinkingLevel = clampThinkingLevel(
+      thinkingCapabilities,
       normalizeThinkingLevel(
         overrides.thinkingLevel ??
           (provider.id === requestedProviderId ? session.thinkingLevel : undefined) ??
@@ -482,6 +482,7 @@ export function createSessionLaunchRuntime({
         vendorOAuth.bindingFor(pinned.id, pinnedModelId),
       resolveModel: async (pinned, pinnedModelId) => {
         const catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
+          providerId: pinned.id,
           vendorKey: pinned.vendorKey,
           baseUrl: pinned.baseUrl,
           apiStyle: pinned.apiStyle,
@@ -543,13 +544,15 @@ export function createSessionLaunchRuntime({
           if (!vb) continue;
           catalogModelConfig =
             vb.modelConfig ?? catalogModelConfigFor(modelsDevCatalog, {
-              vendorKey: row.vendorKey,
+              providerId: row.id,
+            vendorKey: row.vendorKey,
               baseUrl: vb.baseUrl ?? row.baseUrl,
               apiStyle: vb.apiStyle ?? row.apiStyle,
               modelId: binding.id,
             });
         } else {
           catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
+            providerId: row.id,
             vendorKey: row.vendorKey,
             baseUrl: row.baseUrl,
             apiStyle: row.apiStyle,
@@ -572,7 +575,6 @@ export function createSessionLaunchRuntime({
           apiKey,
           ...(row.authKind ? { authKind: row.authKind } : {}),
           ...(row.apiStyle ? { apiStyle: row.apiStyle } : {}),
-          ...(row.thinkingRequestProtocol ? { thinkingRequestProtocol: row.thinkingRequestProtocol } : {}),
           ...optionalProviderHeaders(row.headers),
           supportsReasoning: caps.supportsReasoning,
           supportedThinkingLevels: [...caps.supportedThinkingLevels],
@@ -615,7 +617,6 @@ export function createSessionLaunchRuntime({
       projectPath,
       sidecarParams: {
         sessionId,
-        toolPolicy: session.toolPolicy ?? "unrestricted",
         mode: normalizeMode(
           overrides.mode ?? session.mode ?? settings.defaultMode ?? "agent",
         ),
@@ -639,7 +640,6 @@ export function createSessionLaunchRuntime({
           authKind: provider.authKind,
           extensionAgentKey: provider.extensionAgentKey,
           apiStyle,
-          ...(provider.thinkingRequestProtocol ? { thinkingRequestProtocol: provider.thinkingRequestProtocol } : {}),
           ...optionalProviderHeaders(provider.headers),
           supportsReasoning: thinkingCapabilities.supportsReasoning,
           supportsVision: visionFromModelConfig(modelConfig),
@@ -665,6 +665,7 @@ export function createSessionLaunchRuntime({
             })),
           ...userMcpTools.map((tool) => ({
             name: tool.fullName,
+            mcpServerId: tool.serverId,
             description: tool.description,
             parameters: tool.schema ?? { type: "object", properties: {} },
           })),

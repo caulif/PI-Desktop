@@ -242,8 +242,9 @@ try {
   await key("ArrowDown", 40);
   await key("Enter", 13);
   await waitFor(() => evaluate(`!!document.querySelector('.composer-menu-root')`), 5000, "task model selection returns to root");
-  await evaluate(`[...document.querySelectorAll('.composer-menu-entry')].find(e => e.textContent.includes('Reasoning')).click()`);
-  await click("high", '.composer-thinking-list [role="menuitemradio"]');
+  // The reasoning level is an inline slider on the measured root menu (issue
+  // #417); there is no separate reasoning view left to open.
+  await click("high", ".composer-thinking-tick");
   await key("Escape", 27);
   const unchangedDefaults = await invoke("settingsGet");
   assert.equal(unchangedDefaults.defaultProviderId, provider.id, "task selection cannot change the conversation default provider");
@@ -317,7 +318,7 @@ try {
   await click("Edit task");
   assert.equal(await evaluate(`document.querySelector('button[aria-label="Select project"]').textContent.trim()`), "project-alt");
   assert.equal(await evaluate(`document.querySelector('button[aria-label="Permission mode"]').textContent.trim()`), "Auto");
-  assert.equal(await evaluate(`document.querySelector('.scheduled-execution-toolbar .composer-model-thinking-model').textContent.trim()`), "Scheduled alternate model · fixture-alt");
+  assert.equal(await evaluate(`document.querySelector('.scheduled-execution-toolbar .composer-model-thinking-model').textContent.trim()`), "fixture-alt");
   assert.equal(await evaluate(`document.querySelector('.scheduled-execution-toolbar .composer-model-thinking-level').textContent.trim()`), "high");
   await click(await evaluate(`document.querySelector('.scheduled-execution-toolbar .composer-model-thinking-chip').getAttribute('aria-label')`), 'button[aria-haspopup]', true);
   await waitFor(() => evaluate(`!!document.querySelector('.composer-model-menu.is-open')`), 5000, "composer model menu");

@@ -139,6 +139,20 @@ assumption holds across concurrent turns. Each OAuth provider row gets its own
 collection and store scope; two rows with the same vendor key never share a
 credential or refresh lock.
 
+Pi login receives an installation context whose `getDeviceId` returns one stable
+UUID v4. Electron main creates it lazily, shares concurrent initialization, and
+persists it through Host secrets under `secret:installation:oauth-device-id`
+before exposing it to the flow. It is independent of provider accounts and
+survives cancellation, account deletion, and service restart. Initialization
+failures remain retryable and use a redacted error. The identity never enters
+provider rows, portable configuration, renderer events, or ordinary diagnostics.
+
+Anthropic login uses pi-ai's browser or copy-code choice through the existing
+Main-to-renderer `select` prompt bridge. Copy-code login returns through the
+generic manual-code prompt with the flow's PKCE state; both paths persist the
+credential through the same provider-scoped Host secret store. The choice does
+not expose refresh tokens or change the account/auth ownership boundary.
+
 Request auth flows one way only:
 
 1. The launch payload for an `authKind: "oauth"` row carries `apiKey: ""`.

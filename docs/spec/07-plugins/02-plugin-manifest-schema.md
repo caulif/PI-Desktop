@@ -1,29 +1,5 @@
 # 02. Plugin Manifest Schema
 
-## Peer navigation and view placement (ADR 0310)
-
-`contributes.views[].placement` is optional: `workpanel` preserves the current
-default; `main` declares a main-content isolated view and excludes it from the
-work-panel launcher. A plugin wanting both placements declares two view IDs with
-the same HTML entry. `ui.view` continues to govern both; no new global permission
-is implied.
-
-`contributes.sidebarSections` contains at most eight `{id,title,icon?,order?,viewId,
-itemsChannel}` declarations. IDs follow the view-ID syntax, titles use the existing
-localized-string contract, and `viewId` must belong to a declared main view.
-`itemsChannel` is a plugin-owned channel matching `[a-zA-Z][a-zA-Z0-9:_-]{0,127}`;
-host API names containing dots are rejected. It is handled by `onPanelInvoke`.
-The handler receives `{sectionId}` and returns an array, or `{ok:true,data:array}`.
-Each pure item is `{id,title,description?,badge?,location?}`; identity is stable,
-text is rendered literally, and location is an opaque JSON-compatible subject.
-
-Each result has at most 100 items and 65,536 serialized characters. Item IDs,
-titles, descriptions and badges have limits 128/200/300/32 and disallow controls;
-duplicate IDs, invalid envelopes and malformed data fail closed. Providers have a
-two-second UI timeout and one in-flight call per section. Sections are ordered by
-order/plugin/section and rendered below Projects in a bounded scroll region.
-Listing and opening obey the current plugin activation scope, not item metadata.
-
 ## Appearance extensions
 
 `contributes.themes[].variables` declares typed custom properties that the same
@@ -173,7 +149,7 @@ type PluginContributes = {
  settings?: PluginSettingContrib[];
  themes?: PluginThemeContrib[];
  scenicThemes?: PluginScenicThemesContrib;
- windowAppearance?: PluginWindowAppearanceContrib; // native window background; needs `ui.window.appearance`
+ windowAppearance?: PluginWindowAppearanceContrib; // native window background and Windows corner radius; needs `ui.window.appearance`
  mcpServers?: PluginMcpServerContrib[];
   services?: PluginServiceContrib[];
   bus?: PluginBusContrib;
@@ -260,7 +236,13 @@ type PluginScenicThemesContrib = {
 
 type PluginWindowAppearanceContrib = {
  backgroundColor?: { light?: string; dark?: string }; // #rrggbb | #rrggbbaa
+ cornerRadius?: number; // integer 0..24 DIP, Windows main window only; default 4
 };
+
+`cornerRadius` belongs to the contributing plugin and applies while any of its
+declared themes is selected. It does not change macOS/Linux native corners.
+Removing the theme or its `ui.window.appearance` grant restores the Windows
+main-window default of 4 DIP. Invalid or fractional values reject the manifest.
 
 type PluginSkillContrib = {
  id?: string; // defaults to the file name without its extension
@@ -351,6 +333,7 @@ type PluginPermission =
  | "agent.prompt.inject"
  | "provider.register"
  | "net.fetch"
+ | "net.anyHost"
  | "shell.openExternal"
  | "mcp.server.local"
  | "mcp.server.remote"
@@ -434,6 +417,18 @@ covers the domain and its subdomains.
 [03-plugin-api.md](03-plugin-api.md) §3). The permission is implemented: a
 connect is confined to `manifest.net.domains`, and a host that is not declared
 is refused before the transport is asked to open anything.
+
+### 5.3.1 net.anyHost — the escape hatch
+
+`"net.anyHost"` lifts the allowlist for a plugin whose endpoints the user types
+in (a self-hosted server, a personal domain no manifest written ahead of time
+can name). With the grant, every egress path above admits any host over
+http(s)/ws(s) — except cloud metadata endpoints (`169.254.169.254` and peers),
+which the grant never reaches: their answers are instance credentials. A host
+declared in `net.domains` keeps today's behavior, so existing manifests are
+unaffected; a plugin without the grant sees no change either. The grant is
+an install-time permission like any other: the user sees it in the review
+dialog and nothing prompts at request time.
 
 ## 5.1 Bus topic grammar
 

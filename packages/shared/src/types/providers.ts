@@ -3,9 +3,6 @@ import type { ModelBinding, ThinkingLevel } from "./models.js";
 
 export const OAUTH_AUTH_KIND = "oauth";
 
-/** Explicit endpoint dialect; capability metadata does not select this override. */
-export type ProviderThinkingRequestProtocol = "deepseek";
-
 export type ProviderPublic = {
   id: string;
   name: string;
@@ -32,8 +29,6 @@ export type ProviderPublic = {
   /** @deprecated Use `models[0]?.id`; retained for older runtime consumers. */
   defaultModelId?: string;
   apiStyle?: string;
-  /** Opt-in DeepSeek off/omit request serialization for Chat Completions relays. */
-  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
   /** Effective capability for the provider's current default model. */
   supportsReasoning: boolean;
   /** Effective image-input capability for the provider's current default model. */
@@ -68,8 +63,6 @@ export type ProviderCreateInput = {
   defaultModelId?: string;
   secretValue?: string;
   apiStyle?: string;
-  /** Absent keeps the adapter defaults; this does not enable reasoning capability. */
-  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
   /**
    * Non-secret label for the signed-in vendor account. Account removal deletes
    * the owning provider row instead of clearing only this label.
@@ -96,11 +89,9 @@ export type ProviderCreateInput = {
   temperature?: number;
 };
 
-export type ProviderUpdateInput = Partial<Omit<ProviderCreateInput, "thinkingRequestProtocol">> & {
+export type ProviderUpdateInput = Partial<ProviderCreateInput> & {
   id: string;
   enabled?: boolean;
-  /** Omit to preserve the stored override; null clears it. */
-  thinkingRequestProtocol?: ProviderThinkingRequestProtocol | null;
 };
 
 /** One locally configured account for a vendor OAuth provider. */

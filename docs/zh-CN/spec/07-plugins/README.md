@@ -23,7 +23,6 @@
 | [10-plugin-devex.md](/zh-CN/spec/07-plugins/10-plugin-devex) | 开发者经验 |
 | [11-plugin-storage-isolation.md](/zh-CN/spec/07-plugins/11-plugin-storage-isolation) | 存储隔离 |
 | [12-plugin-ipc-and-host-services.md](/zh-CN/spec/07-plugins/12-plugin-ipc-and-host-services) | 主机服务和 IPC |
-| [13-approved-project-verification.md](/zh-CN/spec/07-plugins/13-approved-project-verification) | 原生批准的项目核验 |
 | [13-plugin-permissions-matrix.md](/zh-CN/spec/07-plugins/13-plugin-permissions-matrix) | 权限矩阵 |
 | [14-plugin-roadmap.md](/zh-CN/spec/07-plugins/14-plugin-roadmap) | 插件路线图 |
 | [15-plugin-center.md](/zh-CN/spec/07-plugins/15-plugin-center) | 插件中心（发布侧） |

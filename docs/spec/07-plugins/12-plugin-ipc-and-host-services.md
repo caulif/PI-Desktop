@@ -1,51 +1,5 @@
 # 12. Plugin IPC and Host Services
 
-## Isolated controlled due diagnostic (ADR 0315)
-
-`scheduled.devPluginDueAt` is a native-only development RPC, absent from Plugin
-SDK/MCP services. It requires both `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` and
-`PI_DESKTOP_DEV_SCHEDULE_DUE_DIR` to match the same canonical dedicated Temp
-profile before SQLite opens and again on every call. It accepts exact plugin,
-external key, definition revision, timezone, RFC3339 `now`, and a one-time
-`seedAfter`. Unknown fields, stale identity, backward time, multiple bindings,
-disabled/unapproved bindings, and repeated seed are refused.
-
-Seed is permitted only without occurrence history and at most seven days before
-`now`; nextRunAt uses the production calendar. A transaction atomically covers
-the clock cursor, seed, production due writes and final readback. Production
-occurrence savepoints remain atomic with or without that outer transaction.
-No authorization is created, OS clock changed, or model started; prompt admission
-and plugin policy still use their existing clocks.
-
-The runner journals mutations and records unknown results for lookup only.
-Stored authorization alone does not prove native consent; missing hash-bound
-native observation leaves acceptance incomplete. Controlled due persistence,
-real wall-clock firing, and plugin Run/Attempt acceptance are separate evidence.
-
-## Isolated native calendar diagnostic (ADR 0312)
-
-`scheduled.devCalendarPreview` is a native Host development RPC, never a Plugin
-SDK service, plugin bridge handler, or MCP tool. Its `pluginId` is supplied by
-the native diagnostic runner; it must not be forwarded from plugin arguments.
-It accepts `externalKey`, `expectedDefinitionRevision`, explicit RFC3339 `after`,
-and `count` (1-16). Unknown fields and stale/missing owned bindings are rejected.
-It projects the stored cadence, schedule and IANA timezone with the production
-calendar algorithm and returns identity/revision, stored `enabled`, normalized
-millisecond UTC `after`, and `points[{scheduledFor,localTime}]` with UTC and local
-offset timestamps. It does not return authorization or execution capabilities.
-
-The explicit `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` must equal the canonical actual
-profile directory, which must already exist as a direct child of the OS temporary
-directory named `pi-bot-calendar-preview-*`. The Host checks this before opening
-SQLite when opt-in is present, and checks the actual main database file again on
-each diagnostic RPC. Default/production profiles, mismatched paths, nested
-profiles and database redirects are refused. No opt-in means the RPC is denied.
-Normal launches without opt-in preserve their existing startup behavior.
-
-Preview permits disabled bindings without consent and performs no writes,
-rescheduling, occurrence creation, timer delivery or prompt admission. Native
-calendar projection is distinct from actual Routine execution acceptance.
-
 ## 1. Goals
 
 Complete the plugin-related host services and UI IPC so implementation does not rely on ad-hoc conventions.
@@ -281,7 +235,7 @@ permission gate and result envelope stay in host-core:
 1. Model calls `plugin_<pluginIdSafe>_<toolName>`; the sidecar forwards it
    to host `tools.execute` like any built-in tool.
 2. host-core resolves the durable operating mode first. In Agent it runs the
-   normal permission flow (risk, session grants, 120s timeout), then emits
+   normal permission flow (risk, session grants, no automatic deadline), then emits
    notification `plugins.execute`
    `{ executionId, sessionId, toolCallId, toolName, args, turnId }`. `turnId` is
    the runtime turn identity, forwarded unchanged so the plugin tool context can
@@ -295,10 +249,9 @@ permission gate and result envelope stay in host-core:
    (`DESKTOP_TOOL_DISPATCH_TIMEOUT_MS`, above both the 110s plugin tool budget
    and the widest MCP leg — a 10s lazy handshake, a 30s `tools/list` traversal,
    then the 100s call) and then maps to `TOOL_TIMEOUT`; an unknown/unloaded tool
-   maps to `TOOL_NOT_FOUND`. The transport deadline for these calls covers the
-   120s permission wait, the 30s admission queue wait, that dispatch, and 10s of
-   slack (`rpcTimeoutMs`), so no outer layer gives up before host-core reports
-   the outcome.
+   maps to `TOOL_NOT_FOUND`. The `tools.execute` transport has no deadline while
+   waiting for the explicit permission decision; after approval, host-core's
+   execution budget remains authoritative.
 
 The model-facing registry gains plugin tools per prompt: main passes registered
 defs (`fullName`, description, JSON-schema parameters) to `agent.prompt`, and

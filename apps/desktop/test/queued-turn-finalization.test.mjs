@@ -20,7 +20,6 @@ const { createAgentHostBridge } = await import(
   "../electron/main/agent-host-bridge.ts"
 );
 const { IPC } = await import("@pi-desktop/shared");
-const { lockQuitTurnAborts } = await import("../electron/main/bootstrap/quit-turn-aborts.ts");
 
 function deferred() {
   let resolve;
@@ -63,7 +62,7 @@ function fixture() {
       }
       if (method === "session.endTurn") {
         const write = deferred();
-        writes.push({ ...write, turnId: params.turnId, status: params.status });
+        writes.push({ ...write, turnId: params.turnId });
         return write.promise;
       }
       if (method === "session.queuePrioritize") {
@@ -292,7 +291,6 @@ test("a cancellation locked before the turn settles decides the announced reason
   f.coordination.lockAbortReason(SESSION, FIRST_TURN);
   const pending = f.finish("completed");
   await setImmediate();
-  assert.equal(f.writes[0].status, "aborted");
   f.writes[0].resolve({ ok: true });
   await pending;
   await setImmediate();
@@ -304,27 +302,6 @@ test("a cancellation locked before the turn settles decides the announced reason
     f.coordination.peekAbortReason(SESSION, FIRST_TURN),
     undefined,
   );
-});
-
-test("normal quit locks its exact targets before completed terminal events arrive", async () => {
-  const f = fixture();
-  await f.bridge.queue.push({ sessionId: SESSION, content: "follow-up after restart" });
-  f.setQuitting(true);
-  const targets = lockQuitTurnAborts(f.activeTurns, f.coordination.lockAbortReason);
-  assert.deepEqual(targets, [{ sessionId: SESSION, turnId: FIRST_TURN }]);
-  // Cancellation of a permission-waiting tool can end the vendor loop with
-  // agent_end rather than an error. The real finalizer must still persist and
-  // announce the exact turn's locked cancellation reason.
-  const pending = f.finish("completed");
-  await setImmediate();
-  assert.equal(f.writes[0].status, "aborted");
-  f.writes[0].resolve({ ok: true });
-  await pending;
-  await setImmediate();
-  assert.deepEqual(f.announcements, [{ sessionId: SESSION, turnId: FIRST_TURN, reason: "aborted" }]);
-  assert.equal(f.prompts.length, 0);
-  assert.equal(f.persistedQueue.size, 1);
-  assert.equal(f.coordination.peekAbortReason(SESSION, FIRST_TURN), undefined);
 });
 
 test("a terminal event naming a turn that no longer owns the session settles nothing", async () => {

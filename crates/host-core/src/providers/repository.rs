@@ -36,7 +36,6 @@ pub(crate) fn provider_from_row(
             .or(legacy_model_id),
         models,
         api_style: row.get(10)?,
-        thinking_request_protocol: config_thinking_request_protocol(&config_raw),
         supports_reasoning: row
             .get::<_, String>(11)
             .ok()
@@ -87,10 +86,6 @@ pub fn create_provider(
 ) -> Result<ProviderPublic> {
     let id = Uuid::new_v4().to_string();
     let now = now_ms();
-    validate_thinking_request_protocol(
-        input.thinking_request_protocol.as_deref(),
-        input.api_style.as_deref(),
-    )?;
     // Validate before any side effect: a rejected alias must not leave a
     // stored secret behind.
     if let Some(models) = input.models.as_deref() {
@@ -122,10 +117,6 @@ pub fn create_provider(
             temperature: input.temperature,
         },
     )?;
-    let config_json = match input.thinking_request_protocol.as_deref() {
-        Some(value) => config_with_thinking_request_protocol(&config_json, Some(value))?,
-        None => config_json,
-    };
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => config_with_oauth_account_label(&config_json, label)?,
         None => config_json,
@@ -182,10 +173,6 @@ pub(crate) fn create_provider_with_id(
     if id.trim().is_empty() || id.len() > 128 {
         bail!("PROVIDER_INVALID: provider id is invalid");
     }
-    validate_thinking_request_protocol(
-        input.thinking_request_protocol.as_deref(),
-        input.api_style.as_deref(),
-    )?;
     if db
         .conn()
         .query_row("SELECT 1 FROM providers WHERE id = ?1", params![id], |_| {
@@ -225,10 +212,6 @@ pub(crate) fn create_provider_with_id(
             temperature: input.temperature,
         },
     )?;
-    let config_json = match input.thinking_request_protocol.as_deref() {
-        Some(value) => config_with_thinking_request_protocol(&config_json, Some(value))?,
-        None => config_json,
-    };
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => config_with_oauth_account_label(&config_json, label)?,
         None => config_json,
@@ -278,15 +261,6 @@ pub fn update_provider(
     let Some(current) = get_provider(db, secrets, &input.id)? else {
         return Ok(None);
     };
-    let effective_thinking_protocol = input
-        .thinking_request_protocol
-        .as_ref()
-        .map(|value| value.as_deref())
-        .unwrap_or(current.thinking_request_protocol.as_deref());
-    validate_thinking_request_protocol(
-        effective_thinking_protocol,
-        input.api_style.as_deref().or(current.api_style.as_deref()),
-    )?;
     // A plugin-declared row is refreshed from its manifest on every load, so a
     // generic edit would be silently reverted. The plugin path owns it.
     if let Some(owner) = current.owner_plugin_id.as_deref() {
@@ -309,6 +283,19 @@ pub fn update_provider(
     if input.models.is_some() {
         ensure_model_bindings_update_safe(&raw_config)?;
     }
+    // The discovered answer belongs to the endpoint that produced it, and the
+    // cached rows carry no endpoint of their own: an edit that moves the address
+    // or the wire format has to drop that answer, or the picker would paint the
+    // previous service's models as this one's. Read before the update moves the
+    // fields into the row.
+    let endpoint_changed = input
+        .base_url
+        .as_deref()
+        .is_some_and(|value| value.trim() != current.base_url.as_deref().unwrap_or("").trim())
+        || input
+            .api_style
+            .as_deref()
+            .is_some_and(|value| value != current.api_style.as_deref().unwrap_or(""));
     // Derive from the API key ref directly: `has_secret` now also covers an
     // OAuth credential, so reusing it here would stamp an api_key ref onto a
     // provider that only ever signed in with a vendor account.
@@ -338,13 +325,6 @@ pub fn update_provider(
             temperature: input.temperature,
         },
     )?;
-    let config_json = match input.thinking_request_protocol.as_ref() {
-        Some(value) => Some(config_with_thinking_request_protocol(
-            config_json.as_deref().unwrap_or(&raw_config),
-            value.as_deref(),
-        )?),
-        None => config_json,
-    };
     // An empty label clears the badge, which is what logout sends.
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => Some(config_with_oauth_account_label(
@@ -399,6 +379,38 @@ pub fn update_provider(
             now_ms(),
             input.id
         ])?;
+    // A save that drops bindings also forgets their cached rows. The cache is
+    // the service's answer, and a model the user removed is no longer part of
+    // the configuration that answer belongs to; keeping the row would feed the
+    // deleted model's recorded limits back to the next add of the same id.
+    if let Some(models) = input.models.as_deref() {
+        let removed: Vec<String> = current
+            .models
+            .iter()
+            .filter(|binding| {
+                let id = binding.id.trim().to_lowercase();
+                !models
+                    .iter()
+                    .any(|model| model.id.trim().to_lowercase() == id)
+            })
+            .map(|binding| binding.id.clone())
+            .collect();
+        forget_cached_models(db, &input.id, &removed)?;
+    }
+    // A save that moves the endpoint drops the answer the previous one
+    // produced. The models the user configured stay: they are the configuration
+    // the save just wrote, not a cached answer.
+    if endpoint_changed {
+        let configured: Vec<String> = match input.models.as_ref() {
+            Some(models) => models.iter().map(|model| model.id.clone()).collect(),
+            None => current
+                .models
+                .iter()
+                .map(|binding| binding.id.clone())
+                .collect(),
+        };
+        forget_missing_discovered_models(db, &input.id, &configured)?;
+    }
     get_provider(db, secrets, &input.id)
 }
 

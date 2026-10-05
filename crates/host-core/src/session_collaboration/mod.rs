@@ -167,7 +167,6 @@ fn spawn(db: &Database, input: &Value) -> Result<Value> {
             project_path: parent.summary.project_path,
             thinking_level: Some(parent.summary.thinking_level),
             permission_mode: Some(parent.summary.permission_mode),
-            tool_policy: Some(parent.summary.tool_policy),
         },
     )?;
     db.conn().execute("INSERT INTO session_collaboration_links(session_id,created_by_session_id,plugin_id,created_at) VALUES(?1,?2,?3,?4)",params![created.id,source,plugin,now_ms()])?;
@@ -196,7 +195,6 @@ pub fn handle(db: &Database, method: &str, input: &Value) -> Result<Value> {
         "session.collaboration.message" => {
             Ok(json!({"message":get(db,string(input,"messageId",256)?)?}))
         }
-        "session.collaboration.lookup" => projections::lookup(db, input),
         "session.collaboration.status" => {
             projections::summary(db, string(input, "sessionId", 256)?)
         }

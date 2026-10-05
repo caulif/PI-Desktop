@@ -1,8 +1,9 @@
 import {
   app,
   BrowserWindow,
-  dialog,
   ipcMain,
+  powerMonitor,
+  session,
 } from "electron";
 import { join } from "node:path";
 import {
@@ -12,8 +13,6 @@ import {
 } from "./network-proxy";
 import { installInsecureEndpointNotice } from "./network-notice";
 import {
-  APP_ID,
-  APP_NAME,
   APP_VERSION,
   IPC,
   IPC_WHITELIST,
@@ -31,7 +30,7 @@ import {
   refreshProjectGroups,
 } from "./workspace-roots";
 import { PersistenceOutbox } from "./persistence-outbox";
-import { Logger, ignoreBrokenStdio } from "./logger";
+import { Logger } from "./logger";
 import { describeError, installMainProcessErrorHandlers } from "./main-process-errors";
 import {
   ModelsDevCatalog,
@@ -39,16 +38,23 @@ import {
 } from "./models-dev-catalog";
 import { VendorOAuth } from "./oauth";
 import { AppUpdaterController } from "./updater";
-import type { WorkPanelReservationState } from "./work-panel-window";
+import {
+  WINDOW_MIN_HEIGHT,
+  WINDOW_MIN_WIDTH,
+  type WorkPanelReservationState,
+} from "./work-panel-window";
 import { InflightCheckpointer } from "@pi-desktop/host-runtime";
 import { withGitBranch } from "./workspace-git";
-import { applyDevelopmentUserData, desktopDataDir } from "./data-paths";
+import { hasSingleInstanceLock, isDevelopmentBuild } from "./installation";
+import { getStorageBootstrap } from "./storage/bootstrap";
 import { createPlanUiProbe } from "./plan-ui-probe";
 import { registerIpcHandlers } from "./ipc/register";
-import { invokePluginSchedule } from "./plugin-schedule-control";
-import { invokePluginVerification } from "./plugin-verification-control";
-import { invokePluginPrompt } from "./plugin-prompt-control";
 import { createVoiceService } from "./voice-service";
+import { MicrophoneLeaseRegistry } from "./live-voice/microphone-lease";
+import { createLiveCallService } from "./live-voice/runtime";
+import { createLiveVoiceWidget } from "./live-voice/widget-window";
+import { getActiveRemoteHostsBoot } from "./bootstrap/remote-hosts";
+import { installLiveMicrophonePermissionHandlers } from "./live-voice/microphone-permissions";
 import { MainProcessState } from "./bootstrap/main-state";
 import { registerApplicationActivation } from "./bootstrap/app-activation";
 import { createHostRuntime } from "./runtime/host";
@@ -76,48 +82,6 @@ import { createCloseBehaviorRuntime } from "./bootstrap/close-behavior";
 import { registerShutdownHandlers } from "./bootstrap/shutdown";
 import { stripWinLongPrefix } from "./path-utils";
 
-// A closed stdout/stderr (Linux AppImage, GUI launch without a TTY) must not
-// surface as Electron's "Uncaught Exception: write EPIPE" dialog. The same
-// default dialog must not appear for a stray uncaughtException (non-ASCII
-// HTTP headers from a system proxy, destroyed webContents, etc.).
-ignoreBrokenStdio();
-installMainProcessErrorHandlers();
-
-const isDevelopmentBuild =
-  process.env.PI_DESKTOP_DEV === "1" || !app.isPackaged;
-
-app.setName(APP_NAME);
-applyDevelopmentUserData(app, isDevelopmentBuild);
-if (process.platform === "win32") {
-  app.setAppUserModelId(APP_ID);
-}
-
-// Chromium's accessibility tree serializer has a known CHECK failure in
-// AXBlockFlowData::ComputeNeighborOnLine (chromium #552018997) that kills
-// the renderer when an AT client reads the tree while the DOM is being
-// mutated — exactly what happens during streaming agent responses.
-// The switch prevents Chromium from building the in-renderer accessibility
-// tree unless the user explicitly opts in via --force-renderer-accessibility.
-// This is a workaround until the upstream fix lands.
-app.commandLine.appendSwitch("disable-renderer-accessibility");
-
-// One installation, one process. The lock lives in `userData` (set just
-// above), so it is taken after `setName` and before anything else here
-// touches the data directory. A development build is its own installation;
-// `PI_DESKTOP_DATA_DIR` still opts a run out of the lock (E2E, capture rig).
-const singleInstanceRequired = !process.env.PI_DESKTOP_DATA_DIR;
-const hasSingleInstanceLock = singleInstanceRequired
-  ? app.requestSingleInstanceLock()
-  : true;
-if (!hasSingleInstanceLock) {
-  // Nothing has booted yet: no window, no tray, no child process, no log line.
-  // Quit here and let the instance that holds the lock surface itself from
-  // `second-instance`.
-  app.quit();
-}
-
-const WINDOW_MIN_WIDTH = 1040;
-const WINDOW_MIN_HEIGHT = 700;
 // Native resize streams can pause briefly while the pointer crosses a display
 // scale boundary. Keep recovery out of that gesture and only run it after the
 // bounds have been stable for one short interaction window.
@@ -202,7 +166,8 @@ const {
   safeOpenExternal,
 } = desktopServices;
 
-const dataDir = desktopDataDir(isDevelopmentBuild);
+const storage = getStorageBootstrap();
+const dataDir = storage.preferences.roots.data;
 // The plugin runtime resolves this root from the environment rather than taking
 // it as a parameter, and a profile split across two directories is the
 // divergence D236 closes.
@@ -289,6 +254,11 @@ const updater = new AppUpdaterController({
     if (!host?.isAvailable()) throw new Error("host unavailable");
     await host.call("settings.set", { lastNotifiedUpdateVersion: version });
   },
+  persistDismissedVersion: async (version) => {
+    const host = getHost();
+    if (!host?.isAvailable()) throw new Error("host unavailable");
+    await host.call("settings.set", { updateDismissedVersion: version });
+  },
 });
 
 /**
@@ -313,9 +283,12 @@ const vendorOAuth = new VendorOAuth({
     await safeOpenExternal(url);
   },
   log: (level, message, data) => logger.app("provider", level, message, { data }),
-  modelConfigFor: async ({ vendorKey, option }) => {
+  onAccountModels: (id, models) => modelsDevCatalog.setAccountModels(id, models),
+  onAccountRemoved: (id) => modelsDevCatalog.deleteAccount(id),
+  modelConfigFor: async ({ providerId, vendorKey, option }) => {
     await modelsDevCatalog.ensureLoaded();
     return catalogModelConfigFor(modelsDevCatalog, {
+      providerId,
       vendorKey,
       baseUrl: option.baseUrl,
       apiStyle: option.apiStyle,
@@ -783,7 +756,6 @@ const { startHost } = createHostRuntime({
   dataDir,
   logger,
   persistenceOutbox,
-  scheduleDisableOutbox: pluginServices.scheduleDisableOutbox,
   activeToolCalls,
   activeToolCallKey,
   sessionProjects,
@@ -822,10 +794,54 @@ runtimeLifecycle = createRuntimeLifecycle({
 });
 const { bootHostStatus, bootBackends } = runtimeLifecycle;
 
-const voiceService = createVoiceService(dataDir + "/voice-models", getMainWindow);
+let voiceServiceReference: ReturnType<typeof createVoiceService> | null = null;
+const microphoneLeases = new MicrophoneLeaseRegistry(() => {
+  const phase = voiceServiceReference?.getState().phase;
+  return phase === "preparing" || phase === "starting" || phase === "listening" || phase === "transcribing" || phase === "cancelling";
+});
+const voiceService = createVoiceService(
+  dataDir + "/voice-models",
+  getMainWindow,
+  (token) => microphoneLeases.acquire("dictation", token),
+);
+voiceServiceReference = voiceService;
+// The docked call widget: a desktop-level window that shows the call chrome
+// wherever the user put it and sends every action back to this window, which
+// stays the Live Voice owner (media, microphone lease, work scope).
+const liveVoiceWidget = createLiveVoiceWidget({
+  getMainWindow,
+  dataDir,
+  safeOpenExternal,
+  log: (message, data) => logger.app("diagnostics", "warn", message, data ? { data } : undefined),
+});
+
+const liveCallService = createLiveCallService({
+  getHost,
+  getMainWindow,
+  getAgentHostBridge: () => mainState.agentHostBridge,
+  getSidecar,
+  getBackendRouter: () => startupState.backendRouter,
+  getRemoteHosts: () => getActiveRemoteHostsBoot(),
+  vendorOAuth,
+  microphoneLeases,
+  resolveAgentRuntimeLaunch: (sessionId, session, settings, overrides) => {
+    if (!sessionLaunchRuntime) return Promise.reject(new Error("session launch runtime is not initialized"));
+    return sessionLaunchRuntime.resolveAgentRuntimeLaunch(sessionId, session, settings, {
+      ...overrides,
+      mode: "agent",
+    });
+  },
+  log: (level, message, data) => logger.app("provider", level, message, { data }),
+  onCallView: (view) => liveVoiceWidget.publish(view),
+});
 
 function registerIpc() {
   return registerIpcHandlers({
+    restartForStorage: () => {
+      shutdownState.quitConfirmed = true;
+      app.relaunch({ args: [...process.argv.slice(1).filter((arg) => arg !== "--pi-managed-storage"), "--pi-managed-storage"] });
+      app.quit();
+    },
     traySessions: applicationLifecycle!.traySessions,
     taskbarUnreadBadge: applicationLifecycle!.taskbarUnreadBadge,
     ipcMain,
@@ -919,6 +935,8 @@ function registerIpc() {
     isDeveloperMode: () => mainState.developerMode,
     sendToRenderer,
     voiceService,
+    liveCallService,
+    liveVoiceWidget,
   });
 }
 
@@ -932,6 +950,39 @@ app.on("web-contents-created", (_event, contents) => {
     event.preventDefault();
   });
 });
+
+const liveLifecycleWindows = new WeakSet<BrowserWindow>();
+app.on("browser-window-created", (_event, window) => {
+  queueMicrotask(() => {
+    if (getMainWindow() !== window || liveLifecycleWindows.has(window)) return;
+    liveLifecycleWindows.add(window);
+    const contentsId = window.webContents.id;
+    window.on("hide", () => {
+      void liveCallService.endForWebContents(contentsId, "window-hidden");
+    });
+    window.webContents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => {
+      if (isMainFrame) void liveCallService.endForWebContents(contentsId, "window-navigated", true);
+    });
+    window.webContents.once("render-process-gone", () => {
+      void liveCallService.endForWebContents(contentsId, "renderer-gone", true);
+    });
+    window.webContents.once("destroyed", () => {
+      void liveCallService.endForWebContents(contentsId, "renderer-gone", true);
+    });
+  });
+});
+void app.whenReady().then(() => {
+  installLiveMicrophonePermissionHandlers({
+    targetSession: session.defaultSession,
+    getMainWindow,
+    hasReservation: (owner) => liveCallService.hasMicrophoneReservation(owner),
+  });
+  powerMonitor.on("suspend", () => void liveCallService.endForLifecycle("app-suspended"));
+  powerMonitor.on("lock-screen", () => void liveCallService.endForLifecycle("app-suspended"));
+});
+
+// The widget is chrome for a call this window owns; it must never outlive the app.
+app.once("will-quit", () => liveVoiceWidget.close());
 
 registerApplicationStartup({
   hasSingleInstanceLock,
@@ -963,34 +1014,6 @@ registerApplicationStartup({
   bootHostStatus,
   flushPendingApplicationMenuCommands,
   invokeSessionCollaboration: sessionCollaboration.invoke,
-  invokePluginVerification: (input) => invokePluginVerification(input, async (method, params) => {
-    const host = getHost();
-    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
-    return host.call(method, params);
-  }, async (check) => {
-    const options = {
-      type: "warning" as const,
-      message: "Approve this exact project verification command?",
-      detail: `${JSON.stringify(check, null, 2)}\n\nThis program runs with your OS account permissions. Fixed arguments and hashes do not sandbox project code. Approval is limited to this plugin, session, project and expiry.`,
-      buttons: ["Deny", "Approve exact check"], defaultId: 0, cancelId: 0, noLink: true,
-    };
-    const window = getMainWindow();
-    const result = window && !window.isDestroyed()
-      ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
-    return result.response === 1;
-  }, () => shutdownState.quitting),
-  invokePluginSchedule: (input, invoke) => invokePluginSchedule(input, async (method, params) => {
-    const host = getHost();
-    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
-    return host.call(method, params);
-  }, invoke, (pluginId, requestIntentId, token, routineId, sessionId, contentHash) =>
-    plugins.consumeManualRoutineAuthorization(pluginId, requestIntentId, token,
-      routineId, sessionId, contentHash)),
-  invokePluginPrompt: (input, invoke) => invokePluginPrompt(input, async (method, params) => {
-    const host = getHost();
-    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
-    return host.call(method, params);
-  }, invoke),
   onSessionQueueChange: () => {
     void sessionCollaboration.drain().catch((error: unknown) => {
       logger.app("runtime", "warn", "session callback drain failed", { data: String(error) });
@@ -1005,7 +1028,6 @@ registerShutdownHandlers({
   getSidecar,
   getMcpControl: () => mainState.mcpControl,
   activeTurns,
-  lockAbortReason,
   persistenceOutbox,
   inflightCheckpointer,
   pluginPanels,
@@ -1018,6 +1040,7 @@ registerShutdownHandlers({
   logger,
   confirmQuitDialog,
   disposePowerSaveBlockers,
+  liveCallService,
 });
 
 registerApplicationActivation({

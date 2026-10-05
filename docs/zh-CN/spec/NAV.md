@@ -22,6 +22,7 @@
 - [04-documentation-site.md](/zh-CN/spec/02-architecture/04-documentation-site)
 - [03-repo-structure.md](/zh-CN/spec/02-architecture/03-repo-structure)
 - [05-remote-agent-control.md](/zh-CN/spec/02-architecture/05-remote-agent-control)
+- [06-pi-runtime-dependency-boundary.md](/zh-CN/spec/02-architecture/06-pi-runtime-dependency-boundary)
 
 ## 3. 运行时
 - [README.md](/zh-CN/spec/03-runtime/README)
@@ -45,6 +46,8 @@
 - [18-line-anchored-edit-contract.md](/zh-CN/spec/03-runtime/18-line-anchored-edit-contract)
 - [19-remote-agent-control-protocol.md](/zh-CN/spec/03-runtime/19-remote-agent-control-protocol)
 - [20-speech.md](/zh-CN/spec/03-runtime/20-speech)
+- [live-voice.md](/zh-CN/spec/03-runtime/live-voice)
+- [live-work-session.md](/zh-CN/spec/03-runtime/live-work-session)
 - [21-image-generation.md](/zh-CN/spec/03-runtime/21-image-generation)
 - [22-config-sync.md](/zh-CN/spec/03-runtime/22-config-sync)
 - [svg-attachment-input.md](/zh-CN/spec/03-runtime/svg-attachment-input)
@@ -93,7 +96,6 @@
 - [10-plugin-devex.md](/zh-CN/spec/07-plugins/10-plugin-devex)
 - [11-plugin-storage-isolation.md](/zh-CN/spec/07-plugins/11-plugin-storage-isolation)
 - [12-plugin-ipc-and-host-services.md](/zh-CN/spec/07-plugins/12-plugin-ipc-and-host-services)
-- [13-approved-project-verification.md](/zh-CN/spec/07-plugins/13-approved-project-verification)
 - [13-plugin-permissions-matrix.md](/zh-CN/spec/07-plugins/13-plugin-permissions-matrix)
 - [14-plugin-roadmap.md](/zh-CN/spec/07-plugins/14-plugin-roadmap)
 - [15-plugin-center.md](/zh-CN/spec/07-plugins/15-plugin-center)

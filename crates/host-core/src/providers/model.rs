@@ -32,8 +32,6 @@ pub struct ProviderPublic {
     /// reading a provider while they migrate to `models`.
     pub default_model_id: Option<String>,
     pub api_style: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_request_protocol: Option<String>,
     /// Explicit provider-level reasoning override.  `None` means the model
     /// catalog resolver should infer capability from the selected model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,7 +74,6 @@ pub struct ProviderCreateInput {
     pub default_model_id: Option<String>,
     pub secret_value: Option<String>,
     pub api_style: Option<String>,
-    pub thinking_request_protocol: Option<String>,
     pub oauth_account_label: Option<String>,
     #[serde(default)]
     pub headers: Option<BTreeMap<String, String>>,
@@ -107,9 +104,6 @@ pub struct ProviderUpdateInput {
     pub default_model_id: Option<String>,
     pub secret_value: Option<String>,
     pub api_style: Option<String>,
-    /// Missing preserves the override; explicit null clears it.
-    #[serde(default, deserialize_with = "deserialize_present_optional_string")]
-    pub thinking_request_protocol: Option<Option<String>>,
     pub oauth_account_label: Option<String>,
     #[serde(default)]
     pub headers: Option<BTreeMap<String, String>>,
@@ -123,15 +117,6 @@ pub struct ProviderUpdateInput {
     #[serde(default)]
     pub temperature: Option<f64>,
     pub enabled: Option<bool>,
-}
-
-fn deserialize_present_optional_string<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

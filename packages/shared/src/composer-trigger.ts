@@ -1,3 +1,5 @@
+import { formatSessionLink } from "./session-link.js";
+
 /**
  * Trigger detection and completion insertion for the composer autocomplete
  * (D123–D125). Pure string/cursor math so the exact "/"+"@" grammar is unit
@@ -171,17 +173,20 @@ export function fileReferenceLabel(path: string, preferredName?: string): string
   return normalized.slice(normalized.lastIndexOf("/") + 1) || candidate;
 }
 
+/** What serialization reads of a reference's plugin part (`send` of a mark). */
+type ComposerReferencePluginPart = { readonly kind?: string; readonly send?: string };
+
 /**
  * Serialize renderer-owned file references only at send time. The textarea can
  * stay compact while the persisted/model-facing prompt keeps exact @ paths.
  */
 export function serializeComposerFileReferences(
   draft: string,
-  references: ReadonlyArray<{ path: string; token?: string }>,
+  references: ReadonlyArray<{ path: string; kind?: string; token?: string; plugin?: ComposerReferencePluginPart }>,
 ): string {
   const content = serializeInlineComposerFileReferences(draft, references);
   const paths = references
-    .filter((reference) => !reference.token)
+    .filter((reference) => !reference.token && reference.kind !== "session")
     .map((reference) => formatFileInsert(reference.path, "file"))
     .join("")
     .trim();
@@ -193,17 +198,24 @@ export function serializeComposerFileReferences(
 /**
  * Resolve only inline generated tokens (legacy @name strings or single
  * sentinel characters backing atomic chips). Each resolved token keeps one
- * separating space so adjacent chips never fuse their @paths together.
+ * separating space so adjacent chips never fuse their @paths together. A
+ * plugin mark's token resolves to the text it sends (`plugin.send`) instead
+ * of a path, and a session reference resolves to its `pi-desktop://` link.
  */
 export function serializeInlineComposerFileReferences(
   draft: string,
-  references: ReadonlyArray<{ path: string; token?: string }>,
+  references: ReadonlyArray<{ path: string; kind?: string; token?: string; plugin?: ComposerReferencePluginPart }>,
 ): string {
   let content = draft;
   for (const reference of references) {
     const token = reference.token?.trim();
     if (!token || !content.includes(token)) continue;
-    const insert = formatFileInsert(reference.path, "file").trim();
+    const send = reference.plugin?.send;
+    const insert = typeof send === "string"
+      ? send
+      : reference.kind === "session"
+        ? formatSessionLink(reference.path)
+        : formatFileInsert(reference.path, "file").trim();
     let index = content.indexOf(token);
     while (index !== -1) {
       const nextChar = content[index + token.length];

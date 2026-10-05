@@ -48,13 +48,11 @@ let pluginModule = null;
 const pending = new Map();
 const invocations = new Map();
 const invocationContext = new AsyncLocalStorage();
-const panelContext = new AsyncLocalStorage();
 let nextCallId = 1;
 
 /** Proxy a host API call to the broker and await its verdict. */
 function call(api, args = []) {
   const invocation = invocationContext.getStore();
-  const panelInvocationId = invocation ? undefined : panelContext.getStore();
   if (invocation && (invocation.controller.signal.aborted || invocations.get(invocation.id) !== invocation)) {
     return Promise.reject(invocation.controller.signal.reason ?? toolAbortedError("Plugin tool invocation finished"));
   }
@@ -62,8 +60,7 @@ function call(api, args = []) {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, invocationId: invocation?.id });
     try {
-      send({ t: "call", id, api, args, ...(invocation ? { invocationId: invocation.id } : {}),
-        ...(panelInvocationId ? { panelInvocationId } : {}) });
+      send({ t: "call", id, api, args, ...(invocation ? { invocationId: invocation.id } : {}) });
     } catch (error) {
       pending.delete(id);
       reject(error);
@@ -581,6 +578,30 @@ async function handleParentCall(method, payload, invocationId) {
       if (entry.stop) await entry.stop();
       return { ok: true };
     }
+    case "renderer.call": {
+      const handler = pluginModule?.onRendererCall;
+      if (typeof handler !== "function") {
+        const error = new Error("plugin does not implement onRendererCall");
+        error.code = "PLUGIN_CALL_NO_HANDLER";
+        throw error;
+      }
+      const answer = await handler(String(payload?.method ?? ""), payload?.args ?? {});
+      // The relay answers JSON only. A cycle, a BigInt or a bare function is
+      // the plugin's bug and is reported as one, instead of surfacing as a
+      // structured-clone failure without a code.
+      let text;
+      try {
+        text = JSON.stringify(answer ?? null);
+      } catch {
+        text = undefined;
+      }
+      if (text === undefined) {
+        const error = new Error("onRendererCall answer is not JSON");
+        error.code = "PLUGIN_CALL_UNSERIALIZABLE";
+        throw error;
+      }
+      return JSON.parse(text);
+    }
     case "lifecycle.unload": {
       for (const id of invocations.keys()) cancelInvocation(id, "Plugin unloaded");
       // Best effort: a throwing onUnload must not block teardown.
@@ -636,9 +657,7 @@ onHostMessage((message) => {
     return;
   }
   if (message.t === "call") {
-    void invocationContext.run(undefined, () => panelContext.run(
-      message.method === "panel.invoke" ? message.panelInvocationId : undefined,
-      () => handleParentCall(message.method, message.payload, message.invocationId)))
+    void invocationContext.run(undefined, () => handleParentCall(message.method, message.payload, message.invocationId))
       .then((value) => send({ t: "res", id: message.id, ok: true, value: value ?? null }))
       .catch((error) =>
         send({
