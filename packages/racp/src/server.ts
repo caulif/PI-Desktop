@@ -34,7 +34,11 @@ import {
   type JsonRpcId,
   type JsonRpcMessage,
 } from "./jsonrpc.js";
-import { createOperations, type OperationContext, type OperationHandler } from "./operations.js";
+import {
+  createOperations,
+  type OperationContext,
+  type OperationHandler,
+} from "./operations.js";
 
 /** One accepted transport connection, as the server drives it. */
 export interface ServerConnectionTransport {
@@ -54,7 +58,11 @@ export type RacpServerOptions = {
   serverVersion: string;
   limits?: Partial<RacpLimits>;
   policy?: Partial<RacpPolicy>;
-  log: (level: "info" | "warn" | "error", message: string, data?: Record<string, unknown>) => void;
+  log: (
+    level: "info" | "warn" | "error",
+    message: string,
+    data?: Record<string, unknown>,
+  ) => void;
   now?: () => number;
   /** Deadline for `connection/initialize` after the socket opened (spec §12). */
   initializeTimeoutMs?: number;
@@ -75,7 +83,10 @@ export class RacpConnection {
   initialized = false;
   readonly subscriptions = new Map<string, Subscription>();
   readonly terminals = new Set<string>();
-  private readonly pendingServerRequests = new Map<string, ServerRequestWaiter>();
+  private readonly pendingServerRequests = new Map<
+    string,
+    ServerRequestWaiter
+  >();
   private serverRequestCounter = 0;
   private closed = false;
 
@@ -92,7 +103,10 @@ export class RacpConnection {
     try {
       this.transport.send(encodeFrame(message));
     } catch (error) {
-      this.server.log("warn", "racp send failed", { connectionId: this.id, error: String(error) });
+      this.server.log("warn", "racp send failed", {
+        connectionId: this.id,
+        error: String(error),
+      });
     }
   }
 
@@ -101,26 +115,50 @@ export class RacpConnection {
   }
 
   /** A server-initiated request (spec §4.3); resolves with the client's result. */
-  request<T = unknown>(method: string, params: unknown, timeoutMs: number): Promise<T> {
+  request<T = unknown>(
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+  ): Promise<T> {
+    if (this.closed)
+      return Promise.reject(
+        new RacpError("AGENT_UNAVAILABLE", "connection closed"),
+      );
     this.serverRequestCounter += 1;
     const id = `srv_${this.serverRequestCounter}`;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingServerRequests.delete(id);
-        reject(new RacpError("TOOL_FAILED", `client did not answer ${method} in time`));
+        reject(
+          new RacpError(
+            "TOOL_FAILED",
+            `client did not answer ${method} in time`,
+          ),
+        );
       }, timeoutMs);
       timer.unref?.();
-      this.pendingServerRequests.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+      this.pendingServerRequests.set(id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
       this.send({ jsonrpc: "2.0", id, method, params });
     });
   }
 
-  handleResponse(id: JsonRpcId, result: unknown, error: JsonRpcErrorObject | undefined): void {
+  handleResponse(
+    id: JsonRpcId,
+    result: unknown,
+    error: JsonRpcErrorObject | undefined,
+  ): void {
     const waiter = this.pendingServerRequests.get(String(id));
     if (!waiter) return;
     this.pendingServerRequests.delete(String(id));
     clearTimeout(waiter.timer);
-    if (error) waiter.reject(new RacpError(error.data?.code ?? "TOOL_FAILED", error.message));
+    if (error)
+      waiter.reject(
+        new RacpError(error.data?.code ?? "TOOL_FAILED", error.message),
+      );
     else waiter.resolve(result);
   }
 
@@ -197,13 +235,18 @@ export class RacpServer {
    * when the Host is at its client limit (the transport is closed with
    * `RATE_LIMITED`).
    */
-  accept(auth: ConnectionAuth, transport: ServerConnectionTransport): RacpConnection | null {
+  accept(
+    auth: ConnectionAuth,
+    transport: ServerConnectionTransport,
+  ): RacpConnection | null {
     if (this.closed) {
       transport.close(1001, "server closing");
       return null;
     }
     if (this.connections.size >= this.limits.maxConnectedClients) {
-      this.options.log("warn", "racp connection refused: client limit", { limit: this.limits.maxConnectedClients });
+      this.options.log("warn", "racp connection refused: client limit", {
+        limit: this.limits.maxConnectedClients,
+      });
       transport.close(1013, "RATE_LIMITED");
       return null;
     }
@@ -211,7 +254,11 @@ export class RacpServer {
     this.connections.set(connection.id, connection);
     const initializeTimer = setTimeout(() => {
       if (!connection.initialized) {
-        this.options.log("warn", "racp connection closed: initialize deadline", { connectionId: connection.id });
+        this.options.log(
+          "warn",
+          "racp connection closed: initialize deadline",
+          { connectionId: connection.id },
+        );
         connection.close(1002, "PROTOCOL_MISMATCH");
       }
     }, this.options.initializeTimeoutMs ?? 10_000);
@@ -221,7 +268,10 @@ export class RacpServer {
         connection.send({
           jsonrpc: "2.0",
           id: 0,
-          error: errorObjectFrom(new RacpError("PAYLOAD_TOO_LARGE", "frame exceeds maxFrameBytes"), this.traceId()),
+          error: errorObjectFrom(
+            new RacpError("PAYLOAD_TOO_LARGE", "frame exceeds maxFrameBytes"),
+            this.traceId(),
+          ),
         });
         return;
       }
@@ -248,6 +298,19 @@ export class RacpServer {
     }
   }
 
+  /** Revoke idle sockets and callback ownership immediately; native turns remain live. */
+  disconnectDevice(deviceId: string): void {
+    for (const connection of [...this.connections.values()]) {
+      if (
+        connection.auth.kind !== "device" ||
+        connection.auth.device.deviceId !== deviceId
+      )
+        continue;
+      connection.close(1008, "device revoked");
+      this.release(connection);
+    }
+  }
+
   private traceId(): string {
     return `trace_${randomUUID()}`;
   }
@@ -255,7 +318,10 @@ export class RacpServer {
   private release(connection: RacpConnection): void {
     if (!this.connections.delete(connection.id)) return;
     for (const subscription of connection.subscriptions.values()) {
-      this.options.agentHost.unsubscribe(subscription.id, subscription.sessionId);
+      this.options.agentHost.unsubscribe(
+        subscription.id,
+        subscription.sessionId,
+      );
     }
     connection.subscriptions.clear();
     for (const terminalId of connection.terminals) {
@@ -264,11 +330,16 @@ export class RacpServer {
     connection.terminals.clear();
     this.options.operations.botNode?.release(connection.id);
     connection.close(1000, "closed");
-    this.options.log("info", "racp connection released", { connectionId: connection.id });
+    this.options.log("info", "racp connection released", {
+      connectionId: connection.id,
+    });
   }
 
-  private async handleFrame(connection: RacpConnection, frame: string): Promise<void> {
-    if (!await this.options.authenticator.isActive(connection.auth)) {
+  private async handleFrame(
+    connection: RacpConnection,
+    frame: string,
+  ): Promise<void> {
+    if (!(await this.options.authenticator.isActive(connection.auth))) {
       connection.close(1008, "device revoked");
       this.release(connection);
       return;
@@ -278,7 +349,13 @@ export class RacpServer {
       connection.send({
         jsonrpc: "2.0",
         id: 0,
-        error: errorObjectFrom(new RacpError("INVALID_ARGUMENT", "frame is not a JSON-RPC 2.0 message"), this.traceId()),
+        error: errorObjectFrom(
+          new RacpError(
+            "INVALID_ARGUMENT",
+            "frame is not a JSON-RPC 2.0 message",
+          ),
+          this.traceId(),
+        ),
       });
       return;
     }
@@ -287,35 +364,69 @@ export class RacpServer {
       return;
     }
     if (!isRequest(message)) {
-      if (isNotification(message) && message.method === RACP_INITIALIZED_NOTIFICATION) connection.initialized = true;
+      if (
+        isNotification(message) &&
+        message.method === RACP_INITIALIZED_NOTIFICATION
+      )
+        connection.initialized = true;
       return;
     }
     const traceId = this.traceId();
     try {
-      const result = await this.dispatch(connection, message.method, message.params, traceId);
+      const result = await this.dispatch(
+        connection,
+        message.method,
+        message.params,
+        traceId,
+      );
       connection.send({ jsonrpc: "2.0", id: message.id, result });
     } catch (error) {
       if (!(error instanceof RacpError)) {
-        this.options.log("error", "racp operation failed", { method: message.method, traceId, error: String(error) });
+        this.options.log("error", "racp operation failed", {
+          method: message.method,
+          traceId,
+          error: String(error),
+        });
       }
-      connection.send({ jsonrpc: "2.0", id: message.id, error: errorObjectFrom(error, traceId) });
+      connection.send({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: errorObjectFrom(error, traceId),
+      });
     }
   }
 
-  private async dispatch(connection: RacpConnection, method: string, params: unknown, traceId: string): Promise<unknown> {
+  private async dispatch(
+    connection: RacpConnection,
+    method: string,
+    params: unknown,
+    traceId: string,
+  ): Promise<unknown> {
     if (method === "connection/initialize") {
-      if (connection.initialized) throw new RacpError("CONFLICT", "the connection is already initialized");
+      if (connection.initialized)
+        throw new RacpError(
+          "CONFLICT",
+          "the connection is already initialized",
+        );
       return this.initialize(connection, params);
     }
     if (!connection.initialized) {
-      throw new RacpError("PROTOCOL_MISMATCH", "connection/initialize must complete first");
+      throw new RacpError(
+        "PROTOCOL_MISMATCH",
+        "connection/initialize must complete first",
+      );
     }
-    if (!(method in RACP_OPERATIONS)) throw new RacpError("METHOD_NOT_FOUND", `unknown operation ${method}`);
+    if (!(method in RACP_OPERATIONS))
+      throw new RacpError("METHOD_NOT_FOUND", `unknown operation ${method}`);
     const operation = method as RacpOperation;
     const handler = this.handlers.get(operation);
-    if (!handler) throw new RacpError("METHOD_NOT_FOUND", `unknown operation ${method}`);
+    if (!handler)
+      throw new RacpError("METHOD_NOT_FOUND", `unknown operation ${method}`);
     if (!rolesAllowOperation(connection.principal.roles, operation)) {
-      throw new RacpError("FORBIDDEN", `principal lacks the role for ${operation}`);
+      throw new RacpError(
+        "FORBIDDEN",
+        `principal lacks the role for ${operation}`,
+      );
     }
     const context: OperationContext = {
       connection,
@@ -341,27 +452,51 @@ export class RacpServer {
     return handler(context, (params ?? {}) as Record<string, unknown>);
   }
 
-  private deliverEvent(connection: RacpConnection, envelope: RacpEventEnvelope): void {
+  private deliverEvent(
+    connection: RacpConnection,
+    envelope: RacpEventEnvelope,
+  ): void {
     connection.notify(RACP_EVENT_NOTIFICATION, envelope);
   }
 
-  private initialize(connection: RacpConnection, params: unknown): RacpInitializeResult {
+  private initialize(
+    connection: RacpConnection,
+    params: unknown,
+  ): RacpInitializeResult {
     if (!Value.Check(RacpInitializeParamsSchema, params)) {
-      throw new RacpError("INVALID_ARGUMENT", "invalid connection/initialize params");
+      throw new RacpError(
+        "INVALID_ARGUMENT",
+        "invalid connection/initialize params",
+      );
     }
-    if (!protocolVersionsCompatible(RACP_PROTOCOL_VERSION, params.protocolVersion)) {
-      throw new RacpError("PROTOCOL_MISMATCH", `protocol ${params.protocolVersion} is not compatible with ${RACP_PROTOCOL_VERSION}`);
+    if (
+      !protocolVersionsCompatible(RACP_PROTOCOL_VERSION, params.protocolVersion)
+    ) {
+      throw new RacpError(
+        "PROTOCOL_MISMATCH",
+        `protocol ${params.protocolVersion} is not compatible with ${RACP_PROTOCOL_VERSION}`,
+      );
     }
     if (!params.bindings.includes("RACP-WS")) {
-      throw new RacpError("PROTOCOL_MISMATCH", "client does not offer the RACP-WS binding");
+      throw new RacpError(
+        "PROTOCOL_MISMATCH",
+        "client does not offer the RACP-WS binding",
+      );
     }
     // A pairing connection may only pair; everything else needs the device's roles.
     connection.initialized = true;
     return {
       protocolVersion: RACP_PROTOCOL_VERSION,
-      server: { name: this.options.serverName ?? "pi-host", version: this.options.serverVersion, hostId: this.options.hostId },
+      server: {
+        name: this.options.serverName ?? "pi-host",
+        version: this.options.serverVersion,
+        hostId: this.options.hostId,
+      },
       connectionId: connection.id,
-      principal: { subject: connection.principal.subject, roles: [...connection.principal.roles] },
+      principal: {
+        subject: connection.principal.subject,
+        roles: [...connection.principal.roles],
+      },
       capabilities: this.capabilities,
       limits: this.limits,
       policy: this.policy,

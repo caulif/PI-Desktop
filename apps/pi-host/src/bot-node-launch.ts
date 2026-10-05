@@ -1,22 +1,11 @@
-import { open, readFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { startPiHost, type PiHostApp } from "./app.js";
 import type { PiHostConfig } from "./config.js";
 import type { TrustedPluginConfig } from "./trusted-plugin.js";
 import { RacpClient, wsClientTransport } from "@pi-desktop/racp";
 import { APP_VERSION } from "@pi-desktop/shared";
 import { validateBotNodeEndpoint } from "./remote-plugin.js";
-
-async function privateFile(path: string, contents: string) {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const handle = await open(path, "wx", 0o600);
-  try {
-    await handle.writeFile(contents, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
+import { prepareStandaloneOutput, requireStandalonePrivate, writeStandalonePrivate } from "./bot-node-private-files.js";
 
 /** Starts only execution services. It never instantiates a second Bot writer. */
 export async function startBotNode(input: {
@@ -24,11 +13,12 @@ export async function startBotNode(input: {
   plugin: TrustedPluginConfig;
   pairingTicketFile?: string;
 }): Promise<PiHostApp> {
+  if (input.pairingTicketFile) await prepareStandaloneOutput(input.pairingTicketFile);
   const app = await startPiHost(input.host, { trustedPlugin: input.plugin });
   if (input.pairingTicketFile) {
     try {
       const ticket = await app.issuePairingToken(input.host.pairingLifetimeMs);
-      await privateFile(input.pairingTicketFile, ticket.token + "\n");
+      await writeStandalonePrivate(input.pairingTicketFile, ticket.token + "\n");
     } catch (error) {
       await app.stop();
       throw error;
@@ -46,6 +36,8 @@ export async function pairRemoteBotNode(input: {
   deviceLabel?: string;
 }) {
   validateBotNodeEndpoint(input.url);
+  await requireStandalonePrivate(input.pairingTicketFile);
+  await prepareStandaloneOutput(input.deviceTokenFile);
   const text = (await readFile(input.pairingTicketFile, "utf8")).trim();
   const token = text.startsWith("{") ? String(JSON.parse(text).token) : text;
   const result = await pairBotNode({
@@ -54,7 +46,7 @@ export async function pairRemoteBotNode(input: {
     expectedHostId: input.expectedHostId,
     deviceLabel: input.deviceLabel,
   });
-  await privateFile(input.deviceTokenFile, result.deviceToken + "\n");
+  await writeStandalonePrivate(input.deviceTokenFile, result.deviceToken + "\n");
   return { hostId: result.hostId, deviceId: result.deviceId };
 }
 

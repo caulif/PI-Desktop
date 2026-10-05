@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { startBotNode, pairRemoteBotNode } from "./bot-node-launch.js";
+import { requireStandalonePrivate, requireStandalonePosix } from "./bot-node-private-files.js";
 
 const [command, file] = process.argv.slice(2);
 if (!file || !["start", "pair"].includes(command ?? "")) {
@@ -9,6 +10,8 @@ if (!file || !["start", "pair"].includes(command ?? "")) {
   process.exitCode = 2;
 } else {
   try {
+    requireStandalonePosix();
+    await requireStandalonePrivate(file);
     const config = JSON.parse(await readFile(file, "utf8"));
     if (command === "pair") {
       const result = await pairRemoteBotNode(config);

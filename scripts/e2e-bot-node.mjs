@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Host } from "./e2e/host.mjs";
 import { DatabaseSync } from "node:sqlite";
+import { execFileSync } from "node:child_process";
 import {
   FileCredentialStore,
   startPiHost,
@@ -550,6 +551,103 @@ try {
       .update(await readFile(join(cfg.browseRoot, "pi-bot/remote-proof.md")))
       .digest("hex"),
   });
+  // Administrator-selected fixed check: no arbitrary browser shell or PTY is exposed.
+  const commandScript =
+    'const fs=require("node:fs"),crypto=require("node:crypto");const bytes=fs.readFileSync("pi-bot/remote-proof.md");if(crypto.createHash("sha256").update(bytes).digest("hex")!==process.argv[2])process.exit(2);process.stdout.write("verified remote cwd and file hash\\n");';
+  await writeFile(
+    join(cfg.browseRoot, "pi-bot/command-proof.cjs"),
+    commandScript,
+  );
+  execFileSync("git", ["init", "--quiet"], { cwd: cfg.browseRoot });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Finite acceptance",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "Finite isolated baseline",
+    ],
+    { cwd: cfg.browseRoot },
+  );
+  const approvedCheck = await approveUntil(() =>
+    remote.runAsWebUser(user, () =>
+      remote.api.desktop.invoke({
+        operation: "verification/approveCheck",
+        args: [
+          {
+            sessionId: bot.binding.sessionId,
+            projectPath: cfg.browseRoot,
+            definition: {
+              program: process.execPath,
+              args: [
+                "pi-bot/command-proof.cjs",
+                createHash("sha256").update(proof).digest("hex"),
+              ],
+              scriptPins: [
+                {
+                  path: "pi-bot/command-proof.cjs",
+                  sha256: createHash("sha256")
+                    .update(commandScript)
+                    .digest("hex"),
+                },
+              ],
+              timeoutMs: 5000,
+              maxOutputBytes: 4096,
+              expiresAt: Date.now() + 120000,
+            },
+          },
+        ],
+      }),
+    ),
+  );
+  const beforeSnapshot = await remote.api.desktop.invoke({
+    operation: "verification/snapshot",
+    args: [
+      {
+        sessionId: bot.binding.sessionId,
+        projectPath: cfg.browseRoot,
+        commandId: approvedCheck.commandId,
+      },
+    ],
+  });
+  const commandRequest = {
+    executionId: randomUUID(),
+    commandId: approvedCheck.commandId,
+    sessionId: bot.binding.sessionId,
+    projectPath: cfg.browseRoot,
+    identity: {
+      specId: "finite-fixed-command",
+      specVersion: 1,
+      artifactId,
+      artifactRevision: Number(revision),
+      contentHash: createHash("sha256").update(proof).digest("hex"),
+    },
+    beforeSnapshot,
+  };
+  const checked = await remote.runAsWebUser(user, () =>
+    remote.api.desktop.invoke({
+      operation: "verification/runApprovedCheck",
+      args: [commandRequest],
+    }),
+  );
+  assert.equal(checked.exitCode, 0, JSON.stringify(checked));
+  assert.equal(
+    Buffer.from(checked.output).toString(),
+    "verified remote cwd and file hash\n",
+  );
+  record(
+    "actual-native-approved-fixed-command-checks-remote-cwd-and-disk-hash",
+    {
+      executionId: checked.executionId,
+      exitCode: checked.exitCode,
+      outputSha256: checked.outputSha256,
+    },
+  );
   const sendMessage = (content) =>
     invoke("conversation.send", {
       conversationId,
@@ -769,12 +867,35 @@ try {
     1,
   );
   record("actual-disabled-routine-creates-no-occurrence-after-due-tick");
-  await remote.revokeDevice(paired.deviceId);
+  const revocationTurn = await sendMessage(
+    "HOLD_FOR_STOP: stay live while the idle device is revoked.",
+  );
+  const nativeTurnId = app.runtime.activeTurnId(
+    remote.nativeSessionId(bot.binding.sessionId),
+  );
+  assert.ok(nativeTurnId);
+  await remote
+    .revokeDevice(paired.deviceId)
+    .catch((error) =>
+      assert.match(String(error), /connection|disconnect|closed/i),
+    );
+  const idleRevokeDeadline = Date.now() + 5000;
+  while (remote.state === "connected" && Date.now() < idleRevokeDeadline)
+    await delay(50);
+  assert.notEqual(remote.state, "connected");
+  assert.equal(app.server.connectionCount(), 0);
+  assert.equal(
+    app.runtime.activeTurnId(remote.nativeSessionId(bot.binding.sessionId)),
+    nativeTurnId,
+  );
+  assert.ok(revocationTurn.turns[0].work);
   await assert.rejects(
     () => remote.api.models.list(),
-    /connection|closed|disconnect|revok/i,
+    /connection|closed|disconnect|revok|offline/i,
   );
-  record("active-device-revocation-releases-node-writer");
+  record(
+    "idle-device-revocation-immediately-releases-writer-without-aborting-native-turn",
+  );
   report.passed = true;
 } catch (error) {
   report.passed = false;

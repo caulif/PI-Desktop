@@ -258,7 +258,11 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
         sidecar.clearProjectInstructionRoot(sessionId);
         await sidecar.call("agent.disposeSession", { sessionId }).catch(() => undefined);
       },
-      revokeDevice: (deviceId) => store.revokeDevice(deviceId, new Date().toISOString()),
+      revokeDevice: async (deviceId) => {
+        const revoked = await store.revokeDevice(deviceId, new Date().toISOString());
+        server.disconnectDevice(deviceId);
+        return revoked;
+      },
     }),
     ...(terminal ? { terminal } : {}),
     ...(plugin ? { botNode: createBotNodePort(plugin, message => log("warn", message)) } : {}),

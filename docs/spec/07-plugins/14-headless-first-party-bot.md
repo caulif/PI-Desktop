@@ -30,6 +30,14 @@ single-use RACP ticket and saves the owner device credential in an administrator
 selected private file. `createRemotePluginApi` attaches one authenticated central
 writer to a node; another simultaneous writer receives `CONFLICT`.
 
+The optional standalone Host `bot-node.mjs start|pair` bootstrap supports POSIX
+credential files only. It validates regular non-linked input files owned by the
+current user with no group/other permissions, refuses shared output parents and
+existing outputs, and creates only a new dedicated owner-only parent. On Windows
+it fails before credential I/O; use the managed pi-bot service CLI, whose Windows
+DACL validation protects the profile, pairing ticket and device token. The
+in-memory `pairBotNode` and Host library composition remain cross-platform.
+
 Only the reviewed `botNode/*` catalog is available. There is no arbitrary Host
 RPC, plugin identity, shell bridge or authority flag endpoint. Native tools keep
 Host permissions, budgets and plans, then invoke the central Bot callback through
