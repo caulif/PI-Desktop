@@ -25,6 +25,7 @@ function load(relative, imports) {
 // decision, and a hand-written stub would prove only the last step.
 const pluginAgentComplete = load("../electron/main/plugin-agent-complete.ts", {
   "@pi-desktop/agent-runtime": await import("@pi-desktop/agent-runtime"),
+  "@pi-desktop/host-runtime": await import("@pi-desktop/host-runtime"),
   "@pi-desktop/shared": await import("@pi-desktop/shared"),
 });
 
