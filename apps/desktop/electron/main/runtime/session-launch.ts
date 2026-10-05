@@ -18,7 +18,7 @@ import {
 } from "@pi-desktop/shared";
 import {
   capabilitiesFromModelConfig,
-  clampThinkingLevel,
+  clampProviderThinkingLevel,
   loadCustomSystemPrompt,
   loadInstructionChain,
   loadSubagentDefinitions,
@@ -361,8 +361,8 @@ export function createSessionLaunchRuntime({
       });
     const modelConfig = catalogModelConfig;
     const thinkingCapabilities = capabilitiesFromModelConfig(modelConfig);
-    const thinkingLevel = clampThinkingLevel(
-      thinkingCapabilities,
+    const thinkingLevel = clampProviderThinkingLevel(
+      { ...thinkingCapabilities, thinkingRequestProtocol: provider.thinkingRequestProtocol },
       normalizeThinkingLevel(
         overrides.thinkingLevel ??
           (provider.id === requestedProviderId ? session.thinkingLevel : undefined) ??
@@ -575,6 +575,7 @@ export function createSessionLaunchRuntime({
           apiKey,
           ...(row.authKind ? { authKind: row.authKind } : {}),
           ...(row.apiStyle ? { apiStyle: row.apiStyle } : {}),
+          ...(row.thinkingRequestProtocol ? { thinkingRequestProtocol: row.thinkingRequestProtocol } : {}),
           ...optionalProviderHeaders(row.headers),
           supportsReasoning: caps.supportsReasoning,
           supportedThinkingLevels: [...caps.supportedThinkingLevels],
@@ -617,6 +618,7 @@ export function createSessionLaunchRuntime({
       projectPath,
       sidecarParams: {
         sessionId,
+        toolPolicy: session.toolPolicy ?? "unrestricted",
         mode: normalizeMode(
           overrides.mode ?? session.mode ?? settings.defaultMode ?? "agent",
         ),
@@ -640,6 +642,7 @@ export function createSessionLaunchRuntime({
           authKind: provider.authKind,
           extensionAgentKey: provider.extensionAgentKey,
           apiStyle,
+          ...(provider.thinkingRequestProtocol ? { thinkingRequestProtocol: provider.thinkingRequestProtocol } : {}),
           ...optionalProviderHeaders(provider.headers),
           supportsReasoning: thinkingCapabilities.supportsReasoning,
           supportsVision: visionFromModelConfig(modelConfig),

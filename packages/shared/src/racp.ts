@@ -1,3 +1,4 @@
+import { BOT_NODE_WIRE_OPERATIONS } from "./bot-node.js";
 /**
  * PI Remote Agent Control Protocol (RACP) contract.
  *
@@ -523,7 +524,10 @@ export type RacpOperationSpec = {
   mutation: boolean;
 };
 
+const BOT_NODE_OPERATION_SPECS = Object.fromEntries(BOT_NODE_WIRE_OPERATIONS.map(operation => [operation, {role: "owner" as const, profile: "remote-host" as const, mutation: true}])) as Record<`botNode/${string}`, RacpOperationSpec>;
+
 export const RACP_OPERATIONS = {
+  ...BOT_NODE_OPERATION_SPECS,
   "connection/initialize": { role: "authenticated", profile: "v1", mutation: false },
   "connection/ping": { role: "authenticated", profile: "v1", mutation: false },
   "host/list": { role: "authenticated", profile: "v1", mutation: false },
@@ -571,7 +575,7 @@ export const RACP_OPERATIONS = {
 export type RacpOperation = keyof typeof RACP_OPERATIONS;
 
 /** Server-initiated requests on the WebSocket binding (spec §4.3, §9). */
-export const RACP_SERVER_REQUESTS = ["approval/request", "input/request", "tool/execute"] as const;
+export const RACP_SERVER_REQUESTS = ["approval/request", "input/request", "tool/execute", "botNode/toolExecute", "botNode/event"] as const;
 export type RacpServerRequest = (typeof RACP_SERVER_REQUESTS)[number];
 
 /** Notification method that carries an `EventEnvelope` on the WS binding. */

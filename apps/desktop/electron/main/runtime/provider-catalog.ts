@@ -8,6 +8,7 @@ import {
   type CommandShellId,
   type ModelBinding,
   type SessionThinkingLevel,
+  type ProviderThinkingRequestProtocol,
 } from "@pi-desktop/shared";
 import {
   capabilitiesFromModelConfig,
@@ -39,6 +40,7 @@ export type RuntimeProvider = {
   apiKey?: string;
   authKind?: string;
   apiStyle?: string;
+  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
   /** Plugin-owned trusted agent key; no host secret is associated with it. */
   extensionAgentKey?: string;
   hasSecret?: boolean;

@@ -2,6 +2,32 @@
 
 ## 1. Storage location
 
+### Explicit relay thinking request dialect
+
+User-managed providers may opt into `thinkingRequestProtocol: "deepseek"`.
+The closed enum is persisted in `config_json.compatibility.thinkingRequestProtocol`
+and projected through provider list/get/create/update and runtime launch data.
+An absent create field uses the historical adapter behavior. An absent update
+field preserves the stored value; explicit null removes it. Existing provider
+rows require no migration. Configuration-sync snapshots include explicit null
+when cleared so an existing receiver removes its old override; older snapshots
+without the field preserve historical update behavior.
+
+This override is valid only for Chat Completions (`chat_completions`, the legacy
+absent API style, or `opencode_go`). Unknown values and incompatible provider
+API styles are rejected before persistence or credential changes. Because a
+catalog model can override the provider API, runtime model construction also
+rejects an opted-in model whose effective API is not `openai-completions`.
+
+The setting does not enable reasoning capability or modify binding capability
+metadata. For this explicit dialect, the shared request translator sends
+`thinking: { type: "disabled" }` and removes `reasoning_effort` for `off`; for
+explicit `omit`, it removes both fields. Enabled levels use the existing adapter
+behavior. Defaults and all unconfigured providers retain their historical rules.
+Sessions, subagents, and plugin one-shot completions share this translation,
+including retries and output-limit repair. Explicit omission on an opted-in
+relay remains omission even when its binding has no reasoning capability.
+
 Owned by Rust host DB/settings store.
 
 Tables (canonical DDL in [04-data-storage](04-data-storage.md) §4.3–4.4, §4.11):

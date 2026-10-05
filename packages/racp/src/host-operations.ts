@@ -80,6 +80,16 @@ export interface RacpTerminalAccess {
 }
 
 export type RacpHostOperations = {
+  /** Administrator-enabled fixed first-party bot node, never a generic RPC relay. */
+  botNode?: {
+    invoke(method: string, params: Record<string, unknown>, peer: {
+      principal: Principal;
+      connectionId: string;
+      request<T>(method: string, params: unknown, timeoutMs: number): Promise<T>;
+      isClosed(): boolean;
+    }): Promise<unknown>;
+    release(connectionId: string): void;
+  };
   sessions: RacpSessionCatalog;
   projects: RacpProjectCatalog;
   workspace: RacpWorkspaceAccess;

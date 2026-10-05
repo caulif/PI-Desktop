@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { parseArgs, resolveConfig } from "./config.js";
@@ -21,7 +21,7 @@ describe("config", () => {
   it("parses flags with and without values and validates the port", () => {
     expect(parseArgs(["--pair", "--port", "4123", "--data-dir=/x", "--host-core", "/bin/hc"])).toEqual({ pair: true, port: "4123", "data-dir": "/x", "host-core": "/bin/hc" });
     const config = resolveConfig({ "data-dir": "/data", port: "4123", "host-core": "/bin/hc", sidecar: "/s.js", pair: true }, {});
-    expect(config).toMatchObject({ dataDir: "/data", port: 4123, host: "127.0.0.1", hostCoreBinary: "/bin/hc", sidecarEntry: "/s.js", pair: true, logLevel: "info" });
+    expect(config).toMatchObject({ dataDir: resolve("/data"), port: 4123, host: "127.0.0.1", hostCoreBinary: resolve("/bin/hc"), sidecarEntry: resolve("/s.js"), pair: true, logLevel: "info" });
     expect(() => resolveConfig({ port: "70000", "host-core": "/bin/hc", sidecar: "/s.js" }, {})).toThrow(/invalid port/);
     expect(() => resolveConfig({ "host-core": "/bin/hc", sidecar: "/s.js", port: "abc" }, {})).toThrow(/invalid port/);
     expect(resolveConfig({ "host-core": "/bin/hc", sidecar: "/s.js", "log-level": "warn" }, {}).logLevel).toBe("warn");
@@ -35,7 +35,7 @@ describe("identity and credentials", () => {
     expect(first.startsWith("host_")).toBe(true);
     expect(await loadOrCreateHostId(dir)).toBe(first);
     const info = await stat(join(dir, "pi-host", "identity.json"));
-    expect(info.mode & 0o077).toBe(0);
+    if (process.platform !== "win32") expect(info.mode & 0o077).toBe(0);
   });
 
   it("stores devices and pairings hashed, owner-readable, and survives a reload", async () => {
@@ -49,7 +49,7 @@ describe("identity and credentials", () => {
     expect(raw).toContain("ab".repeat(32));
     expect(raw).not.toContain("ef".repeat(32));
     const info = await stat(join(dir, "pi-host", "credentials.json"));
-    expect(info.mode & 0o077).toBe(0);
+    if (process.platform !== "win32") expect(info.mode & 0o077).toBe(0);
 
     const reloaded = new FileCredentialStore(dir);
     expect((await reloaded.findDeviceByTokenHash("ab".repeat(32)))?.deviceId).toBe("dev_1");

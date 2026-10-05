@@ -48,11 +48,13 @@ let pluginModule = null;
 const pending = new Map();
 const invocations = new Map();
 const invocationContext = new AsyncLocalStorage();
+const panelContext = new AsyncLocalStorage();
 let nextCallId = 1;
 
 /** Proxy a host API call to the broker and await its verdict. */
 function call(api, args = []) {
   const invocation = invocationContext.getStore();
+  const panelInvocationId = invocation ? undefined : panelContext.getStore();
   if (invocation && (invocation.controller.signal.aborted || invocations.get(invocation.id) !== invocation)) {
     return Promise.reject(invocation.controller.signal.reason ?? toolAbortedError("Plugin tool invocation finished"));
   }
@@ -60,7 +62,8 @@ function call(api, args = []) {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, invocationId: invocation?.id });
     try {
-      send({ t: "call", id, api, args, ...(invocation ? { invocationId: invocation.id } : {}) });
+      send({ t: "call", id, api, args, ...(invocation ? { invocationId: invocation.id } : {}),
+        ...(panelInvocationId ? { panelInvocationId } : {}) });
     } catch (error) {
       pending.delete(id);
       reject(error);
@@ -657,7 +660,9 @@ onHostMessage((message) => {
     return;
   }
   if (message.t === "call") {
-    void invocationContext.run(undefined, () => handleParentCall(message.method, message.payload, message.invocationId))
+    void invocationContext.run(undefined, () => panelContext.run(
+      message.method === "panel.invoke" ? message.panelInvocationId : undefined,
+      () => handleParentCall(message.method, message.payload, message.invocationId)))
       .then((value) => send({ t: "res", id: message.id, ok: true, value: value ?? null }))
       .catch((error) =>
         send({

@@ -192,6 +192,7 @@ impl Database {
                 archive_legacy_db(path, legacy)?;
                 return Self::open(path);
             }
+            21..=24 => {}
             SCHEMA_VERSION => {}
             other => {
                 return Err(anyhow!(
@@ -224,6 +225,22 @@ impl Database {
         }
         if migrated_version == 20 {
             migrate_v20_to_v21(&conn, path)?;
+        }
+        let mut combined_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if combined_version == 21 {
+            migrate_v21_to_v22(&conn, path)?;
+            combined_version = 22;
+        }
+        if combined_version == 22 {
+            migrate_v22_to_v23(&conn, path)?;
+            combined_version = 23;
+        }
+        if combined_version == 23 {
+            migrate_v23_to_v24(&conn, path)?;
+            combined_version = 24;
+        }
+        if combined_version == 24 {
+            migrate_v24_to_v25(&conn, path)?;
         }
         let db = Self { conn, data_dir };
         db.boot_maintenance()?;

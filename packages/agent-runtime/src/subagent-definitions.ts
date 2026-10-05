@@ -23,6 +23,7 @@ import {
   subagentPinnedProviders,
   OAUTH_AUTH_KIND,
   type SubagentDefinition,
+  type ProviderThinkingRequestProtocol,
 } from "@pi-desktop/shared";
 import {
   capabilitiesFromModelConfig,
@@ -377,6 +378,7 @@ export type SubagentProviderSource = {
   defaultModelId?: string;
   authKind?: string;
   apiStyle?: string;
+  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
 };
 
 /** Loose spelling used when matching a pin against a provider name. */
@@ -532,6 +534,7 @@ export async function resolveSubagentProviders(input: {
       apiKey,
       ...(provider.authKind ? { authKind: provider.authKind } : {}),
       ...(apiStyle ? { apiStyle } : {}),
+      ...(provider.thinkingRequestProtocol ? { thinkingRequestProtocol: provider.thinkingRequestProtocol } : {}),
       supportsReasoning: capabilities.supportsReasoning,
       supportedThinkingLevels: [...capabilities.supportedThinkingLevels],
       ...(modelConfig ? { modelConfig } : {}),

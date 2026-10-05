@@ -104,7 +104,7 @@ pub fn configure(config: &mut Value, input: &Value, cadence: &str, now: i64) -> 
             let schedule: Schedule = serde_json::from_value(schedule.clone())?;
             schedule.validate()?;
             config["schedule"] = serde_json::to_value(schedule)?;
-            if matches!(cadence, "daily" | "weekly") {
+            if matches!(cadence, "hourly_at" | "daily" | "weekly") {
                 config["calendarConfigured"] = json!(true);
             } else if previous.as_ref() != config.get("schedule") {
                 config["calendarConfigured"] = json!(false);
@@ -152,9 +152,14 @@ pub fn reschedule(db: &Database, id: &str, now: i64) -> Result<()> {
         |row| row.get(0),
     )?;
     let mut config: Value = serde_json::from_str(&raw)?;
-    config["nextRunAt"] = json!(task
-        .schedule
-        .and_then(|schedule| schedule.next(&task.cadence, now)));
+    let timezone = crate::plugin_scheduled::timezone_for_task(db, id)?;
+    config["nextRunAt"] = json!(task.schedule.and_then(|schedule| {
+        if let Some(zone) = timezone {
+            schedule.next_in(&task.cadence, now, &zone)
+        } else {
+            schedule.next(&task.cadence, now)
+        }
+    }));
     db.conn().execute(
         "UPDATE scheduled_tasks SET config_json = ?1 WHERE id = ?2",
         params![config.to_string(), id],
@@ -174,6 +179,9 @@ pub fn running(db: &Database, id: &str) -> Result<bool> {
 pub fn due(db: &Database, now: i64) -> Result<Vec<String>> {
     let mut result = Vec::new();
     for task in super::list_tasks(db)? {
+        if crate::plugin_scheduled::is_plugin_task(db, &task.id)? {
+            continue;
+        }
         let Some(next) = task.next_run_at.as_deref().map(crate::db::ts_to_ms) else {
             continue;
         };
@@ -193,6 +201,9 @@ pub fn recover(db: &Database) -> Result<()> {
     // Database boot maintenance owns interruption of orphaned task_runs.
     // Restart starts from future occurrences; downtime never creates a burst.
     for task in super::list_tasks(db)? {
+        if crate::plugin_scheduled::is_plugin_task(db, &task.id)? {
+            continue;
+        }
         if task.schedule.is_some() {
             reschedule(db, &task.id, now_ms())?;
         }

@@ -157,6 +157,7 @@ const commandShell: CommandShellOption = {
 function createRuntime(
   overrides: Partial<{
     provider: RuntimeProviderConfig;
+    toolPolicy: "unrestricted" | "plugin-bot-scoped";
     mode: Mode | "chat";
     thinkingLevel: SessionThinkingLevel;
     history: UiMessage[];
@@ -182,6 +183,7 @@ function createRuntime(
   return new DesktopAgentRuntime({
     host: (overrides.host ?? { call: vi.fn(), onNotification: vi.fn(() => () => {}) }) as never,
     sessionId: "session-1",
+    toolPolicy: overrides.toolPolicy,
     mode: overrides.mode === "chat" ? "plan" : overrides.mode ?? "agent",
     turnId: overrides.turnId,
     provider: overrides.provider ?? provider,
@@ -204,6 +206,77 @@ function createRuntime(
     onEvent: overrides.onEvent ?? vi.fn(),
   });
 }
+
+it("scoped Bot sessions expose only their reviewed workbench tool", async () => {
+  const runtime = createRuntime({
+    toolPolicy: "plugin-bot-scoped",
+    pluginTools: [
+      { name: "plugin_local_pi_bot_bot_workbench", description: "Bot workbench", parameters: {} },
+      { name: "plugin_other_tool", description: "Other plugin", parameters: {} },
+    ],
+  });
+  const tools = [...(runtime as any).toolCatalog.keys()];
+  expect(tools).toContain("plugin_local_pi_bot_bot_workbench");
+  expect(tools).toContain("ToolSearch");
+  for (const name of ["Bash", "Read", "Glob", "Grep", "Write", "Edit", "Skill", "Task", "TaskWait", "new_context", "plugin_other_tool"]) {
+    expect(tools).not.toContain(name);
+  }
+  const search = (runtime as any).toolCatalog.get("ToolSearch");
+  for (const query of ["Glob", "Skill", "Task", "new_context"]) {
+    const result = await search.execute("search-id", { query });
+    expect(result.details.matches).toEqual([]);
+    expect(result.details.activated).toEqual([]);
+  }
+  const prompt = (runtime as any).agent.state.systemPrompt as string;
+  expect(prompt).toContain("Use only the pi-bot bot_workbench tool");
+  expect(prompt).not.toContain("Use the Task tool");
+  expect(prompt).not.toContain("prefer the Read, Grep, and Glob tools");
+  await runtime.dispose();
+});
+
+it("unrestricted runtimes cannot be reused after their Host policy narrows", async () => {
+  const runtime = createRuntime();
+  const config = { mode: "agent" as const, provider, thinkingLevel: "medium" as const, commandShell };
+  expect(runtime.matches(config)).toBe(true);
+  expect(runtime.matches({ ...config, toolPolicy: "plugin-bot-scoped" })).toBe(false);
+  await runtime.dispose();
+});
+
+it("scoped Bot assignments start without the previous group's model context", async () => {
+  const priorMessage: UiMessage = {
+    id: "group-a-user", role: "user", content: "GROUP_A_PRIVATE_CONTENT",
+    createdAt: "2026-09-28T00:00:00Z", status: "complete",
+  };
+  const first = createRuntime({ toolPolicy: "plugin-bot-scoped" });
+  const firstPrompt = vi.spyOn((first as any).agent as Agent, "prompt").mockResolvedValue();
+  await first.prompt("GROUP_A_PRIVATE_CONTENT", "group-a-user", "group-a-turn");
+  expect(firstPrompt).toHaveBeenCalledWith("GROUP_A_PRIVATE_CONTENT");
+  expect(first.matches({
+    toolPolicy: "plugin-bot-scoped", mode: "agent", provider,
+    thinkingLevel: "medium", commandShell,
+  })).toBe(false);
+  await first.dispose();
+
+  // The Host retains audit history; only explicit current-assignment sharing
+  // may become model context after the next scoped launch.
+  const second = createRuntime({
+    toolPolicy: "plugin-bot-scoped", history: [priorMessage],
+    compaction: {
+      id: "group-a-compaction", summary: "GROUP_A_PRIVATE_SUMMARY",
+      throughMessageId: "group-a-user", tokensBefore: 1000, retainedTail: [],
+      createdAt: "2026-09-28T00:01:00Z",
+    },
+  });
+  const agent = (second as any).agent as Agent;
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_CONTENT");
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_SUMMARY");
+  expect((second as any).activeCompaction).toBeUndefined();
+  const prompt = vi.spyOn(agent, "prompt").mockResolvedValue();
+  await second.prompt("GROUP_B_CURRENT_ASSIGNMENT", "group-b-user", "group-b-turn");
+  expect(prompt).toHaveBeenCalledWith("GROUP_B_CURRENT_ASSIGNMENT");
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_CONTENT");
+  await second.dispose();
+});
 
 /** Minimal pi-ai assistant message; overrides carry the shape under test. */
 function assistantMessage(overrides: {

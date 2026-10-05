@@ -736,6 +736,7 @@ test("plugin-only session collaboration operations stay off the external MCP sur
     "session/collaboration/status",
     "session/collaboration/list",
     "session/collaboration/result",
+    "session/collaboration/lookup",
     "session/collaboration/cancel",
   ];
   assert.deepEqual(

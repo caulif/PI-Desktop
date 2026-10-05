@@ -53,6 +53,8 @@ type AppError = {
 | `APP_DEGRADED` | 是的 | 应用程序以有限的功能运行 |
 | `INTERNAL` | 也许 | 意外的内部故障 |
 | `INVALID_ARGUMENT` | 不 | 请求 schema/args 无效，包括错误 file/directory 类型的本机工具路径 |
+| `PERMISSION_DENIED` | 不 | 会话工具策略或精确插件权限拒绝该操作 |
+| `STALE_PROMPT_CLAIM` | 不 | prompt claim 属于旧 Host epoch 或已失效；先查询已保存结果，不重复发送 |
 | `INVALID_PARAMS` | 不 | host-core RPC 参数校验失败（数字码 `1002`）；sidecar 和渲染器原样透传 |
 | `UNAUTHORIZED` | 不 | capability/auth 边界拒绝呼叫 |
 | `NOT_FOUND` | 不 | 未找到实体 |

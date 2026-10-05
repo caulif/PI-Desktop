@@ -94,6 +94,8 @@ CREATE TABLE sessions (
                                           'high', 'xhigh', 'max', 'omit')),
   permission_mode TEXT NOT NULL DEFAULT 'inherit'
                 CHECK (permission_mode IN ('inherit', 'ask', 'accept-edits', 'auto')),
+  tool_policy TEXT NOT NULL DEFAULT 'unrestricted'
+                CHECK (tool_policy IN ('unrestricted', 'plugin-bot-scoped')),
   source      TEXT,
   deleted_at  INTEGER,
   pinned      INTEGER NOT NULL DEFAULT 0,
@@ -255,6 +257,62 @@ CREATE TABLE task_runs (
   ended_at   INTEGER
 );
 CREATE INDEX idx_task_runs ON task_runs(task_id, started_at DESC);
+
+CREATE TABLE plugin_schedule_bindings (
+  task_id TEXT PRIMARY KEY REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+  plugin_id TEXT NOT NULL,
+  external_key TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision > 0),
+  timezone TEXT NOT NULL,
+  authorization_hash TEXT,
+  authorized_session_id TEXT,
+  goal_hash TEXT,
+  prompt_template_hash TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(plugin_id, external_key)
+);
+
+CREATE TABLE plugin_schedule_occurrences (
+  occurrence_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+  definition_revision INTEGER NOT NULL,
+  scheduled_for INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'accepted', 'skipped')),
+  skip_reason TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  retry_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(task_id, scheduled_for)
+);
+CREATE INDEX idx_plugin_schedule_pending ON plugin_schedule_occurrences(state, scheduled_for);
+CREATE TABLE plugin_schedule_retries (
+  request_intent_id TEXT PRIMARY KEY,
+  occurrence_id TEXT NOT NULL REFERENCES plugin_schedule_occurrences(occurrence_id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE plugin_automation_sessions (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  plugin_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE plugin_automation_intents (
+  request_intent_id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  occurrence_id TEXT REFERENCES plugin_schedule_occurrences(occurrence_id),
+  trigger_key TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('requested', 'accepted', 'rejected', 'unknown')),
+  rejection_code TEXT,
+  turn_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE secrets_meta (
   secret_ref TEXT PRIMARY KEY,

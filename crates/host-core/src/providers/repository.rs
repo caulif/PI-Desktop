@@ -36,6 +36,7 @@ pub(crate) fn provider_from_row(
             .or(legacy_model_id),
         models,
         api_style: row.get(10)?,
+        thinking_request_protocol: config_thinking_request_protocol(&config_raw),
         supports_reasoning: row
             .get::<_, String>(11)
             .ok()
@@ -86,6 +87,10 @@ pub fn create_provider(
 ) -> Result<ProviderPublic> {
     let id = Uuid::new_v4().to_string();
     let now = now_ms();
+    validate_thinking_request_protocol(
+        input.thinking_request_protocol.as_deref(),
+        input.api_style.as_deref(),
+    )?;
     // Validate before any side effect: a rejected alias must not leave a
     // stored secret behind.
     if let Some(models) = input.models.as_deref() {
@@ -117,6 +122,10 @@ pub fn create_provider(
             temperature: input.temperature,
         },
     )?;
+    let config_json = match input.thinking_request_protocol.as_deref() {
+        Some(value) => config_with_thinking_request_protocol(&config_json, Some(value))?,
+        None => config_json,
+    };
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => config_with_oauth_account_label(&config_json, label)?,
         None => config_json,
@@ -173,6 +182,10 @@ pub(crate) fn create_provider_with_id(
     if id.trim().is_empty() || id.len() > 128 {
         bail!("PROVIDER_INVALID: provider id is invalid");
     }
+    validate_thinking_request_protocol(
+        input.thinking_request_protocol.as_deref(),
+        input.api_style.as_deref(),
+    )?;
     if db
         .conn()
         .query_row("SELECT 1 FROM providers WHERE id = ?1", params![id], |_| {
@@ -212,6 +225,10 @@ pub(crate) fn create_provider_with_id(
             temperature: input.temperature,
         },
     )?;
+    let config_json = match input.thinking_request_protocol.as_deref() {
+        Some(value) => config_with_thinking_request_protocol(&config_json, Some(value))?,
+        None => config_json,
+    };
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => config_with_oauth_account_label(&config_json, label)?,
         None => config_json,
@@ -261,6 +278,15 @@ pub fn update_provider(
     let Some(current) = get_provider(db, secrets, &input.id)? else {
         return Ok(None);
     };
+    let effective_thinking_protocol = input
+        .thinking_request_protocol
+        .as_ref()
+        .map(|value| value.as_deref())
+        .unwrap_or(current.thinking_request_protocol.as_deref());
+    validate_thinking_request_protocol(
+        effective_thinking_protocol,
+        input.api_style.as_deref().or(current.api_style.as_deref()),
+    )?;
     // A plugin-declared row is refreshed from its manifest on every load, so a
     // generic edit would be silently reverted. The plugin path owns it.
     if let Some(owner) = current.owner_plugin_id.as_deref() {
@@ -325,6 +351,13 @@ pub fn update_provider(
             temperature: input.temperature,
         },
     )?;
+    let config_json = match input.thinking_request_protocol.as_ref() {
+        Some(value) => Some(config_with_thinking_request_protocol(
+            config_json.as_deref().unwrap_or(&raw_config),
+            value.as_deref(),
+        )?),
+        None => config_json,
+    };
     // An empty label clears the badge, which is what logout sends.
     let config_json = match input.oauth_account_label.as_deref() {
         Some(label) => Some(config_with_oauth_account_label(

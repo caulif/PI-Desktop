@@ -1,6 +1,99 @@
 use super::*;
 
 #[test]
+fn official_v21_and_legacy_bot_v23_migrate_without_losing_user_data() {
+    for version in [21, 23] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pi.sqlite");
+        let session_id = {
+            let db = Database::open(&path).unwrap();
+            let session = crate::sessions::create_session(
+                &db,
+                Some("migration retained".into()),
+                Some("agent".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            db.conn().execute("INSERT INTO artifacts(session_id,path,op,updated_at) VALUES (?1,'retained.md','write',1)", params![session.id]).unwrap();
+            if version == 23 {
+                db.conn().execute("INSERT INTO plugin_automation_sessions(session_id,plugin_id,created_at) VALUES (?1,'local.pi-bot',1)",params![session.id]).unwrap();
+            }
+            session.id
+        };
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+            if version == 21 {
+                conn.execute_batch("DROP TABLE plugin_schedule_retries; DROP TABLE plugin_automation_intents; DROP TABLE plugin_schedule_occurrences; DROP TABLE plugin_schedule_bindings; DROP TABLE plugin_automation_sessions; ALTER TABLE sessions DROP COLUMN tool_policy;").unwrap();
+            } else {
+                conn.execute_batch("DROP TABLE session_todo; ALTER TABLE sessions DROP COLUMN todo_revision; ALTER TABLE sessions DROP COLUMN todo_updated_at; ALTER TABLE turn_queue DROP COLUMN user_message_id; ALTER TABLE turn_queue DROP COLUMN voice_origin_json;").unwrap();
+            }
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(schema_version(db.conn()), SCHEMA_VERSION);
+        assert_readable_migration_backup(&path, version);
+        assert_eq!(
+            db.conn()
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(!db
+            .conn()
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap());
+        let (title, policy): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT title,tool_policy FROM sessions WHERE id=?1",
+                params![session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "migration retained");
+        assert_eq!(
+            policy,
+            if version == 23 {
+                "plugin-bot-scoped"
+            } else {
+                "unrestricted"
+            }
+        );
+        assert_eq!(
+            db.conn()
+                .query_row(
+                    "SELECT path FROM artifacts WHERE session_id=?1",
+                    params![session_id],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "retained.md"
+        );
+        assert!(table_exists(db.conn(), "session_todo"));
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM pragma_table_info('turn_queue') WHERE name IN ('user_message_id','voice_origin_json')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        drop(db);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(schema_version(reopened.conn()), SCHEMA_VERSION);
+        assert_eq!(
+            reopened
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE session_id=?1",
+                    params![session_id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
 fn project_memory_is_path_scoped_and_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("first");

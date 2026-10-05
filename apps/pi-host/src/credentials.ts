@@ -10,11 +10,18 @@ type CredentialFile = { devices: DeviceRecord[]; pairings: PairingRecord[] };
 const FILE_MODE = 0o600;
 
 async function readJson<T>(path: string): Promise<T | null> {
+  let content: string;
   try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
+    content = await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
+  }
+  try {
+    return JSON.parse(content) as T;
+  } catch {
+    // Native parse errors can quote private credential fragments.
+    throw new Error("Private Host credential JSON is invalid");
   }
 }
 

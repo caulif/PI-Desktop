@@ -1,5 +1,57 @@
 # 04. E2E Test Plan
 
+## E2E-HOST-isolated-calendar-preview (ADR 0321)
+
+Run `node scripts/dev-scheduled-calendar-preview.mjs --host <candidate-host>`
+against the candidate executable. The runner creates only dedicated temporary
+profiles and invokes actual native NDJSON Host RPC. It persists a report with
+source HEAD, binary SHA-256, returned calendars and outcomes in that profile.
+
+Store disabled plugin bindings for New York spring-gap and autumn-fold daily
+calendars; inspect two projected UTC/local-offset points and exact stored task
+identity. Compare the complete binding before/after preview, reject other plugin
+ownership, stale revision, malformed cursor, count bounds and extra fields, and
+cold restart to verify the same calendar with the binding still disabled. Reject
+a non-dedicated diagnostic profile before any SQLite file is opened, and reject
+the diagnostic RPC without opt-in in a separate ordinary isolated profile.
+
+The SQLite integration companions assert `total_changes()` remains unchanged.
+This is actual Host calendar evidence with fixture definitions, zero prompts
+and zero model calls. It is neither real timer delivery nor real-model Routine
+execution, native user authorization, or human approval evidence.
+
+## E2E-PLUGIN-native-navigation (ADR 0310)
+
+Run `node scripts/e2e-plugin-native-navigation.mjs` against the task candidate's
+build. The probe sets `PI_DESKTOP_PLUGIN_NAVIGATION_PROBE=1` only in its isolated
+process to skip the native quit confirmation and allow a real graceful restart
+to flush Chromium navigation storage. Optional `PI_DESKTOP_NATIVE_PLUGIN_PATH`
+loads the actual pi-bot release with explicitly seeded UI-only Bot/Conversation
+records: this verifies its native shell, theme and file-details presentation,
+not provisioning or model execution. Host chrome and guest WebContentsView
+screenshots are captured separately because CDP does not composite child views.
+Embedded guest capture can return a blank frame even when DOM/context assertions
+pass. Inspect those files before claiming visual acceptance; a blank PNG provides
+no visual evidence. The automated result proves only its interaction assertions.
+The actual guest must also report `active: true` after asynchronous open: a
+rendered DOM in an unattached WebContentsView is insufficient. Focused component
+effects cover delayed open, an overlay arriving before open completes, and a
+development reload replacing a mounted view (`plugin-view-open-visibility.test.mjs`).
+The measured native main surface begins at the Host titlebar's bottom edge,
+reserving its shared toolbar height. Native composition must not cover the
+Host route title, back action or window drag lane.
+
+Run the probe against the task candidate's
+built Electron app, reusing the host runtime/dependencies and isolating both
+`PI_DESKTOP_DATA_DIR` and Chromium user-data. Install a fixture through the actual
+development-plugin permission boundary. Verify the peer section, main view
+activation/subject, literal labels, sandbox, host Session identity preservation,
+switching/return navigation, scope/permission failure, modal occlusion, theme
+context changes and plugin-disable cleanup. A restart restores navigation only;
+it never sends a prompt. Unit/IPC companions are `plugin-native-navigation.test.mjs`
+and `plugin-navigation-ipc.test.mjs`. A browser-only mock or standalone HTML
+does not constitute this Electron acceptance.
+
 > Scope: MVP acceptance scenarios plus current shipped product increments for PI-Desktop
 > Status: Accepted (protocol/Electron automation is active; full desktop Playwright remains planned)
 > Cross-references: [acceptance-criteria](02-acceptance-criteria.md) · [milestones](01-mvp-milestones.md) · [ai-development-workflow](03-ai-development-workflow.md) · [change-checklist](05-change-checklist.md)
@@ -16570,6 +16622,19 @@ renderer's durable transcript reads. No real model or provider is contacted.
 - **Milestone:** M6+
 - **Status:** Unit and source-contract covered (`update-cache.test.mjs`, `auto-update.test.mjs`); Windows installer/E2E validation remains required.
 
+## E2E-HEADLESS-first-party-bot
+
+Use an isolated data directory and a non-root account. Start the actual Host core
+and Node sidecar without Electron; register pi-bot's real lifecycle, configured
+project and deterministic test provider. Verify a user prompt reaches a real turn,
+Host-attributed bot_workbench callback records a versioned result, native tool
+approval blocks until an exact one-time response, and shutdown cleans resources.
+A deterministic provider proves protocol integration only; separately run bounded
+real-model evaluation and record model/cost/stop conditions before product acceptance.
+Restart/resync must not resend an unknown or already accepted prompt. Verify
+Routine due delivery with the browser closed and symlink/descriptor file-boundary
+failures. Unit companions cover forged authority, stale turns, exact consent hashes,
+registered scope/secret denial and scoped atomic writes.
 ## E2E-OAUTH-pi-installation-identity-and-standalone-load
 
 - **Preconditions**: Pi 1.0.1; temporary Host secrets and account fixtures;

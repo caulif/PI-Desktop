@@ -3,6 +3,7 @@ import { assertLinuxGlibcSupported } from "../linux-glibc";
 import { HostProcess } from "../host-process";
 import type { Logger } from "../logger";
 import type { PersistenceOutbox } from "../persistence-outbox";
+import type { PluginScheduleDisableOutbox } from "../plugin-schedule-disable-outbox";
 import type { PluginRuntime } from "../plugin-runtime";
 import type { UserMcpRuntime } from "../user-mcp";
 import type { RuntimeState } from "./context";
@@ -13,6 +14,7 @@ export type HostRuntimeDependencies = {
   dataDir: string;
   logger: Logger;
   persistenceOutbox: PersistenceOutbox;
+  scheduleDisableOutbox: PluginScheduleDisableOutbox;
   activeToolCalls: Map<string, any>;
   activeToolCallKey: (sessionId: string, toolCallId: string) => string;
   sessionProjects: Map<string, string | null>;
@@ -48,6 +50,7 @@ export function createHostRuntime({
   dataDir,
   logger,
   persistenceOutbox,
+  scheduleDisableOutbox,
   activeToolCalls,
   activeToolCallKey,
   sessionProjects,
@@ -367,6 +370,7 @@ export function createHostRuntime({
   runtimeState.host = h;
   try {
     await h.handshake();
+    await scheduleDisableOutbox.flush(h);
     logger.app("runtime", "info", "host-core handshake ok", {
       data: { generation: h.generation },
     });

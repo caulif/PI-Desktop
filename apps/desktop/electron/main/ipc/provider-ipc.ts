@@ -6,6 +6,7 @@ import {
   type ModelBinding,
   type ProviderReorderInput,
   type OAuthRespondInput,
+  type ProviderThinkingRequestProtocol,
 } from "@pi-desktop/shared";
 import { OAUTH_AUTH_KIND, type VendorOAuth } from "../oauth";
 import { probeProviderEndpoint } from "../model-discovery";
@@ -49,6 +50,7 @@ type RuntimeProvider = {
   apiKey?: string;
   authKind?: string;
   apiStyle?: string;
+  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
   hasSecret?: boolean;
   hasOauth?: boolean;
   oauthAccountLabel?: string;

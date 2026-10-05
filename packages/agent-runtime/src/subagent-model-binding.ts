@@ -5,6 +5,7 @@ import {
   createProviderModels,
   providerRequestFetch,
   providerRequestKey,
+  withThinkingRequestTransport,
   type RuntimeProviderConfig,
 } from "./provider-binding.js";
 import {
@@ -101,7 +102,7 @@ export function subagentModelBinding(opts: {
       return createProviderRetryStream(
         m,
         context,
-        requestOptions,
+        withThinkingRequestTransport(opts.provider, m, opts.thinkingLevel, requestOptions),
         (retryOptions) => accountModelStream(m, () =>
           omitThinking
             ? models.stream(omitThinkingModel, context, retryOptions)

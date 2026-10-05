@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   powerMonitor,
   session,
@@ -49,6 +50,9 @@ import { hasSingleInstanceLock, isDevelopmentBuild } from "./installation";
 import { getStorageBootstrap } from "./storage/bootstrap";
 import { createPlanUiProbe } from "./plan-ui-probe";
 import { registerIpcHandlers } from "./ipc/register";
+import { invokePluginSchedule } from "./plugin-schedule-control";
+import { invokePluginVerification } from "./plugin-verification-control";
+import { invokePluginPrompt } from "./plugin-prompt-control";
 import { createVoiceService } from "./voice-service";
 import { MicrophoneLeaseRegistry } from "./live-voice/microphone-lease";
 import { createLiveCallService } from "./live-voice/runtime";
@@ -756,6 +760,7 @@ const { startHost } = createHostRuntime({
   dataDir,
   logger,
   persistenceOutbox,
+  scheduleDisableOutbox: pluginServices.scheduleDisableOutbox,
   activeToolCalls,
   activeToolCallKey,
   sessionProjects,
@@ -1014,6 +1019,34 @@ registerApplicationStartup({
   bootHostStatus,
   flushPendingApplicationMenuCommands,
   invokeSessionCollaboration: sessionCollaboration.invoke,
+  invokePluginVerification: (input) => invokePluginVerification(input, async (method, params) => {
+    const host = getHost();
+    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
+    return host.call(method, params);
+  }, async (check) => {
+    const options = {
+      type: "warning" as const,
+      message: "Approve this exact project verification command?",
+      detail: `${JSON.stringify(check, null, 2)}\n\nThis program runs with your OS account permissions. Fixed arguments and hashes do not sandbox project code. Approval is limited to this plugin, session, project and expiry.`,
+      buttons: ["Deny", "Approve exact check"], defaultId: 0, cancelId: 0, noLink: true,
+    };
+    const window = getMainWindow();
+    const result = window && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+    return result.response === 1;
+  }),
+  invokePluginSchedule: (input, invoke) => invokePluginSchedule(input, async (method, params) => {
+    const host = getHost();
+    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
+    return host.call(method, params);
+  }, invoke, (pluginId, requestIntentId, token, routineId, sessionId, contentHash) =>
+    plugins.consumeManualRoutineAuthorization(pluginId, requestIntentId, token,
+      routineId, sessionId, contentHash)),
+  invokePluginPrompt: (input, invoke) => invokePluginPrompt(input, async (method, params) => {
+    const host = getHost();
+    if (!host) throw Object.assign(new Error("host unavailable"), { code: "HOST_UNAVAILABLE" });
+    return host.call(method, params);
+  }, invoke),
   onSessionQueueChange: () => {
     void sessionCollaboration.drain().catch((error: unknown) => {
       logger.app("runtime", "warn", "session callback drain failed", { data: String(error) });

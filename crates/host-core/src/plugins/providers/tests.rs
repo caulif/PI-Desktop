@@ -91,9 +91,7 @@ fn declaration_manifest(providers: Value, permissions: Value) -> Value {
 #[test]
 fn a_new_database_carries_the_owner_column_at_the_current_schema_version() {
     let (_dir, db, _secrets) = test_context();
-    // v17 added the owner column, v18 the turn-queue priority column, v19 session omit, and v21 the session Todo checklist; a fresh
-    // database is stamped with the newest, so the column set is the current one.
-    assert_eq!(SCHEMA_VERSION, 21);
+    // A fresh database is stamped with the newest schema and includes the provider owner column.
     let version: i64 = db
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -363,6 +361,7 @@ fn a_user_row_is_never_adopted_or_removed() {
             oauth_account_label: None,
             headers: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             context_window: None,
             max_output_tokens: None,
@@ -415,6 +414,7 @@ fn the_user_path_refuses_a_plugin_owned_row() {
             oauth_account_label: None,
             headers: None,
             supports_reasoning: None,
+            thinking_request_protocol: None,
             supported_thinking_levels: None,
             context_window: None,
             max_output_tokens: None,

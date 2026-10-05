@@ -173,7 +173,7 @@ test("a panel call keeps resolving the visible workspace", async (t) => {
   assert.equal(existsSync(join(other, "notes/from-panel.md")), false);
 });
 
-test("a session the host does not track falls back to the visible workspace", async (t) => {
+test("a session the host does not track cannot borrow the visible workspace", async (t) => {
   const visible = makeProject("visible");
   const other = makeProject("other");
   const { tool } = await harness(t, {
@@ -182,9 +182,10 @@ test("a session the host does not track falls back to the visible workspace", as
     sessions: { "session-b": other },
   });
 
-  await tool.execute({ path: "notes/unknown.md", content: "fallback" }, { sessionId: "session-c" });
+  await assert.rejects(tool.execute({ path: "notes/unknown.md", content: "fallback" }, { sessionId: "session-c" }),
+    (error) => error.code === "NOT_FOUND");
 
-  assert.equal(readFileSync(join(visible, "notes/unknown.md"), "utf8"), "fallback");
+  assert.equal(existsSync(join(visible, "notes/unknown.md")), false);
   assert.equal(existsSync(join(other, "notes/unknown.md")), false);
 });
 

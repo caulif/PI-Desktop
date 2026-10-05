@@ -170,6 +170,27 @@ fn turn_bound_result_and_callback_are_durable_and_exactly_once() {
     .unwrap();
     assert_eq!(result["ready"], true);
     assert_eq!(result["message"]["result"], "Authoritative final result");
+    let lookup = handle(
+        &db,
+        "session.collaboration.lookup",
+        &json!({
+            "messageId": message.id, "pluginId": "pi.session-orchestrator"
+        }),
+    )
+    .unwrap();
+    assert_eq!(lookup["ready"], true);
+    assert_eq!(lookup["turnId"], turn);
+    assert_eq!(lookup["status"], "completed");
+    assert_eq!(lookup["replyToMessageId"], message.id);
+    assert_eq!(lookup["completionMessageId"], receipt.id);
+    assert!(handle(
+        &db,
+        "session.collaboration.lookup",
+        &json!({
+            "messageId": message.id, "pluginId": "other-plugin"
+        })
+    )
+    .is_err());
     drop(db);
     let db = Database::open(&path).unwrap();
     let detail = sessions::get_session(&db, &child).unwrap().unwrap();
@@ -178,6 +199,17 @@ fn turn_bound_result_and_callback_are_durable_and_exactly_once() {
         parent
     );
     assert_eq!(get(&db, &message.id).unwrap().unwrap().status, "completed");
+    assert_eq!(
+        handle(
+            &db,
+            "session.collaboration.lookup",
+            &json!({
+                "messageId": message.id, "pluginId": "pi.session-orchestrator"
+            })
+        )
+        .unwrap()["turnId"],
+        turn
+    );
     assert_eq!(
         get(&db, &receipt.id).unwrap().unwrap().status,
         "interrupted"

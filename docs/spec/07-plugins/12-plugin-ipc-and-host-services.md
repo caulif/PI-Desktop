@@ -1,5 +1,29 @@
 # 12. Plugin IPC and Host Services
 
+## Isolated native calendar diagnostic (ADR 0321)
+
+`scheduled.devCalendarPreview` is a native Host development RPC, never a Plugin
+SDK service, plugin bridge handler, or MCP tool. Its `pluginId` is supplied by
+the native diagnostic runner; it must not be forwarded from plugin arguments.
+It accepts `externalKey`, `expectedDefinitionRevision`, explicit RFC3339 `after`,
+and `count` (1-16). Unknown fields and stale/missing owned bindings are rejected.
+It projects the stored cadence, schedule and IANA timezone with the production
+calendar algorithm and returns identity/revision, stored `enabled`, normalized
+millisecond UTC `after`, and `points[{scheduledFor,localTime}]` with UTC and local
+offset timestamps. It does not return authorization or execution capabilities.
+
+The explicit `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` must equal the canonical actual
+profile directory, which must already exist as a direct child of the OS temporary
+directory named `pi-bot-calendar-preview-*`. The Host checks this before opening
+SQLite when opt-in is present, and checks the actual main database file again on
+each diagnostic RPC. Default/production profiles, mismatched paths, nested
+profiles and database redirects are refused. No opt-in means the RPC is denied.
+Normal launches without opt-in preserve their existing startup behavior.
+
+Preview permits disabled bindings without consent and performs no writes,
+rescheduling, occurrence creation, timer delivery or prompt admission. Native
+calendar projection is distinct from actual Routine execution acceptance.
+
 ## 1. Goals
 
 Complete the plugin-related host services and UI IPC so implementation does not rely on ad-hoc conventions.

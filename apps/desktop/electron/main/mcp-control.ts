@@ -4,6 +4,9 @@ import { isIP } from "node:net";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SESSION_COLLABORATION_OPERATIONS } from "./session-collaboration-control";
+import { PLUGIN_SCHEDULE_OPERATIONS } from "./plugin-schedule-control";
+import { PLUGIN_PROMPT_INVALIDATE, PLUGIN_PROMPT_LOOKUP, PLUGIN_STEER } from "./plugin-prompt-control";
+import { PLUGIN_VERIFICATION_OPERATIONS } from "./plugin-verification-control";
 
 /** A small JSON Schema subset used by MCP's tools/list response. */
 export type McpJsonSchema = {
@@ -39,7 +42,7 @@ export type McpControlInvokeInput = {
   /** Internal origin used to keep plugin background work from stealing focus. */
   source?: "mcp" | "plugin";
   /** Supplied only by PluginRuntime, never copied from plugin/MCP arguments. */
-  pluginContext?: { pluginId: string; sessionId?: string; turnId?: string; invocationId?: string };
+  pluginContext?: { pluginId: string; sessionId?: string; turnId?: string; invocationId?: string; panelAuthorized?: boolean };
   signal?: AbortSignal;
 };
 
@@ -732,15 +735,22 @@ export function createMcpControlController(options: {
   channels: Readonly<Record<string, string>>;
   invoke: IpcInvoke;
   invokeSessionCollaboration?: (input: McpControlInvokeInput) => Promise<unknown>;
+  invokePluginSchedule?: (input: McpControlInvokeInput) => Promise<unknown>;
+  invokePluginPrompt?: (input: McpControlInvokeInput) => Promise<unknown>;
+  invokePluginVerification?: (input: McpControlInvokeInput) => Promise<unknown>;
   onOperationComplete?: (
     operation: McpControlOperation,
     result: unknown,
     args: readonly unknown[],
     source?: McpControlInvocationSource,
+    input?: McpControlInvokeInput,
   ) => void | Promise<void>;
 }): McpControlController {
   const operations = [...createMcpControlOperations(options.channels),
-    ...(options.invokeSessionCollaboration ? SESSION_COLLABORATION_OPERATIONS : [])];
+    ...(options.invokeSessionCollaboration ? SESSION_COLLABORATION_OPERATIONS : []),
+    ...(options.invokePluginSchedule ? PLUGIN_SCHEDULE_OPERATIONS : []),
+    ...(options.invokePluginVerification ? PLUGIN_VERIFICATION_OPERATIONS : []),
+    ...(options.invokePluginPrompt ? [PLUGIN_PROMPT_LOOKUP, PLUGIN_PROMPT_INVALIDATE, PLUGIN_STEER] : [])];
   const operationById = new Map(operations.map((operation) => [operation.id, operation]));
   return {
     operations,
@@ -769,8 +779,17 @@ export function createMcpControlController(options: {
       const sanitized = args.map((value) => stripSecretMaterial(value)) as unknown[];
       const result = operation.channel === "internal:session-collaboration"
         ? await options.invokeSessionCollaboration!({ ...input, args: sanitized })
-        : await options.invoke(operation.channel, sanitized);
-      await options.onOperationComplete?.(operation, result, sanitized, input.source);
+        : operation.channel === "internal:plugin-verification"
+          ? await options.invokePluginVerification!({ ...input, args: sanitized })
+        : operation.channel === "internal:plugin-schedule"
+          ? await options.invokePluginSchedule!({ ...input, args: sanitized })
+          : options.invokePluginPrompt && (operation.channel === "internal:plugin-prompt"
+            || (operation.id === "agent/prompt" && input.source === "plugin"
+              && sanitized[0] !== null && typeof sanitized[0] === "object"
+              && Object.hasOwn(sanitized[0], "requestIntentId")))
+            ? await options.invokePluginPrompt({ ...input, args: sanitized })
+          : await options.invoke(operation.channel, sanitized);
+      await options.onOperationComplete?.(operation, result, sanitized, input.source, input);
       return result;
     },
   };

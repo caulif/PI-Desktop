@@ -524,6 +524,7 @@ export function createSidecarRuntime({
       apiKey,
       ...(provider.authKind ? { authKind: provider.authKind } : {}),
       ...(provider.apiStyle ? { apiStyle: provider.apiStyle } : {}),
+      ...(provider.thinkingRequestProtocol ? { thinkingRequestProtocol: provider.thinkingRequestProtocol } : {}),
       supportsReasoning: capabilities.supportsReasoning,
       supportedThinkingLevels: [...capabilities.supportedThinkingLevels],
       ...(modelConfig ? { modelConfig } : {}),

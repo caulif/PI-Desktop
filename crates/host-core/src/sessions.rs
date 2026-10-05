@@ -70,6 +70,18 @@ fn default_permission_mode() -> String {
     "inherit".to_string()
 }
 
+fn default_tool_policy() -> String {
+    "unrestricted".to_string()
+}
+
+fn validate_tool_policy(policy: &str) -> Result<()> {
+    if matches!(policy, "unrestricted" | "plugin-bot-scoped") {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid toolPolicy"))
+    }
+}
+
 fn validate_permission_mode(mode: &str) -> Result<()> {
     if is_valid_permission_mode(mode) {
         Ok(())
@@ -114,6 +126,8 @@ pub struct SessionSummary {
     pub thinking_level: String,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    #[serde(default = "default_tool_policy")]
+    pub tool_policy: String,
     pub updated_at: String,
     pub created_at: String,
     /// True when this session is the transcript owned by a scheduled-task run.
@@ -1219,7 +1233,7 @@ fn session_created_at(db: &Database, session_id: &str) -> Result<String> {
 
 const SUMMARY_SELECT: &str =
     "SELECT s.id, s.title, s.last_seq, p.path, s.model_id, s.provider_id, s.mode,
-            s.thinking_level, s.permission_mode, s.updated_at, s.created_at,
+            s.thinking_level, s.permission_mode, s.tool_policy, s.updated_at, s.created_at,
             EXISTS (SELECT 1 FROM task_runs r WHERE r.session_id = s.id) AS scheduled_run
      FROM sessions s LEFT JOIN projects p ON p.id = s.project_id
      WHERE s.deleted_at IS NULL";
@@ -1235,10 +1249,9 @@ pub(crate) fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sess
         mode: row.get(6)?,
         thinking_level: row.get(7)?,
         permission_mode: row.get(8)?,
-        updated_at: ms_to_ts(row.get(9)?),
-        created_at: ms_to_ts(row.get(10)?),
-        // Read by name: search and listing build their own column lists, so the
-        // alias keeps this mapper independent of any one query's column order.
+        tool_policy: row.get(9)?,
+        updated_at: ms_to_ts(row.get(10)?),
+        created_at: ms_to_ts(row.get(11)?),
         scheduled_run: row.get("scheduled_run")?,
     })
 }
@@ -1313,6 +1326,7 @@ pub struct SessionCreateOptions {
     pub project_path: Option<String>,
     pub thinking_level: Option<String>,
     pub permission_mode: Option<String>,
+    pub tool_policy: Option<String>,
 }
 
 pub fn create_session_with_thinking(
@@ -1334,6 +1348,7 @@ pub fn create_session_with_thinking(
             project_path,
             thinking_level,
             permission_mode: None,
+            tool_policy: None,
         },
     )
 }
@@ -1355,6 +1370,7 @@ pub fn create_session_with_options(
         project_path,
         thinking_level,
         permission_mode,
+        tool_policy,
     } = options;
     let now = now_ms();
     let id = Uuid::new_v4().to_string();
@@ -1364,6 +1380,8 @@ pub fn create_session_with_options(
     validate_thinking_level(&thinking_level)?;
     let permission_mode = permission_mode.unwrap_or_else(default_permission_mode);
     validate_permission_mode(&permission_mode)?;
+    let tool_policy = tool_policy.unwrap_or_else(default_tool_policy);
+    validate_tool_policy(&tool_policy)?;
     let project_id = match project_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
@@ -1379,8 +1397,8 @@ pub fn create_session_with_options(
         .prepare_cached(
             "INSERT INTO sessions (
                 id, title, project_id, provider_id, model_id, mode, thinking_level,
-                permission_mode, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                permission_mode, tool_policy, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
         )?
         .execute(params![
             id,
@@ -1391,6 +1409,7 @@ pub fn create_session_with_options(
             mode,
             thinking_level,
             permission_mode,
+            tool_policy,
             now
         ])?;
     Ok(SessionSummary {
@@ -1403,6 +1422,7 @@ pub fn create_session_with_options(
         mode,
         thinking_level,
         permission_mode,
+        tool_policy,
         updated_at: ms_to_ts(now),
         created_at: ms_to_ts(now),
         // The run row that owns this transcript is written after creation.
@@ -1417,6 +1437,22 @@ pub fn session_permission_mode(db: &Database, id: &str) -> Result<Option<String>
         .prepare_cached("SELECT permission_mode FROM sessions WHERE id = ?1")?
         .query_row(params![id], |row| row.get(0))
         .optional()?)
+}
+
+pub fn session_tool_policy(db: &Database, id: &str) -> Result<Option<String>> {
+    Ok(db
+        .conn()
+        .prepare_cached("SELECT tool_policy FROM sessions WHERE id = ?1")?
+        .query_row(params![id], |row| row.get(0))
+        .optional()?)
+}
+
+pub fn session_tool_allows(policy: &str, tool_name: &str) -> bool {
+    match policy {
+        "unrestricted" => true,
+        "plugin-bot-scoped" => tool_name == "plugin_local_pi_bot_bot_workbench",
+        _ => false,
+    }
 }
 
 /// Resolve the durable operating mode for authorization. Unknown sessions
@@ -1744,10 +1780,10 @@ pub fn fork_session_through(
             .prepare_cached(
                 "INSERT INTO sessions (
                     id, title, project_id, provider_id, model_id, mode, thinking_level,
-                    permission_mode, source, pinned, last_seq, created_at, updated_at
+                     permission_mode, tool_policy, source, pinned, last_seq, created_at, updated_at
                  )
                  SELECT ?1, ?2, project_id, provider_id, model_id, mode, thinking_level,
-                        permission_mode, NULL, 0, ?3, ?4, ?4
+                         permission_mode, tool_policy, NULL, 0, ?3, ?4, ?4
                  FROM sessions WHERE id = ?5",
             )?
             .execute(params![id, title, records.len() as i64, now, source_id])?;
@@ -1777,6 +1813,7 @@ pub fn fork_session_through(
         mode: source.summary.mode,
         thinking_level: source.summary.thinking_level,
         permission_mode: source.summary.permission_mode,
+        tool_policy: source.summary.tool_policy,
         updated_at: created_at.clone(),
         created_at,
         // A fork is the user's own conversation, not the automation's transcript.
@@ -4498,7 +4535,7 @@ mod tests {
             mode: "agent".into(),
             thinking_level: "off".into(),
             permission_mode: "inherit".into(),
-            // Ownership is derived from `task_runs`, so an import is never one.
+            tool_policy: "unrestricted".into(),
             scheduled_run: false,
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-02T00:00:00Z".into(),
@@ -4550,7 +4587,7 @@ mod tests {
             mode: "agent".into(),
             thinking_level: "off".into(),
             permission_mode: "inherit".into(),
-            // Ownership is derived from `task_runs`, so an import is never one.
+            tool_policy: "unrestricted".into(),
             scheduled_run: false,
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
@@ -5381,7 +5418,7 @@ mod tests {
             mode: "agent".into(),
             thinking_level: "medium".into(),
             permission_mode: "inherit".into(),
-            // Ownership is derived from `task_runs`, so an import is never one.
+            tool_policy: "unrestricted".into(),
             scheduled_run: false,
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
@@ -7424,6 +7461,73 @@ mod tests {
                 .unwrap()
                 .as_i64(),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn scoped_bot_policy_survives_reload_and_fork_and_denies_generic_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_in_dir(dir.path()).unwrap();
+        let source = create_session_with_options(
+            &db,
+            SessionCreateOptions {
+                tool_policy: Some("plugin-bot-scoped".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            session_tool_policy(&db, &source.id).unwrap().as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        assert!(!session_tool_allows("plugin-bot-scoped", "Bash"));
+        assert!(!session_tool_allows("plugin-bot-scoped", "Read"));
+        assert!(!session_tool_allows("plugin-bot-scoped", "Task"));
+        assert!(!session_tool_allows("invalid-policy", "Read"));
+        assert!(session_tool_allows("unrestricted", "Read"));
+        assert!(!session_tool_allows(
+            "plugin-bot-scoped",
+            "plugin_other_tool"
+        ));
+        assert!(session_tool_allows(
+            "plugin-bot-scoped",
+            "plugin_local_pi_bot_bot_workbench"
+        ));
+        let ForkSessionResult::Created(child) =
+            fork_session_through(&db, &source.id, None, None).unwrap()
+        else {
+            panic!("expected forked session")
+        };
+        assert_eq!(child.summary.tool_policy, "plugin-bot-scoped");
+        assert_eq!(
+            session_tool_policy(&db, &child.summary.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        configure_session_with_thinking(
+            &db,
+            &child.summary.id,
+            "agent",
+            None,
+            None,
+            None,
+            Some("auto"),
+        )
+        .unwrap();
+        assert_eq!(
+            session_tool_policy(&db, &child.summary.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
+        );
+        drop(db);
+        let reopened = Database::open_in_dir(dir.path()).unwrap();
+        assert_eq!(
+            session_tool_policy(&reopened, &child.summary.id)
+                .unwrap()
+                .as_deref(),
+            Some("plugin-bot-scoped")
         );
     }
 }

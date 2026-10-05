@@ -340,7 +340,11 @@ test("a symlink inside the workspace cannot carry a read out of it", async (t) =
   const outside = mkdtempSync(join(tmpdir(), "pi-fs-scope-outside-"));
   writeFileSync(join(outside, "id_rsa"), "PRIVATE KEY", "utf8");
   const ws = makeWorkspace();
-  symlinkSync(join(outside, "id_rsa"), join(ws, "innocent.txt"));
+  try { symlinkSync(join(outside, "id_rsa"), join(ws, "innocent.txt")); }
+  catch (error) {
+    if (process.platform === "win32" && error.code === "EPERM") { t.skip("file symlinks require Windows privilege; directory junction boundary is covered separately"); return; }
+    throw error;
+  }
   symlinkSync(outside, join(ws, "elsewhere"));
 
   const { runtime } = await harness(t, {
@@ -366,6 +370,19 @@ test("a symlink inside the workspace cannot carry a read out of it", async (t) =
     "INVALID_ARGUMENT",
     /path escapes the plugin's root/,
   );
+});
+
+test("directory junctions cannot disclose outside names or metadata", async (t) => {
+  const outside = mkdtempSync(join(tmpdir(), "pi-fs-list-outside-"));
+  writeFileSync(join(outside, "private-name.md"), "outside", "utf8");
+  const ws = makeWorkspace();
+  symlinkSync(outside, join(ws, "elsewhere"), process.platform === "win32" ? "junction" : "dir");
+  const { runtime } = await harness(t, { id: "fs.list.junction", permissions: ["fs.read"],
+    fs: { read: { scope: ["**/*"] } }, workspace: ws });
+  const rows = await runtime.invokePanelBridge("fs.list.junction", "fs.list", { path: "" });
+  assert.equal(rows.some((row) => row.name === "elsewhere"), false);
+  await refused(t, runtime.invokePanelBridge("fs.list.junction", "fs.list", { path: "elsewhere" }),
+    "PERMISSION_DENIED", /protected/);
 });
 
 test("credentials and repository internals are refused under a whole-tree scope", async (t) => {
@@ -600,8 +617,8 @@ test("the project's other folders are not an escape hatch", async (t) => {
     runtime.invokePanelBridge("fs.folders.guards", "fs.openDefault", {
       path: join(stranger, "notes.txt"),
     }),
-    "NOT_FOUND",
-    /path not found/,
+    "INVALID_ARGUMENT",
+    /path escapes the plugin's root/,
   );
   assert.ok(
     audits.some((entry) => entry.api === "fs.read" && entry.ok === false),

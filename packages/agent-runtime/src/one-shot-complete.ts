@@ -11,7 +11,7 @@ import type {
   Model,
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { addUsage, type MessageUsage, type ThinkingLevel } from "@pi-desktop/shared";
+import { addUsage, type MessageUsage, type SessionThinkingLevel } from "@pi-desktop/shared";
 import { accountModelStream } from "./request-usage.js";
 import { requestThinkingLevel } from "./thinking-level.js";
 import { classifyAgentError } from "./agent-errors.js";
@@ -21,9 +21,11 @@ import {
   buildProviderModel,
   copilotRequestHeaders,
   createProviderModels,
+  withThinkingRequestTransport,
   providerRequestFetch,
   type RuntimeProviderConfig,
 } from "./provider-binding.js";
+import { omitThinkingModel } from "./thinking-level.js";
 import {
   openCodeEndpointFromProvider,
   withOpenCodeSessionHeaders,
@@ -82,7 +84,7 @@ function completeError(
 export async function completeOneShot(
   provider: RuntimeProviderConfig,
   context: Context,
-  thinkingLevel: ThinkingLevel,
+  thinkingLevel: SessionThinkingLevel,
   options: OneShotCompleteOptions = {},
 ): Promise<OneShotCompleteResult> {
   const model = buildProviderModel(provider);
@@ -90,7 +92,9 @@ export async function completeOneShot(
   const streamSimple =
     options.stream ??
     ((requestModel, requestContext, streamOptions) =>
-      models.streamSimple(requestModel, requestContext, streamOptions));
+      thinkingLevel === "omit"
+        ? models.stream(omitThinkingModel(requestModel), requestContext, streamOptions)
+        : models.streamSimple(requestModel, requestContext, streamOptions));
   let usage: MessageUsage | undefined;
   let providerStatus: number | undefined;
   let providerHeaders: Record<string, string> | undefined;
@@ -134,7 +138,7 @@ export async function completeOneShot(
   const stream = createProviderRetryStream(
     model,
     context,
-    requestOptions,
+    withThinkingRequestTransport(provider, model, thinkingLevel, requestOptions),
     (retryOptions) => accountModelStream(model, () => streamSimple(model, context, retryOptions), {
       providerId: provider.id, nativeCost: provider.modelConfig?.nativeCost,
       onUsage: attemptUsage => { usage = addUsage(usage, attemptUsage); },

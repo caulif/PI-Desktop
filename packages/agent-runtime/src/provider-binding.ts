@@ -40,9 +40,12 @@ import {
   deepseekRequestCompat,
   zhipuRequestCompat,
   type ThinkingLevel,
+  type ProviderThinkingRequestProtocol,
 } from "@pi-desktop/shared";
 import { genericModelConfig } from "./model-capabilities.js";
 import type { ModelConfig } from "./thinking-level.js";
+
+export { withThinkingRequestTransport, clampProviderThinkingLevel } from "./relay-thinking-transport.js";
 
 export type RuntimeProviderConfig = {
   id: string;
@@ -56,6 +59,8 @@ export type RuntimeProviderConfig = {
   extensionAgentKey?: string;
   /** Wire protocol for the endpoint (provider config apiStyle). */
   apiStyle?: string;
+  /** Explicit relay dialect for off/omit; never inferred from model capability. */
+  thinkingRequestProtocol?: ProviderThinkingRequestProtocol;
   supportsReasoning: boolean;
   supportedThinkingLevels: ThinkingLevel[];
   /** Effective Pi model metadata resolved by Electron main. */
@@ -311,6 +316,12 @@ export function buildProviderModel(
   provider: RuntimeProviderConfig,
 ): Model<Api> {
   const binding = apiBindingForProviderModel(provider);
+  if (provider.thinkingRequestProtocol !== undefined &&
+      (provider.thinkingRequestProtocol !== "deepseek" || binding.api !== "openai-completions")) {
+    throw Object.assign(new Error("thinkingRequestProtocol requires the DeepSeek Chat Completions dialect"), {
+      errorCode: "INVALID_ARGUMENT",
+    });
+  }
   const catalog = provider.modelConfig;
   const catalogModel = catalog
     ? (({ source: _source, transcriptBinding: _transcriptBinding, nativeCost, ...model }) => ({

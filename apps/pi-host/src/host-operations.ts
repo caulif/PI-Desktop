@@ -1,6 +1,6 @@
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, relative, sep } from "node:path";
 
 import { RacpError, type Principal, type SessionSummary } from "@pi-desktop/agent-host";
 import {
@@ -191,7 +191,8 @@ export function createProjectCatalog(deps: HostOperationsDeps): RacpProjectCatal
     async browse(path) {
       const target = path ? await canonicalDirectory(path) : browseRoot;
       const rootReal = await realpath(browseRoot).catch(() => browseRoot);
-      if (target !== rootReal && !target.startsWith(rootReal.endsWith("/") ? rootReal : `${rootReal}/`)) {
+      const relation = relative(rootReal, target);
+      if (isAbsolute(relation) || relation === ".." || relation.startsWith(".." + sep)) {
         throw new RacpError("REMOTE_PATH_FORBIDDEN", "path is outside the browsable root");
       }
       const dirents = await readdir(target, { withFileTypes: true }).catch(() => {

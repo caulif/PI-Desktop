@@ -259,6 +259,11 @@ export function createSessionCollaborationService(deps: SessionCollaborationDepe
           return host.call("session.collaboration.result", {
             sessionId: text(data, "sessionId"), messageId: text(data, "messageId", false), turnId: text(data, "turnId", false),
           });
+        case "session/collaboration/lookup":
+          await drain();
+          return host.call("session.collaboration.lookup", {
+            messageId: text(data, "messageId"), pluginId: input.pluginContext.pluginId,
+          });
         case "session/collaboration/cancel": {
           const result = await cancel(host, {
             sessionId: text(data, "sessionId"), messageId: text(data, "messageId", false),

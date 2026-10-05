@@ -1,3 +1,12 @@
+mod plugin_bindings;
+pub(crate) use plugin_bindings::{migrate_v21_to_v22, migrate_v22_to_v23};
+
+mod plugin_automation;
+pub(crate) use plugin_automation::migrate_v23_to_v24;
+
+mod tool_policy;
+pub(crate) use tool_policy::migrate_v24_to_v25;
+
 use super::*;
 
 const AUDIT_RETENTION_MS: i64 = 90 * 24 * 3600 * 1000;
@@ -6,6 +15,14 @@ const TASK_RUNS_KEEP: i64 = 100;
 impl Database {
     pub(crate) fn boot_maintenance(&self) -> Result<()> {
         let now = now_ms();
+        // Existing pi-bot ownership remains a ceiling even for a profile
+        // created by an older development Host with an unrestricted default.
+        self.conn.execute(
+            "UPDATE sessions SET tool_policy='plugin-bot-scoped'
+             WHERE tool_policy!='plugin-bot-scoped' AND id IN
+             (SELECT session_id FROM plugin_automation_sessions WHERE plugin_id='local.pi-bot')",
+            [],
+        )?;
         let _ = self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_turns_ended_at ON turns(ended_at DESC)",
             [],

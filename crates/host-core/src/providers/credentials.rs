@@ -191,6 +191,49 @@ pub(crate) fn config_with_reasoning_override(raw: &str, value: bool) -> Result<S
     Ok(config.to_string())
 }
 
+pub(crate) fn config_thinking_request_protocol(raw: &str) -> Option<String> {
+    config_value(raw)?
+        .get("compatibility")?
+        .get("thinkingRequestProtocol")?
+        .as_str()
+        .map(str::to_string)
+}
+
+pub(crate) fn validate_thinking_request_protocol(
+    value: Option<&str>,
+    api_style: Option<&str>,
+) -> Result<()> {
+    if let Some(value) = value {
+        if value != "deepseek" {
+            anyhow::bail!("PROVIDER_INVALID: unsupported thinkingRequestProtocol");
+        }
+        if !matches!(
+            api_style,
+            None | Some("chat_completions") | Some("opencode_go")
+        ) {
+            anyhow::bail!("PROVIDER_INVALID: thinkingRequestProtocol requires Chat Completions");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn config_with_thinking_request_protocol(
+    raw: &str,
+    value: Option<&str>,
+) -> Result<String> {
+    let mut config = ensure_config_object(raw)?;
+    let compatibility = compatibility_object(&mut config)?;
+    match value {
+        Some(value) => {
+            compatibility.insert("thinkingRequestProtocol".into(), serde_json::json!(value));
+        }
+        None => {
+            compatibility.remove("thinkingRequestProtocol");
+        }
+    }
+    Ok(config.to_string())
+}
+
 pub(crate) fn config_with_thinking_levels_override(
     raw: &str,
     levels: Option<&[String]>,

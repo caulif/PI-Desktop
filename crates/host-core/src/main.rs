@@ -12,8 +12,11 @@ mod network_proxy;
 mod notifications;
 mod permissions;
 mod plans;
+mod plugin_prompt;
+mod plugin_scheduled;
 mod plugin_sessions;
 mod plugin_usage;
+mod plugin_verification;
 mod plugins;
 mod providers;
 mod review;
@@ -74,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                 .join(".pi-desktop")
         });
 
+    scheduled::preview::validate_startup_profile(&data_dir)?;
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
     std::fs::create_dir_all(data_dir.join("plugins/installed"))?;

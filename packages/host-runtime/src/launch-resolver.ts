@@ -92,6 +92,8 @@ export type HeadlessLaunchResolverOptions = {
   log: (level: "info" | "warn", message: string, data?: Record<string, unknown>) => void;
   /** Optional models.dev snapshot; without it every model runs on the generic transport shape. */
   catalog?: ModelCatalogPort;
+  /** Host-approved plugin tool metadata, never supplied by a client. */
+  pluginTools?: () => readonly Record<string, unknown>[];
 };
 
 const SESSION_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "omit"] as const;
@@ -397,7 +399,8 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
           supportedThinkingLevels: [...capabilities.supportedThinkingLevels],
           modelConfig,
         },
-        pluginTools: [],
+        toolPolicy: session.toolPolicy,
+        pluginTools: [...(options.pluginTools?.() ?? [])],
         pluginSkills,
         trustedExtensions: [],
         subagents: subagentCatalog.definitions,
