@@ -13,7 +13,7 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 const fail = (message: string): never => {
   throw Object.assign(new Error(message), {
@@ -35,6 +35,8 @@ export function createTrustedFiles(
   access?: ResolvedFsAccess,
 ) {
   const checkPolicy = (path: string, write: boolean) => {
+    if (process.platform !== "win32" && path.includes("\\"))
+      fail("Backslashes are not supported in POSIX workspace paths");
     if (isDeniedFsPath(path)) fail("Protected file path");
     if (access) {
       const mode = write ? "write" : "read";
@@ -96,7 +98,7 @@ export function createTrustedFiles(
       await mkdir(dirname(candidate), { recursive: true });
       canonical = resolve(
         await realpath(dirname(candidate)),
-        candidate.split(/[\\/]/).at(-1)!,
+        basename(candidate),
       );
     }
     checkCanonical(root, canonical, write);
@@ -193,7 +195,7 @@ export function createTrustedFiles(
         try {
           checkCanonical(
             root,
-            resolve(canonicalParent, target.split(/[\\/]/).at(-1)!),
+            resolve(canonicalParent, basename(target)),
             true,
           );
         } catch (error) {
@@ -212,7 +214,7 @@ export function createTrustedFiles(
           process.platform === "linux"
             ? "/proc/self/fd/" + parent.fd
             : canonicalParent;
-        const filename = target.split(/[\\/]/).at(-1)!;
+        const filename = basename(target);
         const temporary = resolve(anchored, ".pi-write-" + randomUUID());
         const destination = resolve(anchored, filename);
         try {

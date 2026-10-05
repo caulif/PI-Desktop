@@ -1,6 +1,7 @@
 import {
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -170,5 +171,50 @@ test("contained aliases allowed by both lexical and canonical scopes retain norm
     await expect(files.api.readText("alias/missing.txt")).rejects.toMatchObject(
       { code: "ENOENT" },
     );
+  });
+});
+
+test.skipIf(process.platform === "win32")("POSIX rejects backslash paths without overwriting another file or creating directories", async () => {
+  await fixture(async (root) => {
+    await mkdir(join(root, "pi-bot"));
+    await writeFile(join(root, "pi-bot", "summary.md"), "unrelated-original");
+    const files = createTrustedFiles([root], async () => root, access(["pi-bot/**"]));
+    for (const path of ["pi-bot/reports\\summary.md", "pi-bot/new/reports\\summary.md"]) {
+      for (const request of [
+        () => files.api.writeText(path, "must-not-be-written"),
+        () => files.api.readText(path),
+        () => files.api.readRange(path, 0, 4),
+        () => files.api.stat(path),
+        () => files.api.list(path),
+      ]) await expect(request()).rejects.toThrow("Backslashes are not supported");
+    }
+    expect(await readFile(join(root, "pi-bot", "summary.md"), "utf8")).toBe("unrelated-original");
+    expect(await readdir(join(root, "pi-bot"))).toEqual(["summary.md"]);
+    await files.api.writeText("pi-bot/reports/summary.md", "intended-output");
+    expect(await files.api.readText("pi-bot/reports/summary.md")).toBe("intended-output");
+    expect(await readFile(join(root, "pi-bot", "summary.md"), "utf8")).toBe("unrelated-original");
+  });
+});
+
+test.skipIf(process.platform === "win32")("POSIX rejects canonical symlink targets containing backslashes", async () => {
+  await fixture(async (root) => {
+    await mkdir(join(root, "pi-bot"));
+    await writeFile(join(root, "pi-bot", "reports\\summary.md"), "canonical-original");
+    await writeFile(join(root, "pi-bot", "summary.md"), "unrelated-original");
+    await symlink(join(root, "pi-bot", "reports\\summary.md"), join(root, "pi-bot", "alias.md"));
+    const files = createTrustedFiles([root], async () => root, access(["pi-bot/**"]));
+    await expect(files.api.readText("pi-bot/alias.md")).rejects.toThrow("Backslashes are not supported");
+    await expect(files.api.writeText("pi-bot/alias.md", "must-not-be-written")).rejects.toThrow("Backslashes are not supported");
+    expect(await readFile(join(root, "pi-bot", "reports\\summary.md"), "utf8")).toBe("canonical-original");
+    expect(await readFile(join(root, "pi-bot", "summary.md"), "utf8")).toBe("unrelated-original");
+  });
+});
+
+test.skipIf(process.platform !== "win32")("Windows retains native backslash directory separators", async () => {
+  await fixture(async (root) => {
+    const files = createTrustedFiles([root], async () => root, access(["pi-bot/**"]));
+    await files.api.writeText("pi-bot\\reports\\summary.md", "windows-output");
+    expect(await files.api.readText("pi-bot\\reports\\summary.md")).toBe("windows-output");
+    expect(await readFile(join(root, "pi-bot", "reports", "summary.md"), "utf8")).toBe("windows-output");
   });
 });
