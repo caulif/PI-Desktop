@@ -3,6 +3,22 @@
 > **翻译说明：** 本页是与 [英文源规格](/spec/06-delivery/04-e2e-test-plan) 一一对应的机器辅助翻译。代码、协议字段和标识符保持原文；如翻译与英文源事实有歧义，以英文版本为准。
 
 
+## E2E-HOST-isolated-calendar-preview（ADR 0312）
+
+对候选可执行文件运行 `node scripts/dev-scheduled-calendar-preview.mjs --host <candidate-host>`。runner 只创建专用临时 profile，调用真实原生 NDJSON Host RPC，并在该 profile 保存 source HEAD、二进制 SHA-256、返回日历与结果报告。
+
+保存纽约春季 DST gap 与秋季 fold 的 disabled 插件每日日历绑定，检查两个 UTC/当地 offset 预测点以及精确任务身份。比较 preview 前后的完整绑定；拒绝其他插件归属、过期版本、无效时间、count 越界和额外字段。冷重启后确认日历相同且绑定仍 disabled。非专用诊断 profile 必须在打开任何 SQLite 文件前拒绝；另一个普通隔离 profile 在无 opt-in 时必须拒绝诊断 RPC。
+
+配套 SQLite 集成测试断言 `total_changes()` 不变。这里是使用 fixture 定义的真实 Host 日历证据，0 prompt、0 模型调用；不能视为真实定时派发、真实模型 Routine 执行、原生用户授权或人类批准的证据。
+
+## E2E-PLUGIN-native-navigation（ADR 0310）
+
+对任务候选 build 运行 `node scripts/e2e-plugin-native-navigation.mjs`。probe 只在隔离进程中设置 `PI_DESKTOP_PLUGIN_NAVIGATION_PROBE=1`，用于跳过原生退出确认并进行真实正常重启，使 Chromium 导航存储写入完成。可选 `PI_DESKTOP_NATIVE_PLUGIN_PATH` 加载实际 pi-bot release，并明确预置仅供 UI 使用的 Bot/Conversation 记录；这验证原生外壳、主题和文件详情呈现，不验证 provisioning 或模型执行。
+
+CDP 不会合成子视图，因此 Host chrome 与 guest WebContentsView 分别截图。即使 DOM/context 断言通过，嵌入 guest 的截图仍可能为空白。宣称视觉验收前必须检查文件；空白 PNG 不能作为视觉证据，自动化结果只证明其交互断言。异步打开后，实际 guest 还必须报告 `active: true`；未挂载 WebContentsView 中的 DOM 不足以证明可见。聚焦组件 effects 覆盖延迟打开、打开完成前 overlay 到达，以及开发 reload 替换已挂载视图（`plugin-view-open-visibility.test.mjs`）。
+
+probe 使用任务候选的已构建 Electron app，复用 Host runtime/dependencies，并隔离 `PI_DESKTOP_DATA_DIR` 与 Chromium user-data。通过真实开发插件权限边界安装 fixture，验证 peer section、主视图激活与 subject、字面标签、沙箱、Host Session 身份保留、切换与返回导航、scope/permission 拒绝、modal 遮挡、主题 context 变化和插件 disable 清理。重启只恢复导航，绝不发送 prompt。配套 unit/IPC 为 `plugin-native-navigation.test.mjs` 与 `plugin-navigation-ipc.test.mjs`。仅浏览器 mock 或独立 HTML 不属于该 Electron 验收。
+
 > 范围：MVP 接受场景加上 PI-Desktop 当前发货的产品增量
 > 状态：已接受（protocol/Electron 自动化已激活；完整桌面 Playwright 仍在计划中）
 > 交叉引用：[验收标准](/zh-CN/spec/06-delivery/02-acceptance-criteria) · [里程碑](/zh-CN/spec/06-delivery/01-mvp-milestones) · [ai-开发工作流程](/zh-CN/spec/06-delivery/03-ai-development-workflow) · [变更清单](/zh-CN/spec/06-delivery/05-change-checklist)

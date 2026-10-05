@@ -8,6 +8,7 @@ use crate::db::{ms_to_ts, now_ms, ts_to_ms, Database};
 use crate::sessions;
 
 pub mod automation;
+pub(crate) mod preview;
 pub mod project;
 pub mod timing;
 
@@ -60,7 +61,14 @@ pub struct TaskRun {
     pub ended_at: Option<String>,
 }
 
-const CADENCES: [&str; 4] = ["manual", "hourly", "daily", "weekly"];
+const CADENCES: [&str; 6] = [
+    "manual",
+    "hourly",
+    "hourly_at",
+    "daily",
+    "weekly",
+    "interval",
+];
 
 fn normalize_cadence(value: Option<&str>) -> String {
     match value {

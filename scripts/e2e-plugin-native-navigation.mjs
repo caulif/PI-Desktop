@@ -122,27 +122,53 @@ try {
     await waitFor(() => host.eval(`Boolean(document.querySelector(${JSON.stringify(selector)}+' .plugin-sidebar-item'))`), "actual plugin Bot section");
     await host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].find(button=>button.textContent.includes('管理同伴')).click()`);
     const actualPage = await waitFor(async () => (await targets()).find(target => target.type === "page" && decodeURIComponent(target.url).replaceAll("\\", "/").includes(actualPath.replaceAll("\\", "/") + "/renderer/index.html")), "actual isolated plugin page");
-    const actual = await Client.connect(actualPage.webSocketDebuggerUrl); clients.push(actual);
+    let actual = await Client.connect(actualPage.webSocketDebuggerUrl); clients.push(actual);
     await waitFor(() => actual.eval("Boolean(document.querySelector('.workbench-native-main'))"), "actual embedded-main shell");
     await waitFor(() => host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].some(button=>button.textContent.includes('原生验收同伴'))`), "actual persisted Bot row");
     await host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].find(button=>button.textContent.includes('原生验收同伴')).click()`);
-    try { await waitFor(() => actual.eval(`pluginBridge.getViewContext().location?.botId===${JSON.stringify(botId)} && Boolean(document.querySelector('.workbench-conv-head'))`), "actual Bot conversation"); } catch (error) { writeFileSync(join(artifacts, "actual-failure-state.json"), JSON.stringify(await actual.eval("({text:document.body.innerText,context:pluginBridge.getViewContext()})"), null, 2)); throw error; }
+    try { await waitFor(() => actual.eval(`pluginBridge.getViewContext().location?.botId===${JSON.stringify(botId)} && Boolean(document.querySelector('.workbench-conv-head, .companion-page-tabs'))`), "actual Bot conversation"); } catch (error) { writeFileSync(join(artifacts, "actual-failure-state.json"), JSON.stringify(await actual.eval("({text:document.body.innerText,context:pluginBridge.getViewContext()})"), null, 2)); throw error; }
     await waitFor(() => actual.eval("pluginBridge.getViewContext().active===true"), "actual guest attached after async open");
     assert.equal(await actual.eval("document.querySelector('.workbench-roster')?.getBoundingClientRect().width || 0"), 0);
     for (const theme of ["dark", "light"]) {
       await invoke("settingsSet", { theme });
       await waitFor(() => actual.eval(`document.documentElement.dataset.theme===${JSON.stringify(theme)}`), `actual ${theme} theme`);
-      const screenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: false }); writeFileSync(join(artifacts, `actual-plugin-${theme}.png`), Buffer.from(screenshot.data, "base64"));
+      const screenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true }); writeFileSync(join(artifacts, `actual-plugin-${theme}.png`), Buffer.from(screenshot.data, "base64"));
     }
-    await actual.eval("[...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='详情').click()");
-    await waitFor(() => actual.eval("document.body.innerText.includes('文件')"), "actual Bot file details");
-    const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: false }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
+    for (const page of ["chat", "files", "learning", "routines"]) {
+      await actual.eval(`document.querySelector('button[aria-controls="companion-${page}"]').click()`);
+      await waitFor(() => actual.eval(`document.querySelector('#companion-${page}')?.hidden===false && document.querySelector('button[aria-controls="companion-${page}"]')?.getAttribute('aria-pressed')==='true'`), `actual ${page} page`);
+    }
+    await actual.eval("document.querySelector('button[aria-controls=\"companion-chat\"]').click()");
+    await actual.eval("(document.querySelector('button[aria-label=\"同伴详情\"]') ?? [...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='详情')).click()");
+    await waitFor(() => actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');return Boolean(dialog&&dialog.getBoundingClientRect().width>0&&dialog.innerText.includes('原生验收同伴')&&dialog.innerText.includes('文件'))})()"), "actual visible Bot file details drawer");
+    // Capture a real guest frame before waiting: an occluded embedded surface
+    // may otherwise retain an entry animation awaiting its first compositor frame.
+    // Descendant spinners do not govern whether the drawer entry has finished.
+    const transition = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    writeFileSync(join(artifacts, "actual-plugin-files-transition.png"), Buffer.from(transition.data, "base64"));
+    await delay(200); // modal-appear is a 160 ms finite entry animation.
+    const animationObservations = [];
+    await waitFor(async () => {
+      const state = await actual.eval("(()=>{const dialog=document.querySelector('dialog.modal-inspector[open]');if(!dialog)return null;const animations=dialog.getAnimations().filter(animation=>animation.animationName==='modal-appear'&&Number.isFinite(animation.effect?.getTiming().iterations)).map(animation=>({name:animation.animationName,playState:animation.playState,pending:animation.pending,currentTime:animation.currentTime}));return {opacity:getComputedStyle(dialog).opacity,animations}})()");
+      animationObservations.push(state);
+      writeFileSync(join(artifacts, "actual-plugin-files-animation.json"), JSON.stringify(animationObservations, null, 2));
+      if (state?.opacity === "1" && !state.animations.some(animation => animation.playState === "running" || animation.pending)) return true;
+      // Capture again to request an actual compositor frame, without changing
+      // animation time, opacity, reduced-motion settings or the native approval UI.
+      await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+      return false;
+    }, "actual Bot details animation settled");
+    const fileScreenshot = await actual.send("Page.captureScreenshot", { format: "png", fromSurface: true }); writeFileSync(join(artifacts, "actual-plugin-files.png"), Buffer.from(fileScreenshot.data, "base64"));
     await host.eval(`__PI_DESKTOP__.selectSession(${JSON.stringify(created.session.id)})`);
     assert.equal(await host.eval("Boolean(document.querySelector('[data-plugin-main-surface]'))"), false);
     await host.eval(`[...document.querySelectorAll(${JSON.stringify(selector)}+' .plugin-sidebar-item')].find(button=>button.textContent.includes('原生验收同伴')).click()`);
+    // Selecting a Host session can replace the embedded WebContents. Reconnect
+    // to the current owned plugin target rather than evaluating a stale socket.
+    const reopenedPage = await waitFor(async () => (await targets()).find(target => target.type === "page" && decodeURIComponent(target.url).replaceAll("\\", "/").includes(actualPath.replaceAll("\\", "/") + "/renderer/index.html")), "current reopened plugin page");
+    actual = await Client.connect(reopenedPage.webSocketDebuggerUrl); clients.push(actual);
     await waitFor(() => actual.eval(`pluginBridge.getViewContext().location?.botId===${JSON.stringify(botId)}`), "actual Bot reopened");
     const chromeShot = await host.send("Page.captureScreenshot", { format: "png" }); writeFileSync(join(artifacts, "actual-host-chrome.png"), Buffer.from(chromeShot.data, "base64"));
-    actualPlugin = { path: actualPath, mainHash: createHash("sha256").update(readFileSync(join(actualPath, "main.js"))).digest("hex"), rendererHash: createHash("sha256").update(readFileSync(join(actualPath, "renderer/index.html"))).digest("hex"), botId, conversationId, fixtureOnly: true, modelCalls: 0, visualAcceptance: "not established: inspect guest screenshots; CDP may produce blank frames for embedded surfaces", checks: ["actual sidebar", "actual native shell", "persisted UI-only Bot/direct fixtures", "roster hidden", "dark/light DOM context", "file details DOM", "return/reopen"] };
+    actualPlugin = { path: actualPath, mainHash: createHash("sha256").update(readFileSync(join(actualPath, "main.js"))).digest("hex"), rendererHash: createHash("sha256").update(readFileSync(join(actualPath, "renderer/index.html"))).digest("hex"), botId, conversationId, fixtureOnly: true, modelCalls: 0, visualAcceptance: "not established: inspect guest screenshots; CDP may produce blank frames for embedded surfaces", checks: ["actual sidebar", "actual native shell", "persisted UI-only Bot/direct fixtures", "roster hidden", "dark/light DOM context", "four page activation", "file details DOM", "return/reopen"] };
   }
   writeFileSync(join(artifacts, "result.json"), JSON.stringify({ passed: true, rect, scratch, hostSessionId: created.session.id, actualPlugin, checks: ["peer section", "isolated main placement", "literal labels", "subject cache", "draft retained", "same-item activation", "back/forward", "real restart route", "bounds", "menu occlusion", "deactivation", "live theme", "session preservation", "disable cleanup"] }, null, 2));
   console.log(`PASS native plugin navigation; artifacts: ${artifacts}; isolated scratch: ${scratch}`);

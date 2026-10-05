@@ -155,6 +155,7 @@ const commandShell: CommandShellOption = {
 function createRuntime(
   overrides: Partial<{
     provider: RuntimeProviderConfig;
+    toolPolicy: "unrestricted" | "plugin-bot-scoped";
     mode: Mode | "chat";
     thinkingLevel: SessionThinkingLevel;
     history: UiMessage[];
@@ -180,6 +181,7 @@ function createRuntime(
   return new DesktopAgentRuntime({
     host: (overrides.host ?? { call: vi.fn(), onNotification: vi.fn(() => () => {}) }) as never,
     sessionId: "session-1",
+    toolPolicy: overrides.toolPolicy,
     mode: overrides.mode === "chat" ? "plan" : overrides.mode ?? "agent",
     turnId: overrides.turnId,
     provider: overrides.provider ?? provider,
@@ -202,6 +204,167 @@ function createRuntime(
     onEvent: overrides.onEvent ?? vi.fn(),
   });
 }
+
+describe("plugin tool cancellation", () => {
+  const toolName = "plugin_local_pi_bot_bot_workbench";
+  function pluginRuntime(host: { call: ReturnType<typeof vi.fn> }) {
+    return createRuntime({ host, toolPolicy: "plugin-bot-scoped",
+      pluginTools: [{ name: toolName, description: "Bot workbench", parameters: {} }] });
+  }
+
+  it("cancels an exact plugin approval wait without abandoning the Host result", async () => {
+    let finish!: (value: unknown) => void;
+    const approval = new Promise(resolve => { finish = resolve; });
+    let releaseAbort!: () => void;
+    const abortReceipt = new Promise<void>(resolve => { releaseAbort = resolve; });
+    const host = { call: vi.fn((method: string) => {
+      if (method === "tools.execute") return approval;
+      if (method === "tools.abort") {
+        finish({ ok: false, isError: true, errorCode: "TOOL_ABORTED", content: { code: "TOOL_ABORTED" } });
+        return abortReceipt;
+      }
+      throw new Error("unexpected Host call");
+    }) };
+    const runtime = pluginRuntime(host), controller = new AbortController();
+    const tool = (runtime as any).toolCatalog.get(toolName);
+    let settled = false;
+    const pending = tool.execute("held-plugin-call", { action: "record_result" }, controller.signal)
+      .finally(() => { settled = true; });
+    await expect.poll(() => host.call.mock.calls.filter(([method]) => method === "tools.execute").length).toBe(1);
+    controller.abort();
+    expect(host.call).toHaveBeenCalledWith("tools.abort", { sessionId: "session-1", toolCallId: "held-plugin-call" });
+    await Promise.resolve();expect(settled).toBe(false);
+    releaseAbort();
+    await expect(pending).resolves.toMatchObject({ isError: true, details: { code: "TOOL_ABORTED" } });
+    expect(host.call.mock.calls.filter(([method]) => method === "tools.execute")).toHaveLength(1);
+    expect(host.call.mock.calls.filter(([method]) => method === "tools.abort")).toHaveLength(1);
+    await runtime.dispose();
+  });
+
+  it("never admits a plugin call whose execution signal is already aborted", async () => {
+    const host = { call: vi.fn() }, runtime = pluginRuntime(host), controller = new AbortController();
+    controller.abort();
+    await expect((runtime as any).toolCatalog.get(toolName).execute("never-start", {}, controller.signal))
+      .rejects.toMatchObject({ errorCode: "TOOL_ABORTED" });
+    expect(host.call).not.toHaveBeenCalled();
+    await runtime.dispose();
+  });
+
+  it("waits for the actual cancelled agent run and its final listener to become idle", async () => {
+    let finish!: (value: unknown) => void;
+    const approval = new Promise(resolve => { finish = resolve; });
+    const host = { call: vi.fn((method: string) => {
+      if (method === "tools.execute") return approval;
+      if (method === "tools.abort") {
+        finish({ ok: false, isError: true, errorCode: "TOOL_ABORTED", content: { code: "TOOL_ABORTED" } });
+        return Promise.resolve({ aborted: true });
+      }
+      return Promise.resolve(undefined);
+    }) };
+    const runtime = pluginRuntime(host);
+    let requests = 0;
+    (runtime as any).models = { streamSimple: () => {
+      requests++;
+      if (requests > 2) throw new Error("the cancelled run must not issue another fixture request");
+      const message = assistantMessage({ content: [{ type: "toolCall", id: requests === 1 ? "activate-plugin" : "held-plugin-call",
+        name: requests === 1 ? "ToolSearch" : toolName,
+        arguments: requests === 1 ? { query: toolName } : { action: "record_result" } }], stopReason: "toolUse" }) as unknown as AssistantMessage;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: message });
+        stream.push({ type: "done", reason: "toolUse", message });
+        stream.end(message);
+      });
+      return stream;
+    } };
+    let releaseListener!: () => void, ended = false;
+    const listener = new Promise<void>(resolve => { releaseListener = resolve; });
+    (runtime as any).agent.subscribe(async (event: { type: string }) => {
+      if (event.type === "agent_end") { ended = true; await listener; }
+    });
+    const prompt = runtime.prompt("record the result", "original-user", "original-turn");
+    await expect.poll(() => host.call.mock.calls.some(([method]) => method === "tools.execute")).toBe(true);
+    await runtime.abort();
+    await expect.poll(() => ended).toBe(true);
+    let idle = false;
+    const waiting = runtime.waitForIdle().then(() => { idle = true; });
+    await Promise.resolve();expect(idle).toBe(false);expect(runtime.getStatus().isRunning).toBe(true);
+    releaseListener();await waiting;await prompt;
+    expect(runtime.getStatus().isRunning).toBe(false);expect(requests).toBe(2);
+    await runtime.dispose();
+  });
+});
+
+it("scoped Bot sessions expose only their reviewed workbench tool", async () => {
+  const runtime = createRuntime({
+    toolPolicy: "plugin-bot-scoped",
+    pluginTools: [
+      { name: "plugin_local_pi_bot_bot_workbench", description: "Bot workbench", parameters: {} },
+      { name: "plugin_other_tool", description: "Other plugin", parameters: {} },
+    ],
+  });
+  const tools = [...(runtime as any).toolCatalog.keys()];
+  expect(tools).toContain("plugin_local_pi_bot_bot_workbench");
+  expect(tools).toContain("ToolSearch");
+  for (const name of ["Bash", "Read", "Glob", "Grep", "Write", "Edit", "Skill", "Task", "TaskWait", "new_context", "plugin_other_tool"]) {
+    expect(tools).not.toContain(name);
+  }
+  const search = (runtime as any).toolCatalog.get("ToolSearch");
+  for (const query of ["Glob", "Skill", "Task", "new_context"]) {
+    const result = await search.execute("search-id", { query });
+    expect(result.details.matches).toEqual([]);
+    expect(result.details.activated).toEqual([]);
+  }
+  const prompt = (runtime as any).agent.state.systemPrompt as string;
+  expect(prompt).toContain("Use only the pi-bot bot_workbench tool");
+  expect(prompt).not.toContain("Use the Task tool");
+  expect(prompt).not.toContain("prefer the Read, Grep, and Glob tools");
+  await runtime.dispose();
+});
+
+it("unrestricted runtimes cannot be reused after their Host policy narrows", async () => {
+  const runtime = createRuntime();
+  const config = { mode: "agent" as const, provider, thinkingLevel: "medium" as const, commandShell };
+  expect(runtime.matches(config)).toBe(true);
+  expect(runtime.matches({ ...config, toolPolicy: "plugin-bot-scoped" })).toBe(false);
+  await runtime.dispose();
+});
+
+it("scoped Bot assignments start without the previous group's model context", async () => {
+  const priorMessage: UiMessage = {
+    id: "group-a-user", role: "user", content: "GROUP_A_PRIVATE_CONTENT",
+    createdAt: "2026-09-28T00:00:00Z", status: "complete",
+  };
+  const first = createRuntime({ toolPolicy: "plugin-bot-scoped" });
+  const firstPrompt = vi.spyOn((first as any).agent as Agent, "prompt").mockResolvedValue();
+  await first.prompt("GROUP_A_PRIVATE_CONTENT", "group-a-user", "group-a-turn");
+  expect(firstPrompt).toHaveBeenCalledWith("GROUP_A_PRIVATE_CONTENT");
+  expect(first.matches({
+    toolPolicy: "plugin-bot-scoped", mode: "agent", provider,
+    thinkingLevel: "medium", commandShell,
+  })).toBe(false);
+  await first.dispose();
+
+  // The Host retains audit history; only explicit current-assignment sharing
+  // may become model context after the next scoped launch.
+  const second = createRuntime({
+    toolPolicy: "plugin-bot-scoped", history: [priorMessage],
+    compaction: {
+      id: "group-a-compaction", summary: "GROUP_A_PRIVATE_SUMMARY",
+      throughMessageId: "group-a-user", tokensBefore: 1000, retainedTail: [],
+      createdAt: "2026-09-28T00:01:00Z",
+    },
+  });
+  const agent = (second as any).agent as Agent;
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_CONTENT");
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_SUMMARY");
+  expect((second as any).activeCompaction).toBeUndefined();
+  const prompt = vi.spyOn(agent, "prompt").mockResolvedValue();
+  await second.prompt("GROUP_B_CURRENT_ASSIGNMENT", "group-b-user", "group-b-turn");
+  expect(prompt).toHaveBeenCalledWith("GROUP_B_CURRENT_ASSIGNMENT");
+  expect(JSON.stringify(agent.state.messages)).not.toContain("GROUP_A_PRIVATE_CONTENT");
+  await second.dispose();
+});
 
 /** Minimal pi-ai assistant message; overrides carry the shape under test. */
 function assistantMessage(overrides: {

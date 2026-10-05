@@ -1,5 +1,25 @@
 # 04. E2E Test Plan
 
+## E2E-HOST-isolated-calendar-preview (ADR 0312)
+
+Run `node scripts/dev-scheduled-calendar-preview.mjs --host <candidate-host>`
+against the candidate executable. The runner creates only dedicated temporary
+profiles and invokes actual native NDJSON Host RPC. It persists a report with
+source HEAD, binary SHA-256, returned calendars and outcomes in that profile.
+
+Store disabled plugin bindings for New York spring-gap and autumn-fold daily
+calendars; inspect two projected UTC/local-offset points and exact stored task
+identity. Compare the complete binding before/after preview, reject other plugin
+ownership, stale revision, malformed cursor, count bounds and extra fields, and
+cold restart to verify the same calendar with the binding still disabled. Reject
+a non-dedicated diagnostic profile before any SQLite file is opened, and reject
+the diagnostic RPC without opt-in in a separate ordinary isolated profile.
+
+The SQLite integration companions assert `total_changes()` remains unchanged.
+This is actual Host calendar evidence with fixture definitions, zero prompts
+and zero model calls. It is neither real timer delivery nor real-model Routine
+execution, native user authorization, or human approval evidence.
+
 ## E2E-PLUGIN-native-navigation (ADR 0310)
 
 Run `node scripts/e2e-plugin-native-navigation.mjs` against the task candidate's

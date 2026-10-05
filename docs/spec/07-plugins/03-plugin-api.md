@@ -591,21 +591,27 @@ plugin panel cannot invoke the mutation operations outside this gateway.
 ```ts
 pi.agent.complete(input: {
   modelKey: string
-  thinkingLevel?: ThinkingLevel
+  thinkingLevel?: SessionThinkingLevel
   system?: string
   messages?: Array<{ role: "user" | "assistant"; content: string }>
   includeSessionContext?: boolean
 }): Promise<{
   text: string
   modelKey: string
-  thinkingLevel?: ThinkingLevel
+  thinkingLevel?: SessionThinkingLevel
   usage?: MessageUsage
 }>
 ```
 
 The host resolves credentials and runs a one-shot completion with `tools: []`
 through the same path as Composer prompt enhancement. The plugin never receives
-a secret. `includeSessionContext: true` also requires `session.read` and an
+a secret. Explicit `thinkingLevel: "omit"` is preserved separately from `off`;
+omitting the input keeps the existing `off` default. For a provider explicitly
+configured with `thinkingRequestProtocol: "deepseek"`, off serializes as
+`thinking: { type: "disabled" }` with no `reasoning_effort`, and omit removes both
+fields, including when its binding reports no reasoning capability. An
+unconfigured provider retains the existing capability clamping and request
+defaults. `includeSessionContext: true` also requires `session.read` and an
 in-flight tool session; the host serializes that context and, if `messages` is
 empty, appends `Please respond to the request.` System prompt
 ≤ 32 KiB; combined messages ≤ 200k characters; eight calls per plugin per

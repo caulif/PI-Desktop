@@ -90,6 +90,7 @@
 - [10-plugin-devex.md](07-plugins/10-plugin-devex.md)
 - [11-plugin-storage-isolation.md](07-plugins/11-plugin-storage-isolation.md)
 - [12-plugin-ipc-and-host-services.md](07-plugins/12-plugin-ipc-and-host-services.md)
+- [13-approved-project-verification.md](07-plugins/13-approved-project-verification.md)
 - [13-plugin-permissions-matrix.md](07-plugins/13-plugin-permissions-matrix.md)
 - [14-plugin-roadmap.md](07-plugins/14-plugin-roadmap.md)
 - [15-plugin-center.md](07-plugins/15-plugin-center.md)

@@ -1,4 +1,5 @@
 mod config_sync_rpc;
+mod plugin_verification_rpc;
 mod scheduled_rpc;
 mod scheduled_tools;
 
@@ -19,6 +20,7 @@ use crate::audit;
 use crate::notifications;
 use crate::permissions::{PermissionDecision, PermissionEvaluationParams, PermissionManager};
 use crate::plans;
+use crate::plugin_prompt;
 use crate::plugin_sessions;
 use crate::plugin_usage;
 use crate::providers::{self, DiscoveredModelInput, ProviderCreateInput, ProviderUpdateInput};
@@ -1335,7 +1337,9 @@ fn bash_cancellation_requested(receiver: &Option<tokio::sync::watch::Receiver<bo
 }
 
 async fn clear_bash_cancellation(state: &Arc<Mutex<AppState>>, p: &ToolsExecuteParams) {
-    if !matches!(p.tool_name.as_str(), "Bash" | "GenerateImages") {
+    if !matches!(p.tool_name.as_str(), "Bash" | "GenerateImages")
+        && !p.tool_name.starts_with("plugin_")
+    {
         return;
     }
     let mut st = state.lock().await;
@@ -1355,32 +1359,38 @@ async fn execute_plugin_tool(
     p: &ToolsExecuteParams,
     timeout_ms: u64,
     session_mode: &str,
+    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> tools::ToolsExecuteResult {
     let started = std::time::Instant::now();
     let execution_id = uuid::Uuid::new_v4().to_string();
     let (otx, orx) = tokio::sync::oneshot::channel::<Value>();
     {
         let mut st = state.lock().await;
+        // Approval and execution-budget waits may outlive the cancellation.
+        // Register and enqueue dispatch under the same lock as tools.abort,
+        // so cancellation accepted first cannot emit a late plugin call.
+        if bash_cancellation_requested(&cancellation) {
+            return shell_failure_result(p, "TOOL_ABORTED", "tool aborted", None, started);
+        }
         st.plugin_execs.insert(execution_id.clone(), otx);
+        send_notification(
+            tx,
+            "plugins.execute",
+            json!({
+                "executionId": execution_id,
+                "sessionId": p.session_id,
+                "turnId": p.turn_id,
+                "toolCallId": p.tool_call_id,
+                "toolName": p.tool_name,
+                "args": p.args,
+                // Durable session mode, not the sidecar-supplied field: ADR 0052
+                // forbids a conflicting sidecar mode from authorizing a tool
+                // (ADR 0211).
+                "mode": session_mode,
+                "planSafeActions": p.plan_safe_actions,
+            }),
+        );
     }
-    emit_notification(
-        tx,
-        "plugins.execute",
-        json!({
-            "executionId": execution_id,
-            "sessionId": p.session_id,
-            "turnId": p.turn_id,
-            "toolCallId": p.tool_call_id,
-            "toolName": p.tool_name,
-            "args": p.args,
-            // Durable session mode, not the sidecar-supplied field: ADR 0052
-            // forbids a conflicting sidecar mode from authorizing a tool
-            // (ADR 0211).
-            "mode": session_mode,
-            "planSafeActions": p.plan_safe_actions,
-        }),
-    )
-    .await;
 
     let outcome = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), orx).await;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -2295,6 +2305,27 @@ async fn handle_request(
             } else {
                 None
             };
+            let requested_tool_policy = match params.get("toolPolicy") {
+                Some(value) => Some(value.as_str().ok_or_else(|| {
+                    rpc_err(1002, "toolPolicy must be a string", "INVALID_PARAMS")
+                })?),
+                None => None,
+            };
+            let tool_policy = if let Some(parent_id) = params
+                .get("inheritPermissionFromSessionId")
+                .and_then(|v| v.as_str())
+            {
+                let inherited = sessions::session_tool_policy(&st.db, parent_id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                    .ok_or_else(|| rpc_err(1007, "parent session not found", "NOT_FOUND"))?;
+                if inherited == "plugin-bot-scoped" {
+                    Some(inherited)
+                } else {
+                    requested_tool_policy.map(str::to_string)
+                }
+            } else {
+                requested_tool_policy.map(str::to_string)
+            };
             let session = sessions::create_session_with_options(
                 &st.db,
                 sessions::SessionCreateOptions {
@@ -2320,6 +2351,7 @@ async fn handle_request(
                         .map(str::to_string),
                     thinking_level,
                     permission_mode,
+                    tool_policy,
                 },
             )
             .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
@@ -2426,6 +2458,9 @@ async fn handle_request(
             Ok(json!({ "session": session }))
         }
         "session.configure" => {
+            if params.get("toolPolicy").is_some() {
+                return Err(rpc_err(1002, "toolPolicy is immutable", "INVALID_PARAMS"));
+            }
             let id = params
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -2820,6 +2855,85 @@ async fn handle_request(
             Ok(page)
         }
 
+        method if method.starts_with("plugin.verification.") => {
+            plugin_verification_rpc::handle(state.clone(), method, params).await
+        }
+        "plugin.promptPrepare"
+        | "plugin.promptLookup"
+        | "plugin.promptSettle"
+        | "plugin.promptBeginTurn"
+        | "plugin.promptReleaseClaim"
+        | "plugin.promptInvalidate" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let intent_id = params
+                .get("requestIntentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "requestIntentId required", "INVALID_PARAMS"))?;
+            let st = state.lock().await;
+            match method {
+                "plugin.promptPrepare" => plugin_prompt::prepare(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    params
+                        .get("contentHash")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    params.get("processEpoch").and_then(Value::as_str),
+                ),
+                "plugin.promptLookup" => plugin_prompt::lookup(&st.db, plugin_id, intent_id),
+                "plugin.promptReleaseClaim" => plugin_prompt::release_claim(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("claimId").and_then(Value::as_str).unwrap_or(""),
+                ),
+                "plugin.promptInvalidate" => {
+                    plugin_prompt::invalidate(&st.db, plugin_id, intent_id)
+                }
+                "plugin.promptBeginTurn" => plugin_prompt::begin_turn(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("claimId").and_then(Value::as_str).unwrap_or(""),
+                    params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    params.get("providerId").and_then(Value::as_str),
+                    params.get("modelId").and_then(Value::as_str),
+                ),
+                _ => plugin_prompt::settle(
+                    &st.db,
+                    plugin_id,
+                    intent_id,
+                    params.get("status").and_then(Value::as_str).unwrap_or(""),
+                    params.get("turnId").and_then(Value::as_str),
+                    params.get("code").and_then(Value::as_str),
+                ),
+            }
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.starts_with("PERMISSION_DENIED:") {
+                    rpc_err(1003, message, "PERMISSION_DENIED")
+                } else if message == "STALE_PROMPT_CLAIM" {
+                    rpc_err(1008, message, "STALE_PROMPT_CLAIM")
+                } else if matches!(message.as_str(), "AGENT_BUSY" | "IDEMPOTENCY_CONFLICT") {
+                    session_collaboration_rpc_err(message)
+                } else {
+                    rpc_err(1002, message, "INVALID_PARAMS")
+                }
+            })
+        }
         "session.beginTurn" => {
             let session_id = params
                 .get("sessionId")
@@ -3411,6 +3525,19 @@ async fn handle_request(
             let call_started = std::time::Instant::now();
             let p: ToolsExecuteParams = serde_json::from_value(params.clone())
                 .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            {
+                let st = state.lock().await;
+                let policy = sessions::session_tool_policy(&st.db, &p.session_id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                    .ok_or_else(|| rpc_err(1007, "session not found", "SESSION_NOT_FOUND"))?;
+                if !sessions::session_tool_allows(&policy, &p.tool_name) {
+                    return Err(rpc_err(
+                        1003,
+                        "tool is unavailable to this Bot session",
+                        "PERMISSION_DENIED",
+                    ));
+                }
+            }
             let execution_timeout_ms = tools::effective_timeout_ms(&p.tool_name, p.timeout_ms);
 
             let command_shell_id = if p.tool_name == "Bash" {
@@ -3476,6 +3603,7 @@ async fn handle_request(
             // Register before permission evaluation so tools.abort can cancel
             // an approval wait as well as an already-spawned process.
             let cancellation_receiver = if matches!(p.tool_name.as_str(), "Bash" | "GenerateImages")
+                || p.tool_name.starts_with("plugin_")
             {
                 let mut st = state.lock().await;
                 match st.register_bash_cancellation(&p.session_id, &p.tool_call_id) {
@@ -3484,7 +3612,7 @@ async fn handle_request(
                         let result = shell_failure_result(
                             &p,
                             &error_code,
-                            "another Bash call is already active for this tool call ID",
+                            "another cancellable tool call is already active for this tool call ID",
                             command_shell_id.clone(),
                             call_started,
                         );
@@ -3784,7 +3912,17 @@ async fn handle_request(
                     let st = state.lock().await;
                     st.tool_budget.clone()
                 };
-                let _tool_permit = match tool_budget.acquire(&p.session_id, &p.tool_name).await {
+                let mut admission_cancellation = cancellation_receiver.clone();
+                let admission = tokio::select! {
+                    biased;
+                    _ = wait_for_bash_cancellation(&mut admission_cancellation) => {
+                        return serde_json::to_value(shell_failure_result(
+                            &p, "TOOL_ABORTED", "tool aborted", permission_shell_id.clone(), call_started,
+                        )).map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"));
+                    }
+                    result = tool_budget.acquire(&p.session_id, &p.tool_name) => result,
+                };
+                let _tool_permit = match admission {
                     Ok(permit) => permit,
                     Err(error) => {
                         tracing::warn!(
@@ -3903,6 +4041,7 @@ async fn handle_request(
                         &p,
                         tools::desktop_dispatch_timeout_ms(p.timeout_ms),
                         &durable_mode,
+                        cancellation_receiver.clone(),
                     )
                     .await
                 } else if scheduled_tools::recognizes(&p.tool_name) {
@@ -5623,6 +5762,72 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(malformed.data.unwrap()["errorCode"], "INVALID_PARAMS");
+    }
+
+    #[tokio::test]
+    async fn scoped_bot_session_policy_survives_inheritance_and_blocks_host_tools() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app_state = AppState::open(data_dir.path()).unwrap();
+        app_state.handshook = true;
+        let state = Arc::new(Mutex::new(app_state));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let created = handle_request(
+            state.clone(),
+            "session.create",
+            json!({ "mode": "agent", "toolPolicy": "plugin-bot-scoped" }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        let session_id = created["session"]["id"].as_str().unwrap();
+        assert_eq!(created["session"]["toolPolicy"], "plugin-bot-scoped");
+
+        let child = handle_request(
+            state.clone(),
+            "session.create",
+            json!({
+                "inheritPermissionFromSessionId": session_id,
+                "toolPolicy": "unrestricted"
+            }),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(child["session"]["toolPolicy"], "plugin-bot-scoped");
+
+        let configure = handle_request(
+            state.clone(),
+            "session.configure",
+            json!({ "id": session_id, "mode": "agent", "toolPolicy": "unrestricted" }),
+            tx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(configure.data.unwrap()["errorCode"], "INVALID_PARAMS");
+
+        for tool_name in ["Bash", "Read"] {
+            let denied = handle_request(
+                state.clone(),
+                "tools.execute",
+                json!({
+                    "sessionId": session_id,
+                    "toolCallId": format!("blocked-{tool_name}"),
+                    "toolName": tool_name,
+                    "args": {},
+                    "mode": "agent"
+                }),
+                tx.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(denied.data.unwrap()["errorCode"], "PERMISSION_DENIED");
+        }
+
+        let invalid = handle_request(state, "session.create", json!({ "toolPolicy": 1 }), tx)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.data.unwrap()["errorCode"], "INVALID_PARAMS");
     }
 
     #[tokio::test]
@@ -7382,6 +7587,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_tools_abort_before_registration_or_during_permission_never_dispatches() {
+        for phase in ["before_registration", "during_permission", "after_approval"] {
+            let before_registration = phase == "before_registration";
+            let data_dir = tempfile::tempdir().unwrap();
+            let mut app_state = AppState::open(data_dir.path()).unwrap();
+            app_state.handshook = true;
+            let session = sessions::create_session(
+                &app_state.db,
+                Some("Cancelled plugin approval".into()),
+                Some("agent".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            sessions::configure_session_with_thinking(
+                &app_state.db,
+                &session.id,
+                "agent",
+                None,
+                None,
+                None,
+                Some("ask"),
+            )
+            .unwrap();
+            let state = Arc::new(Mutex::new(app_state));
+            let call_id = "cancelled-plugin-approval";
+            let budget = { state.lock().await.tool_budget.clone() };
+            let mut permits = Vec::new();
+            if phase == "after_approval" {
+                // Approval succeeds, but production execution admission waits.
+                // A cancellation in this await must win before plugin dispatch.
+                for _ in 0..crate::tool_budget::MAX_IN_FLIGHT_PLUGINS {
+                    permits.push(
+                        budget
+                            .acquire(&session.id, "plugin_occupying_capacity")
+                            .await
+                            .unwrap(),
+                    );
+                }
+            }
+            if before_registration {
+                let aborted = handle_request(
+                    state.clone(),
+                    "tools.abort",
+                    json!({ "sessionId": session.id, "toolCallId": call_id }),
+                    mpsc::unbounded_channel().0,
+                )
+                .await
+                .unwrap();
+                assert_eq!(aborted["queued"], true);
+            }
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let pending_state = state.clone();
+            let session_id = session.id.clone();
+            let pending = tokio::spawn(async move {
+                handle_request(
+                    pending_state,
+                    "tools.execute",
+                    json!({
+                        "sessionId": session_id, "toolCallId": call_id,
+                        "toolName": "plugin_local_pi_bot_bot_workbench",
+                        "declaredRisk": "medium", "mode": "agent",
+                        "args": { "action": "record_result", "resultKind": "result" }
+                    }),
+                    tx,
+                )
+                .await
+            });
+            let mut permission_id = None;
+            if !before_registration {
+                let note = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let note: Value = serde_json::from_str(&note).unwrap();
+                assert_eq!(note["method"], "permissions.request");
+                permission_id = Some(note["params"]["requestId"].as_str().unwrap().to_string());
+                if phase == "after_approval" {
+                    handle_request(state.clone(), "permissions.resolve",
+                        json!({ "requestId": permission_id.as_ref().unwrap(), "decision": "allow-once" }),
+                        mpsc::unbounded_channel().0).await.unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        while budget.snapshot().queued == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                let aborted = handle_request(
+                    state.clone(),
+                    "tools.abort",
+                    json!({ "sessionId": session.id, "toolCallId": call_id }),
+                    mpsc::unbounded_channel().0,
+                )
+                .await
+                .unwrap();
+                assert_eq!(aborted["aborted"], true);
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(result["errorCode"], "TOOL_ABORTED");
+            assert_ne!(
+                result["denied"], true,
+                "cancellation is not a permission denial"
+            );
+            assert_eq!(budget.snapshot().queued, 0);
+            // Capacity remains occupied until after cancellation settles: releasing
+            // it earlier would mask an uncancellable admission wait.
+            drop(permits);
+            if let Some(request_id) = permission_id {
+                let late = handle_request(
+                    state.clone(),
+                    "permissions.resolve",
+                    json!({ "requestId": request_id, "decision": "allow-once" }),
+                    mpsc::unbounded_channel().0,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(late.data.unwrap()["errorCode"], "NOT_FOUND");
+            }
+            while let Ok(note) = rx.try_recv() {
+                let note: Value = serde_json::from_str(&note).unwrap();
+                assert_ne!(note["method"], "plugins.execute");
+            }
+            assert_bash_registry_empty(&state).await;
+            let st = state.lock().await;
+            assert!(st.plugin_execs.is_empty());
+            assert!(st
+                .permissions
+                .pending_requests(Some(&session.id))
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn tools_abort_during_permission_removes_the_pending_request() {
         let Some(shell_id) = available_test_shell_id() else {
             return;
@@ -7727,13 +8072,16 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let mut app_state = AppState::open(data_dir.path()).unwrap();
         app_state.handshook = true;
+        let session_id = sessions::create_session(&app_state.db, None, None, None, None, None)
+            .unwrap()
+            .id;
         let state = Arc::new(Mutex::new(app_state));
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = handle_request(
             state.clone(),
             "tools.execute",
             json!({
-                "sessionId": "missing-session",
+                "sessionId": session_id,
                 "toolCallId": "mismatch-no-register",
                 "toolName": "Bash",
                 "args": { "command": "should-not-run" },

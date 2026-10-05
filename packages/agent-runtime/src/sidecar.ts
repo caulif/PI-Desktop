@@ -8,6 +8,7 @@ import type { ModelAuth } from "@earendil-works/pi-ai";
 import { ParentHostProxy } from "./parent-host-proxy.js";
 import { visionFromModelConfig } from "./model-capabilities.js";
 import { hydrateAttachmentHistory } from "./attachment-history.js";
+import { normalizeRuntimeToolPolicy, type RuntimeToolPolicy } from "./session-tool-policy.js";
 import { classifyAgentError } from "./agent-errors.js";
 import { readLocalRequestErrorDetails } from "./local-request-errors.js";
 import {
@@ -88,6 +89,7 @@ function testRuntimeIdentity(sessionId: string) {
 
 type RuntimeParams = {
   sessionId: string;
+  toolPolicy?: RuntimeToolPolicy;
   mode?: Mode;
   /** Durable host turn ID for the prompt currently being executed. */
   turnId?: string;
@@ -160,6 +162,7 @@ async function runtimeFor(
 ): Promise<DesktopAgentRuntime> {
   const sessionId = String(params.sessionId);
   const mode = normalizeMode(params.mode);
+  const toolPolicy = normalizeRuntimeToolPolicy(params.toolPolicy);
   if (!isCommandShellOption(params.commandShell) || !params.commandShell.available) {
     throw Object.assign(new Error("active command shell is invalid or unavailable"), {
       rpcCode: -32000,
@@ -208,6 +211,7 @@ async function runtimeFor(
   }
   const reusable = existing?.matches({
     mode,
+    toolPolicy,
     provider,
     thinkingLevel,
     pluginTools,
@@ -237,32 +241,34 @@ async function runtimeFor(
 
   let history: UiMessage[] = [];
   let compaction: ContextCompactionRecord | undefined;
-  try {
-    const detail = await hostProxy.call<{
-      session?: {
-        messages?: UiMessage[];
-        compaction?: ContextCompactionRecord;
-      } | null;
-    }>("session.get", { id: sessionId });
-    let restoredMessages = detail?.session?.messages ?? [];
-    // The current prompt is sent separately below. Exclude its persisted row
-    // before attachment hydration so it cannot consume the history byte budget.
-    if (currentPrompt !== undefined && params.userMessageId) {
-      const last = restoredMessages.at(-1);
-      if (last?.role === "user" && last.id === params.userMessageId) {
-        restoredMessages = restoredMessages.slice(0, -1);
+  if (toolPolicy !== "plugin-bot-scoped") {
+    try {
+      const detail = await hostProxy.call<{
+        session?: {
+          messages?: UiMessage[];
+          compaction?: ContextCompactionRecord;
+        } | null;
+      }>("session.get", { id: sessionId });
+      let restoredMessages = detail?.session?.messages ?? [];
+      // The current prompt is sent separately below. Exclude its persisted row
+      // before attachment hydration so it cannot consume the history byte budget.
+      if (currentPrompt !== undefined && params.userMessageId) {
+        const last = restoredMessages.at(-1);
+        if (last?.role === "user" && last.id === params.userMessageId) {
+          restoredMessages = restoredMessages.slice(0, -1);
+        }
       }
+      const supportsVision = visionFromModelConfig(params.provider.modelConfig);
+      history = await hydrateAttachmentHistory(restoredMessages, {
+        scratchDir: params.scratchDir,
+        projectPath: params.projectPath,
+        attachmentsDir: params.attachmentsDir,
+        supportsVision,
+      });
+      compaction = detail?.session?.compaction;
+    } catch {
+      // History restore is best-effort; a prompt can still start cleanly.
     }
-    const supportsVision = visionFromModelConfig(params.provider.modelConfig);
-    history = await hydrateAttachmentHistory(restoredMessages, {
-      scratchDir: params.scratchDir,
-      projectPath: params.projectPath,
-      attachmentsDir: params.attachmentsDir,
-      supportsVision,
-    });
-    compaction = detail?.session?.compaction;
-  } catch {
-    // History restore is best-effort; a prompt can still start cleanly.
   }
   // Older callers without a stable message id retain the previous content match.
   if (currentPrompt !== undefined && !params.userMessageId) {
@@ -274,6 +280,7 @@ async function runtimeFor(
   const runtime = new DesktopAgentRuntime({
     host: hostProxy,
     sessionId,
+    toolPolicy,
     mode,
     turnId: params.turnId,
     provider,
@@ -499,6 +506,9 @@ async function handle(method: string, params: any): Promise<unknown> {
       await hostProxy.call("plans.abort", { sessionId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
       if (runtime && runtimes.get(sessionId) === runtime && (!turnId || runtime.getStatus().currentTurnId === turnId)) {
         await runtime.abort();
+        // The signal is not settlement: an approval waiter must unwind and
+        // pi-agent-core must release its active run before Main reports idle.
+        await runtime.waitForIdle();
       }
       return { ok: true };
     }

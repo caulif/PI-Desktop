@@ -11,7 +11,7 @@ import type {
   Model,
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import type { MessageUsage, ThinkingLevel } from "@pi-desktop/shared";
+import type { MessageUsage, SessionThinkingLevel } from "@pi-desktop/shared";
 import { classifyAgentError } from "./agent-errors.js";
 import { clampOutputToContext } from "./output-cap.js";
 import { assistantContent, usageFromPi } from "./agent-messages.js";
@@ -19,9 +19,11 @@ import {
   buildProviderModel,
   copilotRequestHeaders,
   createProviderModels,
+  withThinkingRequestTransport,
   providerRequestFetch,
   type RuntimeProviderConfig,
 } from "./provider-binding.js";
+import { omitThinkingModel } from "./thinking-level.js";
 import {
   openCodeEndpointFromProvider,
   withOpenCodeSessionHeaders,
@@ -78,7 +80,7 @@ function completeError(
 export async function completeOneShot(
   provider: RuntimeProviderConfig,
   context: Context,
-  thinkingLevel: ThinkingLevel,
+  thinkingLevel: SessionThinkingLevel,
   options: OneShotCompleteOptions = {},
 ): Promise<OneShotCompleteResult> {
   const model = buildProviderModel(provider);
@@ -86,7 +88,9 @@ export async function completeOneShot(
   const streamSimple =
     options.stream ??
     ((requestModel, requestContext, streamOptions) =>
-      models.streamSimple(requestModel, requestContext, streamOptions));
+      thinkingLevel === "omit"
+        ? models.stream(omitThinkingModel(requestModel), requestContext, streamOptions)
+        : models.streamSimple(requestModel, requestContext, streamOptions));
   let providerStatus: number | undefined;
   let providerHeaders: Record<string, string> | undefined;
   let providerFailure: ProviderFetchFailure | undefined;
@@ -99,7 +103,7 @@ export async function completeOneShot(
         maxTokens: clampOutputToContext(model, context, undefined),
         ...(options.signal ? { signal: options.signal } : {}),
         maxRetries: 0,
-        ...(thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
+        ...(thinkingLevel !== "off" && thinkingLevel !== "omit" ? { reasoning: thinkingLevel } : {}),
         fetch: providerRequestFetch(
           model.api,
           captureProviderResponse(undefined, (response, _requestBytes, failure) => {
@@ -123,7 +127,7 @@ export async function completeOneShot(
   const stream = createProviderRetryStream(
     model,
     context,
-    requestOptions,
+    withThinkingRequestTransport(provider, model, thinkingLevel, requestOptions),
     (retryOptions) => streamSimple(model, context, retryOptions),
     {
       claim: (error, phase) => {

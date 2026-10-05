@@ -3,6 +3,16 @@
 > **翻译说明：** 本页是与 [英文源规格](/spec/07-plugins/12-plugin-ipc-and-host-services) 一一对应的机器辅助翻译。代码、协议字段和标识符保持原文；如翻译与英文源事实有歧义，以英文版本为准。
 
 
+## 隔离的原生日历诊断（ADR 0312）
+
+`scheduled.devCalendarPreview` 是原生 Host 开发 RPC，不是 Plugin SDK 服务、插件 bridge handler 或 MCP 工具。其 `pluginId` 由原生诊断 runner 提供，不能从插件参数转发。请求包含 `externalKey`、`expectedDefinitionRevision`、显式 RFC3339 `after` 与 `count`（1–16）。未知字段、过期版本以及缺失的所属绑定均被拒绝。
+
+诊断使用生产日历算法，按存储的 cadence、schedule 与 IANA timezone 推算，返回身份、版本、存储的 `enabled`、规范化为毫秒 UTC 的 `after`，以及 `points[{scheduledFor,localTime}]` 中的 UTC 和当地 offset 时间。返回结果不包含授权或执行能力。
+
+显式 `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` 必须等于实际 profile 的规范路径。该目录必须预先存在，是操作系统临时目录的直接子目录，并以 `pi-bot-calendar-preview-*` 命名。启用诊断时，Host 在打开 SQLite 前核对目录；每次诊断 RPC 还会核对实际 main 数据库文件。默认或生产 profile、路径不匹配、嵌套 profile 与数据库重定向均被拒绝。未显式启用时 RPC 被拒绝，普通启动行为保持不变。
+
+Preview 可在无需同意的情况下读取 disabled 绑定，但不会写入、重新调度、创建 occurrence、派发定时事件或准入 prompt。原生日历预测与实际 Routine 执行验收是两种证据。
+
 ## 1. 目标
 
 完成与插件相关的主机服务和 UI IPC，以便实现不依赖于临时约定。

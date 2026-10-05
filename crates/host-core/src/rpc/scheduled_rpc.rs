@@ -1,5 +1,5 @@
 use super::{json, plan_rpc_err, rpc_err, AppState, JsonRpcError, Value};
-use crate::{scheduled, sessions};
+use crate::{plugin_scheduled, scheduled, sessions};
 
 #[cfg(test)]
 #[path = "scheduled_project_tests.rs"]
@@ -32,6 +32,31 @@ fn handle_with_workspace_policy(
     allow_workspace_override: bool,
 ) -> Result<Value, JsonRpcError> {
     match method {
+        "scheduled.devCalendarPreview" => {
+            scheduled::preview::require_development_profile(&st.db)
+                .map_err(|e| rpc_err(1003, e.to_string(), "PERMISSION_DENIED"))?;
+            let mut params = params;
+            let object = params
+                .as_object_mut()
+                .ok_or_else(|| rpc_err(1002, "object required", "INVALID_PARAMS"))?;
+            let plugin_id = object
+                .remove("pluginId")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .ok_or_else(|| {
+                    rpc_err(
+                        1003,
+                        "native diagnostic pluginId required",
+                        "PERMISSION_DENIED",
+                    )
+                })?;
+            let request =
+                serde_json::from_value::<scheduled::preview::CalendarPreviewRequest>(params)
+                    .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            let preview = scheduled::preview::calendar_preview(&st.db, &plugin_id, &request)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            serde_json::to_value(preview).map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
         "scheduled.list" => {
             let tasks = scheduled::list_tasks(&st.db)
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
@@ -55,6 +80,17 @@ fn handle_with_workspace_policy(
         }
         "scheduled.update" => {
             let mut params = params;
+            if let Some(id) = params.get("id").and_then(Value::as_str) {
+                if plugin_scheduled::is_plugin_task(&st.db, id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                {
+                    return Err(rpc_err(
+                        1003,
+                        "plugin-owned schedule cannot be edited here",
+                        "PERMISSION_DENIED",
+                    ));
+                }
+            }
             validate_schedule_input(&params)?;
             validate_execution_input(&params)?;
             if matches!(
@@ -98,6 +134,15 @@ fn handle_with_workspace_policy(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| rpc_err(1002, "id required", "INVALID_PARAMS"))?;
+            if plugin_scheduled::is_plugin_task(&st.db, id)
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+            {
+                return Err(rpc_err(
+                    1003,
+                    "plugin-owned schedule cannot be deleted here",
+                    "PERMISSION_DENIED",
+                ));
+            }
             let ok = scheduled::delete_task(&st.db, id)
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
             Ok(json!({ "ok": ok }))
@@ -127,6 +172,15 @@ fn handle_with_workspace_policy(
                 .get("id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| rpc_err(1002, "id required", "INVALID_PARAMS"))?;
+            if plugin_scheduled::is_plugin_task(&st.db, id)
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+            {
+                return Err(rpc_err(
+                    1003,
+                    "plugin-owned schedule requires its own execution origin",
+                    "PERMISSION_DENIED",
+                ));
+            }
             let task = scheduled::get_task(&st.db, id)
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
                 .ok_or_else(|| rpc_err(1007, "task not found", "NOT_FOUND"))?;
@@ -168,6 +222,7 @@ fn handle_with_workspace_policy(
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
                 .unwrap_or_else(|| json!({}));
             let options = sessions::SessionCreateOptions {
+                tool_policy: None,
                 title: Some(task.title.clone()),
                 mode: Some("agent".into()),
                 thinking_level: task.thinking_level.clone(),
@@ -229,8 +284,189 @@ fn handle_with_workspace_policy(
         "scheduled.due" => {
             let ids = scheduled::automation::due(&st.db, crate::db::now_ms())
                 .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
-            Ok(json!({ "ids": ids }))
+            let mut ordinary = Vec::new();
+            for id in ids {
+                if !plugin_scheduled::is_plugin_task(&st.db, &id)
+                    .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?
+                {
+                    ordinary.push(id);
+                }
+            }
+            Ok(json!({ "ids": ordinary }))
         }
+        "scheduled.pluginUpsert" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::upsert(&st.db, plugin_id, &params)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginGet" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let key = params
+                .get("externalKey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "externalKey required", "INVALID_PARAMS"))?;
+            plugin_scheduled::get(&st.db, plugin_id, key)
+                .map(|binding| json!({ "binding": binding }))
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
+        "scheduled.pluginDisable" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let key = params
+                .get("externalKey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "externalKey required", "INVALID_PARAMS"))?;
+            plugin_scheduled::disable(&st.db, plugin_id, key)
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
+        "scheduled.pluginDisableAll" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::disable_all(&st.db, plugin_id)
+                .map(|count| json!({ "disabledCount": count }))
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
+        "scheduled.pluginAccept" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::accept_occurrence(&st.db, plugin_id, &params)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginRegisterCreatedSession" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_PARAMS"))?;
+            plugin_scheduled::register_created_session(&st.db, plugin_id, session_id)
+                .map(|_| json!({ "ok": true }))
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginPrepareStart" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::prepare_start(&st.db, plugin_id, &params)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginRecordStart" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let intent_id = params
+                .get("requestIntentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "requestIntentId required", "INVALID_PARAMS"))?;
+            plugin_scheduled::record_start(
+                &st.db,
+                plugin_id,
+                intent_id,
+                params.get("turnId").and_then(Value::as_str),
+            )
+            .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginLookupStart" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let intent_id = params
+                .get("requestIntentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "requestIntentId required", "INVALID_PARAMS"))?;
+            plugin_scheduled::lookup_start(&st.db, plugin_id, intent_id)
+                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))
+        }
+        "scheduled.pluginRecordRejected" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let intent_id = params
+                .get("requestIntentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "requestIntentId required", "INVALID_PARAMS"))?;
+            let code = params
+                .get("code")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "code required", "INVALID_PARAMS"))?;
+            plugin_scheduled::record_rejection(&st.db, plugin_id, intent_id, code)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginSessionOwnership" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            let session_id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_PARAMS"))?;
+            plugin_scheduled::session_ownership(&st.db, plugin_id, session_id)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginSkip" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::skip_occurrence(&st.db, plugin_id, &params)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginRetry" => {
+            let plugin_id = params
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    rpc_err(1003, "authenticated pluginId required", "PERMISSION_DENIED")
+                })?;
+            plugin_scheduled::retry_occurrence(&st.db, plugin_id, &params, crate::db::now_ms())
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
+        "scheduled.pluginDue" => plugin_scheduled::due(&st.db, crate::db::now_ms())
+            .map(|occurrences| json!({ "occurrences": occurrences }))
+            .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL")),
         "scheduled.finishRun" => {
             let run_id = params
                 .get("runId")

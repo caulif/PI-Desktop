@@ -33,6 +33,7 @@ import { createFsConsentService } from "../plugin-fs-consent";
 import { pluginWorkspaceInfo } from "../workspace-roots";
 import { createDesktopConsentService } from "../plugin-desktop-consent";
 import { PluginRuntime } from "../plugin-runtime";
+import { PluginScheduleDisableOutbox } from "../plugin-schedule-disable-outbox";
 import { createSpeechService } from "./speech-service";
 import { PluginShortcutRegistry } from "../plugin-shortcut-registry";
 import { PluginWebSocketRegistry } from "../plugin-websocket";
@@ -101,6 +102,7 @@ export function createPluginServices({
   const isHostUnavailable = (error: unknown): boolean =>
     (error as { errorCode?: string } | null | undefined)?.errorCode ===
     ErrorCodes.HOST_UNAVAILABLE;
+  const scheduleDisableOutbox = new PluginScheduleDisableOutbox(dataDir);
   const pluginPanels = new PluginPanelHost(
     async (pluginId, channel, payload, context) =>
       plugins.invokePanelBridge(pluginId, channel, payload, context),
@@ -631,8 +633,9 @@ export function createPluginServices({
       console: (limit) => browserHost.console(limit),
       cdp: (method, params) => browserHost.cdpCommand(method, params),
     },
-    onPluginUnload: (pluginId) => {
+    onPluginUnload: async (pluginId) => {
       if (pluginId === BROWSER_PLUGIN_ID) browserHost.disposeGuest();
+      await scheduleDisableOutbox.enqueue(pluginId, getHost);
     },
   });
   const speech = createSpeechService({
@@ -653,5 +656,6 @@ export function createPluginServices({
     pluginViews,
     browserHost,
     speech,
+    scheduleDisableOutbox,
   };
 }
