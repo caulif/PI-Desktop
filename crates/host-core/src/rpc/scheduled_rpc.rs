@@ -32,6 +32,21 @@ fn handle_with_workspace_policy(
     allow_workspace_override: bool,
 ) -> Result<Value, JsonRpcError> {
     match method {
+        "scheduled.devPluginDueAt" => {
+            if !allow_workspace_override {
+                return Err(rpc_err(
+                    1003,
+                    "native diagnostic transport required",
+                    "PERMISSION_DENIED",
+                ));
+            }
+            scheduled::diagnostic_due::require_profile(&st.db)
+                .map_err(|e| rpc_err(1003, e.to_string(), "PERMISSION_DENIED"))?;
+            let request = serde_json::from_value::<scheduled::diagnostic_due::DueAtRequest>(params)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            scheduled::diagnostic_due::due_at(&st.db, &request)
+                .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))
+        }
         "scheduled.devCalendarPreview" => {
             scheduled::preview::require_development_profile(&st.db)
                 .map_err(|e| rpc_err(1003, e.to_string(), "PERMISSION_DENIED"))?;

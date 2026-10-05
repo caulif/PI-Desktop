@@ -1,5 +1,27 @@
 # 12. Plugin IPC and Host Services
 
+## Isolated controlled due diagnostic (ADR 0315)
+
+`scheduled.devPluginDueAt` is a native-only development RPC, absent from Plugin
+SDK/MCP services. It requires both `PI_DESKTOP_DEV_CALENDAR_PREVIEW_DIR` and
+`PI_DESKTOP_DEV_SCHEDULE_DUE_DIR` to match the same canonical dedicated Temp
+profile before SQLite opens and again on every call. It accepts exact plugin,
+external key, definition revision, timezone, RFC3339 `now`, and a one-time
+`seedAfter`. Unknown fields, stale identity, backward time, multiple bindings,
+disabled/unapproved bindings, and repeated seed are refused.
+
+Seed is permitted only without occurrence history and at most seven days before
+`now`; nextRunAt uses the production calendar. A transaction atomically covers
+the clock cursor, seed, production due writes and final readback. Production
+occurrence savepoints remain atomic with or without that outer transaction.
+No authorization is created, OS clock changed, or model started; prompt admission
+and plugin policy still use their existing clocks.
+
+The runner journals mutations and records unknown results for lookup only.
+Stored authorization alone does not prove native consent; missing hash-bound
+native observation leaves acceptance incomplete. Controlled due persistence,
+real wall-clock firing, and plugin Run/Attempt acceptance are separate evidence.
+
 ## Isolated native calendar diagnostic (ADR 0312)
 
 `scheduled.devCalendarPreview` is a native Host development RPC, never a Plugin

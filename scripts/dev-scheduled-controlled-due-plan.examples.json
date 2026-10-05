@@ -1,0 +1,47 @@
+{
+  "instructions": "Choose one plan, replace externalKey/revision with the exact stored binding, and save that plan as a standalone JSON file. Each case requires its own exact dedicated isolated profile with one binding and no occurrence history. To claim native provenance add nativeReceiptPath/nativeReceiptSha256 identifying an observed-native-schedule-authorization receipt with source native_ui_observation, outcome granted, exact profile, requestHash, request (requestId/pluginId/externalKey/taskId/definitionRevision/sessionId/goalHash/promptTemplateHash/authorizationHash/timezone/schedule), and evidenceRefs containing each real UI evidence path/sha256. Without that receipt the report remains incomplete, even when controlled due passes. Existing request journals are lookup-only; use --lookup-only, never replay. These examples create neither authorization nor model executions.",
+  "plans": [
+    {
+      "kind": "isolated-real-host-controlled-due-plan",
+      "pluginId": "local.pi-bot",
+      "externalKey": "REPLACE_WITH_APPROVED_GAP_ROUTINE",
+      "expectedDefinitionRevision": 1,
+      "expectedTimezone": "America/New_York",
+      "expectedSchedule": { "hour": 2, "minute": 30, "weekday": 0 },
+      "case": "gap",
+      "steps": [
+        { "seedAfter": "2026-03-08T05:00:00Z", "now": "2026-03-08T08:00:00Z", "expectedPending": [], "expectedHistory": [] },
+        { "now": "2026-03-09T06:30:00Z", "restart": true, "expectedPending": ["2026-03-09T06:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-03-09T06:30:00.000Z", "state": "pending", "skipReason": null }] },
+        { "now": "2026-03-09T06:30:00Z", "restart": true, "expectedPending": ["2026-03-09T06:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-03-09T06:30:00.000Z", "state": "pending", "skipReason": null }] }
+      ]
+    },
+    {
+      "kind": "isolated-real-host-controlled-due-plan",
+      "pluginId": "local.pi-bot",
+      "externalKey": "REPLACE_WITH_APPROVED_FOLD_ROUTINE",
+      "expectedDefinitionRevision": 1,
+      "expectedTimezone": "America/New_York",
+      "expectedSchedule": { "hour": 1, "minute": 30, "weekday": 0 },
+      "case": "fold",
+      "steps": [
+        { "seedAfter": "2026-11-01T04:00:00Z", "now": "2026-11-01T05:30:00Z", "expectedPending": ["2026-11-01T05:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "pending", "skipReason": null }] },
+        { "now": "2026-11-01T05:30:00Z", "restart": true, "expectedPending": ["2026-11-01T05:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "pending", "skipReason": null }] },
+        { "now": "2026-11-01T06:30:00Z", "expectedPending": [], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "skipped", "skipReason": "deadline" }] },
+        { "now": "2026-11-02T06:30:00Z", "restart": true, "expectedPending": ["2026-11-02T06:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "skipped", "skipReason": "deadline" }, { "scheduledFor": "2026-11-02T06:30:00.000Z", "state": "pending", "skipReason": null }] }
+      ]
+    },
+    {
+      "kind": "isolated-real-host-controlled-due-plan",
+      "pluginId": "local.pi-bot",
+      "externalKey": "REPLACE_WITH_APPROVED_MISSED_ROUTINE",
+      "expectedDefinitionRevision": 1,
+      "expectedTimezone": "America/New_York",
+      "expectedSchedule": { "hour": 1, "minute": 30, "weekday": 0 },
+      "case": "missed",
+      "steps": [
+        { "seedAfter": "2026-10-29T04:00:00Z", "now": "2026-11-01T05:30:00Z", "expectedPending": ["2026-11-01T05:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "pending", "skipReason": null }] },
+        { "now": "2026-11-01T05:30:00Z", "restart": true, "expectedPending": ["2026-11-01T05:30:00.000Z"], "expectedHistory": [{ "scheduledFor": "2026-11-01T05:30:00.000Z", "state": "pending", "skipReason": null }] }
+      ]
+    }
+  ]
+}

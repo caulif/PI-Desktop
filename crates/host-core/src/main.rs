@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         });
 
     scheduled::preview::validate_startup_profile(&data_dir)?;
+    scheduled::diagnostic_due::validate_startup_profile(&data_dir)?;
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
     std::fs::create_dir_all(data_dir.join("plugins/installed"))?;

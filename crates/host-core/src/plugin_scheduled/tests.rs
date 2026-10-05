@@ -138,6 +138,55 @@ fn enabled_schedule_requires_persisted_native_authorization_and_exact_target() {
 }
 
 #[test]
+fn same_revision_enable_and_authorization_roll_back_together() {
+    for enabled in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_in_dir(dir.path()).unwrap();
+        let mut definition = input(1);
+        definition["enabled"] = json!(!enabled);
+        let before = upsert(&db, "plugin-a", &definition).unwrap();
+        let authorization =
+            |db: &Database| {
+                db.conn().query_row(
+                "SELECT authorization_hash,authorized_session_id,goal_hash,prompt_template_hash
+                 FROM plugin_schedule_bindings WHERE plugin_id='plugin-a'",
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),
+            ).unwrap()
+            };
+        let before_authorization = authorization(&db);
+        db.conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_authorization BEFORE UPDATE ON plugin_schedule_bindings
+             BEGIN SELECT RAISE(ABORT,'injected authorization failure'); END;",
+            )
+            .unwrap();
+        definition["enabled"] = json!(enabled);
+        assert!(super::upsert(&db, "plugin-a", &definition).is_err());
+        assert!(db.conn().is_autocommit());
+        assert_eq!(
+            get(&db, "plugin-a", "weekly-digest").unwrap().unwrap(),
+            before
+        );
+        assert_eq!(authorization(&db), before_authorization);
+        drop(db);
+        let db = Database::open_in_dir(dir.path()).unwrap();
+        assert_eq!(
+            get(&db, "plugin-a", "weekly-digest").unwrap().unwrap(),
+            before
+        );
+        assert_eq!(authorization(&db), before_authorization);
+        db.conn()
+            .execute_batch("DROP TRIGGER fail_authorization")
+            .unwrap();
+        let retried = super::upsert(&db, "plugin-a", &definition).unwrap();
+        assert_eq!(retried["task"]["enabled"], enabled);
+        assert_eq!(authorization(&db).0.is_some(), enabled);
+    }
+}
+
+#[test]
 fn v21_upgrade_disables_schedules_without_native_authorization() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pi.sqlite");
