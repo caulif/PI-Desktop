@@ -69,3 +69,5 @@ export * from "./prompt-enhancement.js";
 export * from "./native-web-search.js";
 export * from "./native-web-search-transport.js";
 export * from "./header-value.js";
+export { PLUGIN_FS_MODES, FS_DENY_DIR_SEGMENTS, FS_DENY_FILE_PATTERNS, normalizeFsPath, isDeniedFsPath, fsGlobIgnoresCase, matchFsGlob, isFsPathInScope, isWholeTreePattern, parseFsPolicy, LEGACY_FS_PERMISSIONS, resolveFsAccess } from "./plugin-fs-policy.js";
+export type { PluginFsRoot, PluginFsMode, MatchFsGlobOptions, ResolvedFsAccess } from "./plugin-fs-policy.js";

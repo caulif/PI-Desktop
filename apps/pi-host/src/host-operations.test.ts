@@ -1,6 +1,6 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { RacpError } from "@pi-desktop/agent-host";
@@ -60,7 +60,7 @@ describe("pi-host operations over host-core", () => {
       browseRoot: root,
     });
     const listed = await operations.sessions.list();
-    expect(listed[0]).toMatchObject({ id: "s1", workspaceLabel: root.split("/").pop() });
+    expect(listed[0]).toMatchObject({ id: "s1", workspaceLabel: basename(root) });
     const created = await operations.sessions.create({ title: "T", projectId: "7", permissionMode: "auto" }, { subject: "d", roles: ["owner"] });
     expect(created.permissionMode).toBe("auto");
     expect(calls.find((call) => call.method === "session.create")?.params).toMatchObject({ projectPath: root });

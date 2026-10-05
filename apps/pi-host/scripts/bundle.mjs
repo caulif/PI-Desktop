@@ -61,6 +61,7 @@ execFileSync(
   ],
   { stdio: "inherit", cwd: app },
 );
+execFileSync(require.resolve("esbuild/bin/esbuild"), [join(app,"src/index.ts"),"--bundle","--platform=node","--format=esm","--target=node22","--external:node-pty","--external:bufferutil","--external:utf-8-validate",`--outfile=${join(out,"service.mjs")}`,"--banner:js=import { createRequire as __piCreateRequire } from 'node:module'; const require = __piCreateRequire(import.meta.url);"], {stdio:"inherit",cwd:app});
 cpSync(sidecar, join(out, "agent-runtime/sidecar.js"));
 writeFileSync(join(out, "agent-runtime/package.json"), '{ "type": "module" }\n');
 cpSync(hostCore, join(out, `bin/pi-desktop-host-core${exe}`));

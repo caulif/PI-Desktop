@@ -14,6 +14,7 @@ import {
 
 import type { LaunchResolver } from "./launch-resolver.js";
 import { resolveSessionMessageInput } from "./session-message-input.js";
+import { consumePluginPromptAdmission } from "./trusted-plugin-prompt.js";
 import { TurnEventPipeline } from "./turn-events.js";
 
 /** host-core as the turn lifecycle drives it. `HostProcess` satisfies it. */
@@ -312,7 +313,8 @@ export class RuntimeService implements RuntimePort {
     const launch = await this.options.launch.resolve(sessionId, session, settings ?? {});
     sidecar.setProjectInstructionRoot(sessionId, launch.projectPath);
 
-    const turnId = await this.beginTurn(sessionId, launch.providerId, launch.modelId, sessionMessage?.origin.messageId);
+    const admission = consumePluginPromptAdmission(request);
+    const turnId = await this.beginTurn(sessionId, launch.providerId, launch.modelId, sessionMessage?.origin.messageId, admission);
 
     let content = sessionMessage?.content ?? request.content;
     let command: string | undefined;
@@ -521,13 +523,15 @@ export class RuntimeService implements RuntimePort {
   }
 
   /** Open a durable turn row and take ownership of the session for it. */
-  async beginTurn(sessionId: string, providerId: string, modelId: string, sessionMessageId?: string): Promise<string> {
-    const turn = await this.requireHost().call<{ turnId?: string }>("session.beginTurn", {
+  async beginTurn(sessionId: string, providerId: string, modelId: string, sessionMessageId?: string, admission?: {pluginId: string; requestIntentId: string; claimId: string}): Promise<string> {
+    const turn = await this.requireHost().call<{ turnId?: string; start?: boolean }>(admission ? "plugin.promptBeginTurn" : "session.beginTurn", {
       sessionId,
       providerId,
       modelId,
       ...(sessionMessageId ? { sessionMessageId } : {}),
+      ...(admission ?? {}),
     });
+    if (admission && turn.start === false) throw typedError("Prompt claim was already consumed", "IDEMPOTENCY_CONFLICT");
     const turnId = String(turn?.turnId ?? "").trim();
     if (!turnId) throw new Error("session.beginTurn returned no turn");
     this.activeTurns.set(sessionId, turnId);

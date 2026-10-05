@@ -1,0 +1,72 @@
+import type { AppSettings, ThinkingLevel } from "@pi-desktop/shared";
+export type PluginModelInfo = {key:string;providerId:string;providerName:string;modelId:string;label:string;alias?:string;availableForSubagents:boolean;isDefault:boolean;supportsReasoning:boolean;thinkingLevels:ThinkingLevel[]};
+export type ListedProvider = {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  hasSecret?: boolean;
+  hasOauth?: boolean;
+  authKind?: string;
+  supportsReasoning?: boolean;
+  supportedThinkingLevels?: ThinkingLevel[];
+  defaultModelId?: string;
+  models?: Array<{
+    id: string;
+    alias?: string;
+    availableForSubagents?: boolean;
+    thinkingLevels?: ThinkingLevel[];
+  }>;
+};
+
+export function listReadyPluginModels(
+  providers: ListedProvider[],
+  settings: Pick<AppSettings, "defaultProviderId" | "defaultModelId"> = {},
+): PluginModelInfo[] {
+  const models: PluginModelInfo[] = [];
+  const enabled = providers.filter((provider) => provider.enabled !== false);
+  const isReady = (provider: ListedProvider) =>
+    provider.hasSecret === true || provider.hasOauth === true || provider.authKind === "none";
+  // Match session launch fallback order without advertising an unavailable default.
+  const defaultProvider = enabled.find((provider) => provider.id === settings.defaultProviderId)
+    ?? enabled.find(isReady)
+    ?? enabled[0];
+  const defaultModelId = (defaultProvider?.id === settings.defaultProviderId ? settings.defaultModelId : undefined)
+    || defaultProvider?.models?.[0]?.id
+    || defaultProvider?.defaultModelId;
+  let defaultAssigned = false;
+  for (const provider of enabled) {
+    if (!isReady(provider)) continue;
+    const bindings: NonNullable<ListedProvider["models"]> =
+      provider.models?.length
+        ? provider.models
+        : provider.defaultModelId
+          ? [{ id: provider.defaultModelId }]
+          : [];
+    for (const binding of bindings) {
+      const modelId = String(binding.id ?? "").trim();
+      if (!modelId) continue;
+      const thinkingLevels =
+        binding.thinkingLevels
+          ? [...binding.thinkingLevels]
+          : [...(provider.supportedThinkingLevels ?? ["off"])];
+      const isDefault = !defaultAssigned && provider.id === defaultProvider?.id && modelId === defaultModelId;
+      if (isDefault) defaultAssigned = true;
+      models.push({
+        key: `${provider.id}/${modelId}`,
+        providerId: provider.id,
+        providerName: provider.name,
+        modelId,
+        label: `${modelId} (${provider.name})`,
+        ...(binding.alias?.trim() ? { alias: binding.alias.trim() } : {}),
+        availableForSubagents: binding.availableForSubagents === true,
+        isDefault,
+        supportsReasoning:
+          thinkingLevels.some((level) => level !== "off") ||
+          (binding.thinkingLevels === undefined && provider.supportsReasoning === true),
+        thinkingLevels,
+      });
+    }
+  }
+  return models;
+}
+

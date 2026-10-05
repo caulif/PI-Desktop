@@ -15587,3 +15587,17 @@ renderer's durable transcript reads. No real model or provider is contacted.
 - **Acceptance:** Cache-path, migration, and cleanup unit tests pass; Windows task-candidate validation confirms the updater feed transport, installer handoff, and filesystem behavior without a live release feed.
 - **Milestone:** M6+
 - **Status:** Unit and source-contract covered (`update-cache.test.mjs`, `auto-update.test.mjs`); Windows installer/E2E validation remains required.
+
+## E2E-HEADLESS-first-party-bot
+
+Use an isolated data directory and a non-root account. Start the actual Host core
+and Node sidecar without Electron; register pi-bot's real lifecycle, configured
+project and deterministic test provider. Verify a user prompt reaches a real turn,
+Host-attributed bot_workbench callback records a versioned result, native tool
+approval blocks until an exact one-time response, and shutdown cleans resources.
+A deterministic provider proves protocol integration only; separately run bounded
+real-model evaluation and record model/cost/stop conditions before product acceptance.
+Restart/resync must not resend an unknown or already accepted prompt. Verify
+Routine due delivery with the browser closed and symlink/descriptor file-boundary
+failures. Unit companions cover forged authority, stale turns, exact consent hashes,
+registered scope/secret denial and scoped atomic writes.

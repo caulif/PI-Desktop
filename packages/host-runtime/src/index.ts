@@ -12,3 +12,12 @@ export * from "./runtime-service.js";
 export * from "./plan-dispatch.js";
 export * from "./workspace-files.js";
 export * from "./workspace-diff.js";
+
+export * from "./plugin-tool-invocations.js";
+export * from "./trusted-plugin-prompt.js";
+export * from "./plugin-prompt-control.js";
+export * from "./plugin-schedule-control.js";
+export * from "./scheduled-runner.js";
+export * from "./plugin-control-types.js";
+export * from "./plugin-models.js";
+export * from "./plugin-verification-control.js";

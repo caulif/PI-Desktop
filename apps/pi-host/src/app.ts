@@ -1,3 +1,4 @@
+import { createTrustedPlugin, type TrustedPluginConfig, type TrustedPlugin } from "./trusted-plugin.js";
 import { mkdir } from "node:fs/promises";
 
 import { AgentHost, type ApprovalPort } from "@pi-desktop/agent-host";
@@ -25,6 +26,7 @@ export type PiHostApp = {
   hostId: string;
   address: { host: string; port: number };
   agentHost: AgentHost;
+  plugin?: TrustedPlugin;
   runtime: RuntimeService;
   authenticator: DeviceTokenAuthenticator;
   server: RacpServer;
@@ -43,7 +45,7 @@ const APPROVAL_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
  * would own for a local session — transcript, queue, approvals, tools,
  * workspace — lives here on this machine.
  */
-export async function startPiHost(config: PiHostConfig, options: { log?: HostLogger } = {}): Promise<PiHostApp> {
+export async function startPiHost(config: PiHostConfig, options: { log?: HostLogger; trustedPlugin?: TrustedPluginConfig } = {}): Promise<PiHostApp> {
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const log = options.log ?? createLogger({ dataDir: config.dataDir, minLevel: config.logLevel });
   const hostId = await loadOrCreateHostId(config.dataDir);
@@ -54,7 +56,8 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
   const getHost = () => state.host;
   const getSidecar = () => state.sidecar;
 
-  const launch = createHeadlessLaunchResolver({ getHost, dataDir: config.dataDir, log: (level, message, data) => log(level, message, data) });
+  let plugin: TrustedPlugin | undefined;
+  const launch = createHeadlessLaunchResolver({ pluginTools: () => plugin?.toolCatalog() ?? [], getHost, dataDir: config.dataDir, log: (level, message, data) => log(level, message, data) });
   const runtime = new RuntimeService({ getHost, getSidecar, launch, log });
 
   const approvals: ApprovalPort = {
@@ -143,6 +146,7 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
       throw error;
     }
     runtime.attachHost(host);
+    plugin?.attach(host);
     state.sidecar?.setHost(host);
     log("info", "host-core handshake ok", { generation: host.generation });
   };
@@ -190,6 +194,7 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
       queuePrioritize: async (params) => agentHost.prioritizeTurn({ subject: "extension", roles: ["controller"] }, String(params.id ?? "")),
     });
     state.sidecar = sidecar;
+
     runtime.attachSidecar(sidecar);
     if (state.host) sidecar.setHost(state.host);
     await sidecar.call("sidecar.configure", { hostBinary: config.hostCoreBinary, dataDir: config.dataDir });
@@ -206,9 +211,12 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
     },
   });
 
+  if (options.trustedPlugin) plugin = createTrustedPlugin(options.trustedPlugin, { getHost, getSidecar, runtime, agentHost, log });
   await startHost();
+  if (options.trustedPlugin) for (const root of options.trustedPlugin.workspaceRoots) await state.host!.call("projects.create", { path: root });
   await startSidecar();
   await agentHost.start();
+  plugin?.start();
   await plans.drainApprovedPlanExecutions().catch((error: unknown) => log("warn", "queued approved plan drain failed", { error: String(error) }));
 
   const pty = loadPty();
@@ -259,6 +267,7 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
     hostId,
     address: binding.address,
     agentHost,
+    ...(plugin ? { plugin } : {}),
     runtime,
     authenticator,
     server,
@@ -268,6 +277,7 @@ export async function startPiHost(config: PiHostConfig, options: { log?: HostLog
       if (state.stopping) return;
       state.stopping = true;
       log("info", "pi-host stopping");
+      plugin?.stop();
       server.close();
       await binding.close();
       await terminal?.closeAll();
