@@ -3419,7 +3419,7 @@ window; opening a normal panel afterward must still work.
 
 - **Preconditions**: A marketplace/package-installable `examples/plugins/hello` variant (`demo.hello`) whose `midnight` theme CSS references a declared package-relative image at `art/preview.png`; a plugin with CSS using `@import` or remote `url()` for rejection plus a comment-only variant; an asset theme with `windowAppearance` variants with and without `ui.window.appearance`, including `cornerRadius: 0` and an invalid value above 24.
 - **Steps**: 1) Install the packaged Hello variant from Marketplace or its `.piplug` package and select `Hello Midnight` in Settings → General → Theme. 2) Restart the app. 3) Disable the providing plugin. 4) Re-enable it, then uninstall it. 5) Load the plugin with unsafe CSS. 6) Load the comment-only variant. 7) Select the asset variant's theme on Windows/Linux and on macOS, verify the package-relative image renders through `plugin-asset:` in the shell and the plugin's panel, and load a sheet with an undeclared package-relative `url()` to verify it is refused. 8) Deselect its theme after removing `ui.window.appearance`.
-- **Expected**: The packaged plugin installs successfully with its relative image resolved inside the plugin root; its theme appears in the picker alongside the built-ins and applies immediately, with the image served through `plugin-asset:`; the choice survives restart as `plugin:demo.hello:midnight`; disabling or uninstalling the provider falls back to `system` instead of an unstyled shell; unsafe CSS is refused at load with the reason logged and no `<style>` element injected; the comment-only sheet loads and contributes its theme, because the sanitizer only inspects CSS the browser would apply; the declared asset paints through `plugin-asset:` in the shell and in the plugin's own panel, an undeclared reference is refused with the reason logged, the declared background colours the native window on Windows/Linux and is never sent on macOS, and `cornerRadius: 0` makes only the Windows main window rectangular while the authorized theme is selected. Deselecting the theme or dropping the grant restores the host background and 4 DIP Windows corners; a radius above 24 rejects without changing the window. The whole shell follows the theme, including the work-panel column, its header, and the browser/file viewer strips, all of which read `--ds-bg-dock` / `--ds-bg-dock-raised` rather than a literal.
+- **Expected**: The packaged plugin installs successfully with its relative image resolved inside the plugin root; its theme appears in the picker alongside the built-ins and applies immediately, with the image served through `plugin-asset:`; the choice survives restart as `plugin:demo.hello:midnight`; disabling or uninstalling the provider falls back to `system` instead of an unstyled shell; unsafe CSS is refused at load with the reason logged and no `<style>` element injected; the comment-only sheet loads and contributes its theme, because the sanitizer only inspects CSS the browser would apply; the declared asset paints through `plugin-asset:` in the shell and in the plugin's own panel, an undeclared reference is refused with the reason logged, the declared background colours the native window on Windows/Linux and is never sent on macOS, and `cornerRadius: 0` makes only the Windows main window rectangular while the authorized theme is selected. Deselecting the theme or dropping the grant restores the host background and the global 12 DIP `--radius-md` Windows corners; a radius above 24 rejects without changing the window. The whole shell follows the theme, including the work-panel column, its header, and the browser/file viewer strips, all of which read `--ds-bg-dock` / `--ds-bg-dock-raised` rather than a literal.
 - **Specs linked**: `07-plugins/02-plugin-manifest-schema.md`, `07-plugins/04-plugin-security.md` §3.1, `04-ux/07-ui-design-system.md`, D175
 - **Acceptance**: G (theme contribution) + Security
 - **Status**: Unit-covered (`plugin-themes.test.mjs`, `theme-css` SDK tests, host-core package-relative asset/install tests). `test:e2e:window-controls` selects an authorized test plugin theme with `cornerRadius: 0` and returns to a built-in theme, verifying the native shape follows both choices. The broader asset visual scenario remains Draft.
@@ -11195,12 +11195,20 @@ This test plan spec is accepted when:
   6. Emit `Edit` on a path that does not exist but whose basename and tag match
      exactly one file this session recorded, and inspect the warning.
   7. Repeat step 6 with two recorded candidates sharing that basename and tag.
+  8. Emit `MV` to the source itself, `./source`, `sub/../source`, and its
+     absolute path, plus a directory symlink (Windows junction) pointing back
+     to its directory; on a case-insensitive filesystem also use a case-only
+     alias. Repeat with a
+     content-changing `PUT` in the same call, then use the original Read tag
+     for a valid content edit.
 - **Expected**: Step 1 records a source deletion and a destination creation under
   one tool call; step 3 restores both or neither. Step 4's rollback restores the
   captured bytes, hash-guarded on the full digest rather than the 16-bit tag.
   Step 5 fails rather than editing against content the rollback replaced. Step 6
   rebinds to the real file with a warning, and the write-permission gate is
   evaluated against the rebound path; step 7 declines instead of picking one.
+  Step 8 returns `EDIT_NO_CHANGE` without writing or deleting the source, and
+  the original Read tag remains usable for the following valid edit.
 - **Specs linked**: `03-runtime/18-line-anchored-edit-contract.md` §9.2, §13.1,
   `03-runtime/03-tools-and-permissions.md` §4c, ADR 0043, ADR 0087
 - **Acceptance**: E (tools & permissions), Quality
@@ -12081,7 +12089,8 @@ This test plan spec is accepted when:
      return. Release the pointer outside the original window bounds, then
      maximize and enter fullscreen; native hit regions must not block
      window controls or content in those states.
-  6. On Windows, inspect the default 4 DIP corner cutouts before and after
+  6. On Windows, inspect the default 12 DIP corner cutouts, matching the global
+     `--radius-md` token, before and after
      resizing. Apply an authorized theme with `cornerRadius: 0`, then return to
      a built-in theme. Reject an out-of-range radius without changing the shape.
 - **Expected**: Native edge and corner hit regions remain available in frameless
@@ -12094,12 +12103,13 @@ This test plan spec is accepted when:
   or right native rim is visible. No temporary
   work-panel reservation width is persisted or restored.
   The four normal-window corners have no painted or interactive pixels outside
-  the active radius; the default is 4 DIP, an authorized theme may choose 0..24
+  the active radius; the default is the global 12 DIP `--radius-md` radius, an
+  authorized theme may choose 0..24
   DIP, and maximized/fullscreen windows are rectangular.
 - **Specs linked**: `03-runtime/01-ipc-protocol.md`,
   `04-ux/01-ui-ia.md`, `04-ux/07-ui-design-system.md`,
   `04-ux/08-component-spec.md`, `04-ux/09-interaction-patterns.md`,
-  ADR 0029 / ADR 0151
+  ADR 0029 / ADR 0151 / ADR 0317
 - **Acceptance**: A (app shell), F (persistence), Quality
 - **Milestone**: M6+
 - **Status**: `test:e2e:window-controls` covers corner cutouts, theme radius
@@ -12744,14 +12754,18 @@ are withdrawn with ADR 0165.
   every allowed root. Repeat the path-recognition checks with a POSIX project
   path containing a space on macOS or Linux.
 - **Steps**: 1) Click the full path in the Write row. 2) Click the same full
-  path as inline code and as ordinary text in the assistant reply. 3) Click a
+  path as inline code and as ordinary text in the assistant reply. On Windows,
+  also click it as a Markdown link with an angle-bracketed destination, for
+  example `[readme.md](<C:\workspace with spaces\readme.md>)`. 3) Click a
   relative path whose middle directory contains a space, then a first-segment
   spaced path using an explicit `@"..."` reference. 4) Click the outside
   absolute path.
 - **Expected**: Every allowed reference opens the exact file in the existing
   side file view; no path is truncated to its suffix or redirected to the
-  same-name file. The outside path opens nothing and reports the access limit,
-  while a missing in-root file reports that no file matches.
+  same-name file. The Windows Markdown link keeps a valid sanitized address
+  and reaches the existing file opener with the original drive path. The outside
+  path opens nothing and reports the access limit, while a missing in-root file
+  reports that no file matches.
 - **Specs linked**: `03-runtime/01-ipc-protocol.md` § fs,
   `04-ux/08-component-spec.md` §8.3.
 - **Acceptance**: C (conversation & stream), D (workspace), Quality
@@ -16926,26 +16940,39 @@ host-created files. The full app's file-preview viewer is covered separately.
   and a `globalThis.fetch` fixture for `https://api.typesafe.ai/v1/systemone`.
   Build workspace JS packages with `pnpm build:js`, then run
   `pnpm test:e2e:jev`. Do not use a real TypeSafe key or endpoint.
-- **Steps:** 1) In the rendered Jev settings card, save a sentinel key and
-  enable Jev. 2) Resolve a session launch with Jev enabled, then disabled and
-  in Plan mode. 3) Through the runtime's deferred catalog, request Jev in Agent
-  mode and inspect Plan/Goal catalogs. 4) Call `JevClassify` with one choice,
-  one score and one boolean question over a small JSON state. 5) Disable Jev
-  and remove the key in settings.
-- **Expected:** The UI stores the key under the fixed Host secret reference,
-  never returns it to settings state, and disables Jev after removal. Only an
-  enabled Agent launch reads the key and passes it ephemerally to the sidecar.
+- **Steps:** 1) On the service chooser's add path, confirm Jev is offered in
+  its own Classifiers group and absent when an existing row changes service,
+  and that no Jev card is on the model configuration page yet. 2) Open the Jev
+  form, paste a sentinel key and Check and save: the fixture answers the check,
+  the key reaches Host secure storage, Jev is on, and the card appears.
+  3) Resolve a session launch with Jev enabled, then disabled and in Plan mode.
+  4) Through the runtime's deferred catalog, request Jev in Agent mode and
+  inspect Plan/Goal catalogs. 5) Call `JevClassify` with one choice, one score
+  and one boolean question over a small JSON state. 6) Answer a check with 401
+  for a second key: nothing is written and Jev stays off. 7) Start a check and
+  close the dialog while it is still in flight: the key is not stored and Jev
+  stays off. 8) In the Jev card, switch Jev off and remove the key; the card
+  leaves with it.
+- **Expected:** The check runs before any write, in the order check, store, then
+  enable, so a refused key leaves no secret and no enabled setting behind, and
+  the refusal is reported with TypeSafe's status. The card is on the page only
+  once Jev has been added, and it leaves when the key does. The UI never returns
+  the key to settings state, and removal disables Jev before deleting it. Only
+  an enabled Agent launch reads the key and passes it ephemerally to the sidecar.
   `JevClassify` appears in the Agent's deferred catalog only with a key and
-  never in Plan or Goal. The fixture receives the TypeSafe System One payload
-  and bearer header; the tool returns bounded structured answers and usage.
+  never in Plan or Goal. Closing the dialog cancels an in-flight check the same
+  way a refused key does: nothing stored, nothing enabled. The fixture receives
+  the TypeSafe System One payload and bearer header; the tool returns bounded
+  structured answers and usage.
 - **Specs:** [Tools and permissions](../03-runtime/03-tools-and-permissions.md),
   [provider/model system](../03-runtime/11-provider-model-system.md),
   [secrets storage](../03-runtime/14-secrets-storage.md),
   [settings IA](../04-ux/06-settings-ia.md).
 - **Acceptance:** No paid or real-provider call. The suite verifies the UI user
-  path, fixed secret reference, opt-in Agent launch boundary, deferred mode
-  catalog, request body, bearer auth, usage, error redaction, cancellation,
-  timeout, malformed and oversized input rejection, and key removal.
+  path, the ordered check-then-store gate, the refused-key path, the fixed
+  secret reference, opt-in Agent launch boundary, deferred mode catalog,
+  request body, bearer auth, usage, error redaction, cancellation, timeout,
+  malformed and oversized input rejection, and key removal.
 - Disable/remove a provider or model and mark a model for image generation:
   unavailable history entries are skipped for inheritance and recent menu rows.
 - Settings contains no fixed chat-default picker or Make default service action;
