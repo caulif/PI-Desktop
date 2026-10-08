@@ -2050,9 +2050,21 @@ pub(crate) fn append_message_with_todo_boundary(
                 return Ok(None);
             }
         }
-        let transcript_repaired =
-            stale_turn_reference && repair_unindexed_transcript_message(db, session_id, &record)?;
-        if !transcript_repaired {
+        let repair = if stale_turn_reference {
+            repair_unindexed_transcript_message(
+                db,
+                session_id,
+                &record,
+                retire_todos && message.role == "user" && message.session_message.is_none(),
+            )?
+        } else {
+            None
+        };
+        if let Some(repair) = repair {
+            if message.role == "user" {
+                return Ok(repair.retired_todos);
+            }
+        } else {
             let retired = append_record(
                 db,
                 session_id,
@@ -2165,37 +2177,72 @@ fn valid_turn_reference(
     Ok(None)
 }
 
-/// Reconcile an old outbox replay whose transcript line landed before its
-/// SQLite index insert failed. Keep the file as source of truth and restore
-/// index sequence from its keep-last, unique-message projection.
+struct RepairedTranscript {
+    retired_todos: Option<crate::todos::TodoSnapshot>,
+}
+
+/// Reconcile a transcript line whose SQLite index insert failed, committing
+/// its input lifecycle boundary with the restored index rather than separately.
 fn repair_unindexed_transcript_message(
     db: &Database,
     session_id: &str,
     record: &MessageRecord,
-) -> Result<bool> {
+    retire_todos: bool,
+) -> Result<Option<RepairedTranscript>> {
     let mut records = dedupe_records(transcripts::read_transcript(db.data_dir(), session_id)?);
     let Some(position) = records.iter().position(|existing| existing.id == record.id) else {
-        return Ok(false);
+        return Ok(None);
     };
-    if !transcripts::update_message(db.data_dir(), session_id, record)? {
-        return Ok(false);
+    // A stale delivery turn may no longer supply collaboration provenance.
+    // Its canonical transcript origin still excludes this from human input.
+    let origin = records[position]
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("sessionMessage"))
+        .cloned();
+    let retire_todos = retire_todos && origin.is_none();
+    let mut replacement = record.clone();
+    if let Some(origin) = origin {
+        if records[position].role != record.role || records[position].blocks != record.blocks {
+            return Err(anyhow!(
+                "PERMISSION_DENIED: session message provenance is immutable"
+            ));
+        }
+        let mut meta = match replacement.meta.take() {
+            Some(Value::Object(meta)) => meta,
+            _ => serde_json::Map::new(),
+        };
+        if meta
+            .get("sessionMessage")
+            .is_some_and(|value| value != &origin)
+        {
+            return Err(anyhow!(
+                "PERMISSION_DENIED: session message provenance is immutable"
+            ));
+        }
+        meta.insert("sessionMessage".into(), origin);
+        replacement.meta = Some(Value::Object(meta));
     }
-    records[position] = record.clone();
+    if !transcripts::update_message(db.data_dir(), session_id, &replacement)? {
+        return Ok(None);
+    }
+    records[position] = replacement;
     invalidate_transcript_layout(session_id);
-    rebuild_session_message_index(db, session_id, &records)?;
+    let retired_todos = rebuild_session_message_index(db, session_id, &records, retire_todos)?;
     tracing::warn!(
         %session_id,
         message_id = %record.id,
         "reconciled transcript message after an unindexed outbox replay"
     );
-    Ok(true)
+    Ok(Some(RepairedTranscript { retired_todos }))
 }
 
 fn rebuild_session_message_index(
     db: &Database,
     session_id: &str,
     records: &[MessageRecord],
-) -> Result<()> {
+    retire_todos: bool,
+) -> Result<Option<crate::todos::TodoSnapshot>> {
     let existing_turns: std::collections::HashMap<String, String> = {
         let mut stmt = db.conn().prepare_cached(
             "SELECT m.id, m.turn_id, t.session_id
@@ -2243,8 +2290,13 @@ fn rebuild_session_message_index(
     if changed == 0 {
         return Err(anyhow!("session not found while rebuilding message index"));
     }
+    let retired_todos = if retire_todos {
+        crate::todos::retire_finished_tx(&tx, session_id)?
+    } else {
+        None
+    };
     tx.commit()?;
-    Ok(())
+    Ok(retired_todos)
 }
 
 fn streaming_assistant_indexed(db: &Database, session_id: &str, message_id: &str) -> Result<bool> {

@@ -15,6 +15,185 @@ fn queue_input(session: &str, id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn repaired_unaccepted_user_input_retires_once_and_rolls_back_on_retirement_failure() {
+    let mut harness = Harness::new();
+    let session = harness.session("agent").await;
+    let turn = harness.begin_turn(&session).await;
+    harness
+        .call(
+            "tools.execute",
+            write_call(
+                &session,
+                &turn,
+                json!({"todos": [{"content": "Old task", "status": "completed"}]}),
+            ),
+        )
+        .await
+        .unwrap();
+    let before = harness.snapshot(&session).await;
+    harness.events();
+    let mut input = user_input(&session, "unaccepted", false);
+    input["turnId"] = json!("missing-turn");
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_user BEFORE INSERT ON messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'injected append failure'); END;",
+            )
+            .unwrap();
+    }
+    assert!(harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .is_err());
+    assert_eq!(harness.snapshot(&session).await, before);
+    assert!(harness.events().is_empty());
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute_batch(
+                "DROP TRIGGER reject_user;
+            CREATE TRIGGER reject_retirement BEFORE DELETE ON session_todo
+            BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;",
+            )
+            .unwrap();
+    }
+    // Index repair and retirement must share a commit, just like fresh append.
+    assert!(harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .is_err());
+    assert_eq!(harness.snapshot(&session).await, before);
+    assert!(harness.events().is_empty());
+    {
+        let st = harness.state.lock().await;
+        assert_eq!(
+            st.db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = 'unaccepted'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        st.db
+            .conn()
+            .execute_batch("DROP TRIGGER reject_retirement")
+            .unwrap();
+    }
+    harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .unwrap();
+    let retired = harness.snapshot(&session).await;
+    assert_eq!(retired["todos"], json!([]));
+    assert_eq!(
+        retired["revision"].as_i64(),
+        Some(before["revision"].as_i64().unwrap() + 1)
+    );
+    let events = harness.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["method"], "todos.changed");
+    assert_eq!(events[0]["params"], retired);
+    let st = harness.state.lock().await;
+    assert_eq!(
+        st.db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id = 'unaccepted'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::transcripts::read_transcript(st.db.data_dir(), &session)
+            .unwrap()
+            .iter()
+            .filter(|message| message.id == "unaccepted")
+            .count(),
+        1
+    );
+    drop(st);
+    harness
+        .call(
+            "tools.execute",
+            write_call(
+                &session,
+                &turn,
+                json!({"todos": [{"content": "Later task", "status": "completed"}]}),
+            ),
+        )
+        .await
+        .unwrap();
+    let later = harness.snapshot(&session).await;
+    harness.events();
+    harness.call("session.appendMessage", input).await.unwrap();
+    assert_eq!(harness.snapshot(&session).await, later);
+    assert!(harness.events().is_empty());
+}
+
+#[tokio::test]
+async fn repairing_queued_input_does_not_repeat_its_admission_boundary() {
+    let mut harness = Harness::new();
+    let session = harness.session("agent").await;
+    let turn = harness.begin_turn(&session).await;
+    harness
+        .call("session.queuePush", queue_input(&session, "queued-repair"))
+        .await
+        .unwrap();
+    harness
+        .call(
+            "tools.execute",
+            write_call(
+                &session,
+                &turn,
+                json!({"todos": [{"content": "Later completion", "status": "completed"}]}),
+            ),
+        )
+        .await
+        .unwrap();
+    let later = harness.snapshot(&session).await;
+    harness.events();
+    let mut input = user_input(&session, "queued-repair", true);
+    input["turnId"] = json!("missing-turn");
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_user BEFORE INSERT ON messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'injected append failure'); END;",
+            )
+            .unwrap();
+    }
+    assert!(harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .is_err());
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute_batch("DROP TRIGGER reject_user")
+            .unwrap();
+    }
+    harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .unwrap();
+    harness.call("session.appendMessage", input).await.unwrap();
+    assert_eq!(harness.snapshot(&session).await, later);
+    assert!(harness.events().is_empty());
+}
+
+#[tokio::test]
 async fn accepted_user_input_retires_terminal_todos_without_replay_or_restart_resurrection() {
     let mut harness = Harness::new();
     let session = harness.session("agent").await;
@@ -240,6 +419,53 @@ async fn collaboration_input_does_not_cross_the_user_todo_boundary() {
     let mut input = user_input(&session, "collab-user", false);
     input["turnId"] = json!(collab_turn);
     input["message"]["content"] = json!("Review the change");
+    harness
+        .call("session.appendMessage", input.clone())
+        .await
+        .unwrap();
+    assert_eq!(harness.snapshot(&session).await, before);
+    assert!(harness.events().is_empty());
+    // Restore an old collaboration line after its derived index and turn link
+    // became unavailable. A failed repair must not erase canonical provenance.
+    input["turnId"] = json!("missing-collaboration-turn");
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute("DELETE FROM messages WHERE id = 'collab-user'", [])
+            .unwrap();
+        st.db
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_repair BEFORE INSERT ON messages
+            WHEN NEW.id = 'collab-user' BEGIN SELECT RAISE(ABORT, 'injected repair failure'); END;",
+            )
+            .unwrap();
+    }
+    for _ in 0..2 {
+        assert!(harness
+            .call("session.appendMessage", input.clone())
+            .await
+            .is_err());
+        assert_eq!(harness.snapshot(&session).await, before);
+        let st = harness.state.lock().await;
+        let transcript = crate::transcripts::read_transcript(st.db.data_dir(), &session).unwrap();
+        let record = transcript
+            .iter()
+            .find(|record| record.id == "collab-user")
+            .unwrap();
+        assert_eq!(
+            record.meta.as_ref().unwrap()["sessionMessage"]["messageId"],
+            message_id
+        );
+    }
+    {
+        let st = harness.state.lock().await;
+        st.db
+            .conn()
+            .execute_batch("DROP TRIGGER reject_repair")
+            .unwrap();
+    }
     harness.call("session.appendMessage", input).await.unwrap();
     assert_eq!(harness.snapshot(&session).await, before);
     assert!(harness.events().is_empty());

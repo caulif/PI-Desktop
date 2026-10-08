@@ -9441,6 +9441,10 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   unfinished work appears and survives supplemental input. First queue admission
   also retires terminal work, while queue replay/delivery preserves later results.
   RPC tests cover failed append rollback, queue conflicts and unfinished lists;
+  they also cover JSONL-success/index-failure followed by stale-turn repair:
+  successful repair retires ordinary terminal progress in the index transaction,
+  retirement failure rolls that index back, and repeated collaboration repair
+  failures preserve canonical provenance and the current checklist.
   Agent Host tests cover dequeue, promoted steering and restored queue provenance.
 
 - **Preconditions**: An isolated local Electron profile with a deterministic
