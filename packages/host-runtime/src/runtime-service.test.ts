@@ -207,6 +207,16 @@ async function settle(): Promise<void> {
 }
 
 describe("RuntimeService prompt lifecycle", () => {
+  it("carries prior queue admission through the headless user row and steering echo", async () => {
+    const { host, sidecar, service } = build();
+    await service.prompt({ sessionId: "s1", content: "queued", acceptedFromQueue: true,
+      effectivePermissionMode: "ask", principal: owner });
+    expect(host.calls.find((call) => call.method === "session.appendMessage")?.params.message)
+      .toMatchObject({ acceptedFromQueue: true });
+    await service.steer({ sessionId: "s1", turnId: "turn-1", content: "queued steer",
+      acceptedFromQueue: true, principal: owner });
+    expect(sidecar.calls.at(-1)?.params.message).toMatchObject({ acceptedFromQueue: true });
+  });
   it("opens a durable turn, persists the user row, then starts the runtime under that turn id", async () => {
     const { host, sidecar, service, events } = build();
     const { turnId } = await service.prompt({ sessionId: "s1", content: "hello", effectivePermissionMode: "ask", principal: owner });

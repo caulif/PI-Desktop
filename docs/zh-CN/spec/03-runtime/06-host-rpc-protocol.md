@@ -337,6 +337,7 @@ ids 和非负 `tokensBefore`；它不会插入 message/search 行
 20 次删除。P2/P3 方法不在协议 v11 中。
 
 **会话 Todo 清单**
+- 新用户的 `session.appendMessage` 或首次 `session.queuePush` 会在接受输入的事务中，将非空且仅含 `completed`/`cancelled` 的清单置为空快照，推进 revision 并发出已提交的 `todos.changed`。接受失败、重放、未完成清单和协作输入不触发。内部队列执行通过 outbox 携带 `message.acceptedFromQueue: true`，避免执行时再次移除后来完成的清单；该字段属于传输来源，不是模型/工具参数或转写字段。
 - `todos.get({ sessionId })` 返回活动 Desktop 会话已提交的完整清单快照：
   `{ sessionId, todos, revision, updatedAt }`。未知或软删除会话返回 `NOT_FOUND`；
   原生 Pi 会话和空 id 返回 `INVALID_ARGUMENT`。

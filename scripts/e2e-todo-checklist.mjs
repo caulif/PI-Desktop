@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld("todoFixture", { action: (name, input) => ipcRen
 `);
   await writeFile(join(temp, "main.cjs"), `
 const { app, BrowserWindow, ipcMain } = require("electron");
+app.commandLine.appendSwitch("force-device-scale-factor", "1");
 const path = require("node:path");
 const channels = ${JSON.stringify({ get: IPC.invoke.todosGet, changed: IPC.event.todosChanged, host: IPC.event.hostStatus })};
 app.setPath("userData", path.join(__dirname, "profile"));
@@ -80,6 +81,12 @@ app.whenReady().then(async () => {
     ipcMain.handle("fixture:action", async (_event, name, input) => {
       switch (name) {
         case "create": return (await host.call("session.create", { title: input, mode: "agent" }, 10000)).session.id;
+        case "input": return host.call("session.appendMessage", { sessionId: input.sessionId,
+          message: { id: input.id, role: "user", content: "A new independent request", status: "complete",
+            createdAt: new Date().toISOString(), acceptedFromQueue: input.acceptedFromQueue === true } }, 10000);
+        case "queue": return host.call("session.queuePush", { sessionId: input.sessionId, id: input.id,
+          principal: "desktop", idempotencyKey: input.id, inputHash: input.id,
+          userMessageId: input.id, content: "Queued request", permissionMode: "default" }, 10000);
         case "write": {
           const { turnId } = await host.call("session.beginTurn", { sessionId: input.sessionId }, 10000);
           const requests = [];

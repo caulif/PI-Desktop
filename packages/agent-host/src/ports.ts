@@ -33,6 +33,8 @@ export interface HostRpcPort {
 }
 
 export type TurnStartRequest = {
+  /** Already durably accepted by the Host queue; dequeue is not a new input. */
+  acceptedFromQueue?: true;
   sessionId: string;
   content: string;
   sessionMessageId?: string;
@@ -50,6 +52,7 @@ export type TurnStartRequest = {
  * promoted messages adjacent, ADR 0265).
  */
 export type TurnSteerRequest = {
+  acceptedFromQueue?: true;
   sessionId: string;
   /** The runtime id of the running turn that must receive the input. */
   turnId: string;

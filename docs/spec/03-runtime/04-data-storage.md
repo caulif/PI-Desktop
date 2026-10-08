@@ -805,8 +805,12 @@ boundary. Forks begin with revision zero and no rows; session deletion cascades
 the rows.
 
 The row content is bounded at 500 Unicode scalar values, contains no NUL, and
-is trimmed before storage. TodoWrite is the only writer; renderer and sidecar
-code access this state through host RPC.
+is trimmed before storage. TodoWrite replaces checklist content; host input
+acceptance also retires a nonempty all-terminal list to an empty snapshot,
+advancing revision in the same SQLite transaction as a new user index row or
+queue entry. Replayed inputs and collaboration inputs do not retire it. No
+schema migration is needed; historical tool messages remain unchanged.
+Renderer and sidecar code access this state through host RPC.
 
 ### 4.6c session collaboration ledger — Host-owned delivery state (schema v16)
 

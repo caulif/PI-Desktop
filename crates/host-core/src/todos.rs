@@ -279,6 +279,35 @@ fn read_tx(tx: &Transaction<'_>, session_id: &str) -> Result<Option<TodoSnapshot
     }))
 }
 
+/// Retire a nonempty terminal checklist at a newly accepted input boundary.
+/// The caller commits this together with the input, then publishes the snapshot.
+pub(crate) fn retire_finished_tx(
+    tx: &Transaction<'_>,
+    session_id: &str,
+) -> Result<Option<TodoSnapshot>> {
+    let Some(snapshot) = read_tx(tx, session_id)? else {
+        return Ok(None);
+    };
+    if snapshot.todos.is_empty()
+        || snapshot
+            .todos
+            .iter()
+            .any(|todo| todo.status != STATUS_COMPLETED && todo.status != STATUS_CANCELLED)
+    {
+        return Ok(None);
+    }
+    let now = now_ms();
+    tx.execute(
+        "DELETE FROM session_todo WHERE session_id = ?1",
+        [session_id],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET todo_revision = todo_revision + 1, todo_updated_at = ?2 WHERE id = ?1",
+        params![session_id, now],
+    )?;
+    read_tx(tx, session_id)
+}
+
 /// Replace a session's checklist from one `TodoWrite` call.
 ///
 /// The session's live state, its durable `agent` mode, and the owning running

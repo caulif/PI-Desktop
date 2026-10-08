@@ -383,6 +383,9 @@ mod tests {
         assert_eq!(result["errorCode"], json!(code), "{result}");
     }
 
+    mod input_lifecycle_tests {
+        include!("todos_input_tests.rs");
+    }
     #[tokio::test]
     async fn todo_write_commits_and_emits_the_committed_snapshot_once() {
         let mut harness = Harness::new();

@@ -81,6 +81,8 @@ export type ToolTokenUsage = {
 };
 
 export type UiMessage = {
+  /** Internal queue-admission provenance; retained by the persistence outbox. */
+  acceptedFromQueue?: true;
   id: string;
   role: UiMessageRole;
   content: string;

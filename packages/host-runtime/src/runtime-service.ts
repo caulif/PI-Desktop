@@ -332,6 +332,7 @@ export class RuntimeService implements RuntimePort {
     }
     const existing = Array.isArray(session.messages) ? (session.messages as Array<{ id?: unknown }>) : [];
     const userMessage: UiMessage = {
+      ...(request.acceptedFromQueue ? { acceptedFromQueue: true as const } : {}),
       id: durableUserMessageId(request.userMessageId, existing),
       role: "user",
       content,
@@ -395,6 +396,7 @@ export class RuntimeService implements RuntimePort {
         messageLimit: 1,
       });
       const message: UiMessage = {
+        ...(request.acceptedFromQueue ? { acceptedFromQueue: true as const } : {}),
         id: durableUserMessageId(request.sessionMessageId, detail.session?.messages ?? []),
         role: "user",
         content: request.content,

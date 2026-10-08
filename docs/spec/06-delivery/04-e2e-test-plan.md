@@ -9435,6 +9435,18 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
 
 **E2E-CHAT-session-todo-checklist: TodoWrite to session-aware TodoDock**
 
+- **Next-input lifecycle**: Complete/cancel a list and verify it remains visible.
+  Successfully append a new user input without TodoWrite: the dock exits. Verify
+  stale snapshots, session switching and host restart cannot restore it; new
+  unfinished work appears and survives supplemental input. First queue admission
+  also retires terminal work, while queue replay/delivery preserves later results.
+  RPC tests cover failed append rollback, queue conflicts and unfinished lists;
+  they also cover JSONL-success/index-failure followed by stale-turn repair:
+  successful repair retires ordinary terminal progress in the index transaction,
+  retirement failure rolls that index back, and repeated collaboration repair
+  failures preserve canonical provenance and the current checklist.
+  Agent Host tests cover dequeue, promoted steering and restored queue provenance.
+
 - **Preconditions**: An isolated local Electron profile with a deterministic
   Agent/host fixture, two Desktop sessions, and no real provider or paid API.
 - **Steps**: Start a multi-step Agent turn that calls `TodoWrite` with ordered

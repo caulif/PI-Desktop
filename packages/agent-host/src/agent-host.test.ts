@@ -487,6 +487,8 @@ describe("AgentHost turns", () => {
     host.ingest(envelope("s1", first.turn.id, { type: "agent_end", messageIds: [] }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.prompts.map((prompt) => prompt.content)).toEqual(["one", "two"]);
+    expect(runtime.prompts[0]?.acceptedFromQueue).toBeUndefined();
+    expect(runtime.prompts[1]?.acceptedFromQueue).toBe(true);
     host.ingest(envelope("s1", "rt_2", { type: "agent_start" }));
     const started = received.filter((event) => event.kind === "turn.started");
     expect(started.map((event) => event.turnId)).toEqual([first.turn.id, queued.turn.id]);
@@ -537,6 +539,7 @@ describe("AgentHost turns", () => {
     expect(runtime.prompts.map((prompt) => prompt.content)).toEqual(["one", "three"]);
     expect(runtime.steers.map((steer) => steer.content)).toEqual(["two"]);
     expect(runtime.steers[0]?.turnId).toBe("rt_2");
+    expect(runtime.steers[0]?.acceptedFromQueue).toBe(true);
     expect(host.queueEntries("s1")).toHaveLength(0);
     // The injected row never runs its own turn.
     expect(host.getTurn(second.turn.id).status).toBe("canceled");
@@ -613,6 +616,7 @@ describe("AgentHost turns", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.prompts.map((prompt) => prompt.content)).toEqual(["after reboot"]);
     expect(runtime.prompts[0]?.sessionMessageId).toBe("restored-message");
+    expect(runtime.prompts[0]?.acceptedFromQueue).toBe(true);
   });
 
   it("reconciles a restored Live queue entry without releasing its held state", async () => {
