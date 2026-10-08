@@ -123,9 +123,35 @@ window.todoChecklistProbe = async () => {
   await frame();
   assert(snapshot(first)?.revision === finished.revision, "Stale event cannot replace newer snapshot");
   assert(header()?.textContent?.includes("1/1"), "Stale event cannot replace finished UI");
+  await action("input", { sessionId: first, id: "next-input" });
+  await until(() => !dock(), "A successful next user input retires the finished dock without TodoWrite");
+  const retired = snapshot(first)!;
+  assert(retired.revision === finished.revision + 1 && !retired.todos.length,
+    "Retirement advances the host revision with an empty snapshot");
+  await action("event", finished);
+  await action("restart");
+  await action("ready");
+  await mount(second);
+  await mount(first);
+  await until(() => snapshot(first)?.revision === retired.revision && !dock(),
+    "Restart, session activation and stale completion cannot resurrect retired progress");
+  const next = await write(first, items(1, "Next"));
+  await until(() => snapshot(first)?.revision === next.revision && !!dock(), "New work displays normally");
+  await action("input", { sessionId: first, id: "supplement" });
+  assert(snapshot(first)?.revision === next.revision && !!dock(), "A supplement preserves unfinished work");
+  checks.push("accepted-next-input-retires-terminal-only-no-restart-resurrection-new-work-visible");
   const cancelled = await write(first, [{ content: "Dropped", status: "cancelled", priority: "medium" }]);
   await until(() => snapshot(first)?.revision === cancelled.revision, "Cancellation must reach store");
   assert(header()?.textContent?.toLowerCase().includes("cancelled"), "All-cancelled list must show cancelled status");
+  await action("queue", { sessionId: first, id: "queued-input" });
+  await until(() => !dock(), "Durably accepting queued input retires cancelled progress");
+  const later = await write(first, [{ content: "Later result", status: "completed" }]);
+  await until(() => snapshot(first)?.revision === later.revision && !!dock(), "Later completion is visible");
+  await action("queue", { sessionId: first, id: "queued-input" });
+  await action("input", { sessionId: first, id: "queued-input", acceptedFromQueue: true });
+  assert(snapshot(first)?.revision === later.revision && !!dock(),
+    "Queue replay and delivery cannot retire results completed after admission");
+  checks.push("queue-acceptance-retires-once-delivery-preserves-later-result");
   const cleared = await write(first, []);
   await until(() => snapshot(first)?.revision === cleared.revision && !dock(), "Clear must advance revision and hide dock");
   checks.push("complete-cancel-clear-stale-event");

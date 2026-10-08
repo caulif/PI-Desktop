@@ -1990,6 +1990,18 @@ pub fn append_message(
     message: &UiMessage,
     turn_id: Option<&str>,
 ) -> Result<()> {
+    append_message_with_todo_boundary(db, session_id, message, turn_id, true).map(|_| ())
+}
+
+/// Return the committed Todo retirement, if this is a fresh user input.
+/// Queued input already crossed this boundary when it was durably enqueued.
+pub(crate) fn append_message_with_todo_boundary(
+    db: &Database,
+    session_id: &str,
+    message: &UiMessage,
+    turn_id: Option<&str>,
+    retire_todos: bool,
+) -> Result<Option<crate::todos::TodoSnapshot>> {
     model_system::validate(message)?;
     let message = crate::session_collaboration::prepare_append(db, session_id, message, turn_id)?;
     let session_created = ensure_session_for_append(db, session_id)?;
@@ -2019,7 +2031,7 @@ pub fn append_message(
                 params![session_id, record.id, text, record.is_error],
             )?;
         } else {
-            return Ok(());
+            return Ok(None);
         }
     } else {
         if let Some(owner) = message_owner(db, &record.id)? {
@@ -2027,28 +2039,32 @@ pub fn append_message(
                 let original_id = record.id.clone();
                 record.id = namespaced_message_id(session_id, &record.id);
                 if message_indexed(db, session_id, &record.id)? {
-                    return Ok(());
+                    return Ok(None);
                 }
                 // Old hosts wrote JSONL then failed UNIQUE. Replaying that
                 // leftover must not append a second remapped line (D444).
                 if transcript_contains_id(db, session_id, &original_id)? {
-                    return Ok(());
+                    return Ok(None);
                 }
             } else {
-                return Ok(());
+                return Ok(None);
             }
         }
         let transcript_repaired =
             stale_turn_reference && repair_unindexed_transcript_message(db, session_id, &record)?;
         if !transcript_repaired {
-            append_record(
+            let retired = append_record(
                 db,
                 session_id,
                 &session_created,
                 &record,
                 text.as_deref(),
                 turn_id.as_deref(),
+                retire_todos && message.session_message.is_none(),
             )?;
+            if message.role == "user" {
+                return Ok(retired);
+            }
         }
     }
     if message.role == "assistant" && message.status.as_deref() == Some("streaming") {
@@ -2070,7 +2086,7 @@ pub fn append_message(
                 },
             )?;
         }
-        return Ok(());
+        return Ok(None);
     }
     // The final assistant row supersedes any checkpoint of the same message
     // (D299). A checkpoint for a different id belongs to a newer fragment and
@@ -2082,7 +2098,7 @@ pub fn append_message(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Whether the session's index already carries `message_id`.
@@ -2270,7 +2286,8 @@ fn append_record(
     record: &MessageRecord,
     text: Option<&str>,
     turn_id: Option<&str>,
-) -> Result<()> {
+    retire_todos: bool,
+) -> Result<Option<crate::todos::TodoSnapshot>> {
     // File first: the transcript is the source of truth. A crash before the
     // index commit costs one derived row (self-healed by the next rewrite),
     // never message content.
@@ -2289,8 +2306,13 @@ fn append_record(
         return Err(anyhow!("session not found: {session_id}"));
     };
     insert_index_row(&tx, session_id, seq - 1, turn_id, record, text)?;
+    let retired = if record.role == "user" && retire_todos {
+        crate::todos::retire_finished_tx(&tx, session_id)?
+    } else {
+        None
+    };
     tx.commit()?;
-    Ok(())
+    Ok(retired)
 }
 
 /// Checkpoint the assistant message currently streaming for `session_id`
@@ -2407,6 +2429,7 @@ pub fn recover_inflight_message(
             &record,
             text.as_deref(),
             inflight.turn_id.as_deref(),
+            false,
         )?;
     }
     Ok(Some(record_to_ui(record)))

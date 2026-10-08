@@ -14,6 +14,7 @@ import {
   createHostSessionPort,
   listPendingToolRequests,
 } from "@pi-desktop/host-runtime";
+import { queuedInputRequest } from "./queued-input-admission";
 import type {
   AgentEventEnvelope,
   AgentQueueChangedEvent,
@@ -138,7 +139,7 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
             ? request.effectivePermissionMode
             : undefined;
         const result = (await options.invoke(options.channels.agentPrompt, [
-          {
+          queuedInputRequest({
             sessionId: request.sessionId,
             content: request.content,
             ...(request.sessionMessageId ? { sessionMessageId: request.sessionMessageId } : {}),
@@ -146,7 +147,7 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
             ...(request.voiceOrigin ? { voiceOrigin: request.voiceOrigin } : {}),
             ...(request.attachments ? { attachments: request.attachments } : {}),
             ...(permissionModeOverride ? { permissionMode: permissionModeOverride } : {}),
-          },
+          }, request.acceptedFromQueue === true),
         ])) as { accepted?: boolean; turnId: string };
         return { turnId: result.turnId };
       } catch (error) {
@@ -175,7 +176,7 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
     async steer(request: TurnSteerRequest) {
       try {
         const result = (await options.invoke(options.channels.agentSteer, [
-          {
+          queuedInputRequest({
             sessionId: request.sessionId,
             expectedTurnId: request.turnId,
             content: request.content,
@@ -184,7 +185,7 @@ export function createAgentHostBridge(options: AgentHostBridgeOptions) {
               : {}),
             ...(request.voiceOrigin ? { voiceOrigin: request.voiceOrigin } : {}),
             ...(request.attachments ? { attachments: request.attachments } : {}),
-          },
+          }, request.acceptedFromQueue === true),
         ])) as { accepted?: boolean } | undefined;
         return { accepted: result?.accepted !== false };
       } catch (error) {

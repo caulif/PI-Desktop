@@ -2640,6 +2640,13 @@ async fn handle_request(
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| rpc_err(1002, "sessionId required", "INVALID_PARAMS"))?;
+            // Runtime queue provenance survives the persistence outbox.
+            // A queued input crossed the Todo boundary at queuePush, not dequeue.
+            let accepted_from_queue = params
+                .get("message")
+                .and_then(|message| message.get("acceptedFromQueue"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let message: UiMessage = serde_json::from_value(
                 params
                     .get("message")
@@ -2652,8 +2659,18 @@ async fn handle_request(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             let st = state.lock().await;
-            sessions::append_message(&st.db, session_id, &message, turn_id.as_deref())
-                .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
+            let retired = sessions::append_message_with_todo_boundary(
+                &st.db,
+                session_id,
+                &message,
+                turn_id.as_deref(),
+                !accepted_from_queue,
+            )
+            .map_err(|e| rpc_err(1000, e.to_string(), "INTERNAL"))?;
+            drop(st);
+            if let Some(snapshot) = retired {
+                emit_notification(&tx, "todos.changed", json!(snapshot)).await;
+            }
             Ok(json!({ "ok": true }))
         }
         "session.saveInflightMessage" => {
@@ -3126,18 +3143,23 @@ async fn handle_request(
             let input: turn_queue::QueuedTurnInput = serde_json::from_value(params.clone())
                 .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
             let st = state.lock().await;
-            let entry = turn_queue::push(&st.db, input).map_err(|e| {
-                let message = e.to_string();
-                if message == "QUEUE_FULL" {
-                    rpc_err(1008, message, "AGENT_BUSY")
-                } else if message == "IDEMPOTENCY_CONFLICT" {
-                    rpc_err(1008, message, "IDEMPOTENCY_CONFLICT")
-                } else if message.starts_with("session not found") {
-                    rpc_err(1007, message, "SESSION_NOT_FOUND")
-                } else {
-                    rpc_err(1000, message, "INTERNAL")
-                }
-            })?;
+            let (entry, retired) =
+                turn_queue::push_with_todo_boundary(&st.db, input).map_err(|e| {
+                    let message = e.to_string();
+                    if message == "QUEUE_FULL" {
+                        rpc_err(1008, message, "AGENT_BUSY")
+                    } else if message == "IDEMPOTENCY_CONFLICT" {
+                        rpc_err(1008, message, "IDEMPOTENCY_CONFLICT")
+                    } else if message.starts_with("session not found") {
+                        rpc_err(1007, message, "SESSION_NOT_FOUND")
+                    } else {
+                        rpc_err(1000, message, "INTERNAL")
+                    }
+                })?;
+            drop(st);
+            if let Some(snapshot) = retired {
+                emit_notification(&tx, "todos.changed", json!(snapshot)).await;
+            }
             Ok(json!({ "entry": entry }))
         }
         "session.queueList" => {

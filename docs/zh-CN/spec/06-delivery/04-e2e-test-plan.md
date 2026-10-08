@@ -9410,3 +9410,7 @@ preload, API normalization, store events, ToolRow, and Markdown renderer.
 No provider credentials or paid model calls are required. The fixture ends at
 work-panel file-request routing; artifact bytes are verified from the real
 host-created files. The full app's file-preview viewer is covered separately.
+
+### 会话 Todo：下一条用户输入的生命周期
+
+完成或取消清单后保持当前展示。成功发送下一条用户输入（不调用 TodoWrite），旧清单退出；旧快照、切换会话和主机重启不能恢复它。新的未完成清单正常显示，补充输入不清除未完成进度。首次持久入队也触发退出，但重复入队和后续执行不应清除入队之后的完成结果。RPC 回归覆盖追加失败回滚、队列冲突和未完成清单；Agent Host 回归覆盖出队、优先队列 steering 与重启恢复后的来源标记。自动化入口沿用 `pnpm test:e2e:todos`。

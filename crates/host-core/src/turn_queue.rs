@@ -113,7 +113,15 @@ const ORDER_BY: &str = "ORDER BY (priority IS NULL) ASC, priority ASC, position 
 /// Append an entry. A reused `(session, principal, idempotencyKey)` returns
 /// the existing entry when the input hash matches and fails with
 /// `IDEMPOTENCY_CONFLICT` otherwise; a full queue fails with `QUEUE_FULL`.
+#[cfg(test)]
 pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
+    push_with_todo_boundary(db, input).map(|(entry, _)| entry)
+}
+
+pub(crate) fn push_with_todo_boundary(
+    db: &Database,
+    input: QueuedTurnInput,
+) -> Result<(QueuedTurn, Option<crate::todos::TodoSnapshot>)> {
     if let Some(origin) = &input.voice_origin {
         if origin.call_id.trim().is_empty()
             || origin.call_id.len() > 128
@@ -150,7 +158,7 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
             .optional()?;
         if let Some(existing) = existing {
             if existing.input_hash == input.input_hash {
-                return Ok(existing);
+                return Ok((existing, None));
             }
             return Err(anyhow!("IDEMPOTENCY_CONFLICT"));
         }
@@ -201,23 +209,31 @@ pub fn push(db: &Database, input: QueuedTurnInput) -> Result<QueuedTurn> {
             voice_origin_json
         ],
     )?;
+    let retired = if input.session_message_id.is_none() {
+        crate::todos::retire_finished_tx(&tx, &input.session_id)?
+    } else {
+        None
+    };
     tx.commit()?;
-    Ok(QueuedTurn {
-        id,
-        session_id: input.session_id,
-        principal: input.principal,
-        idempotency_key: input.idempotency_key,
-        input_hash: input.input_hash,
-        content: input.content,
-        session_message_id: input.session_message_id,
-        user_message_id: input.user_message_id,
-        voice_origin: input.voice_origin,
-        attachments: input.attachments,
-        permission_mode: input.permission_mode,
-        position: max_position + 1,
-        priority: None,
-        created_at: ms_to_ts(created_at),
-    })
+    Ok((
+        QueuedTurn {
+            id,
+            session_id: input.session_id,
+            principal: input.principal,
+            idempotency_key: input.idempotency_key,
+            input_hash: input.input_hash,
+            content: input.content,
+            session_message_id: input.session_message_id,
+            user_message_id: input.user_message_id,
+            voice_origin: input.voice_origin,
+            attachments: input.attachments,
+            permission_mode: input.permission_mode,
+            position: max_position + 1,
+            priority: None,
+            created_at: ms_to_ts(created_at),
+        },
+        retired,
+    ))
 }
 
 /// Entries in delivery order, for one session or for every session: promoted

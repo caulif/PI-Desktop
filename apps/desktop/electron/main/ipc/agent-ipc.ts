@@ -16,6 +16,7 @@ import type { ComposerCommandService } from "./composer-ipc";
 import type { IpcRegistrar } from "./types";
 import { withPromptEnhancementTimeout } from "../prompt-enhancement-timeout";
 import { consumePluginPromptAdmission } from "../trusted-plugin-prompt";
+import { consumeQueuedInputAdmission } from "../queued-input-admission";
 
 export type AgentIpcDependencies = {
   registrar: IpcRegistrar;
@@ -269,6 +270,7 @@ export function registerAgentIpc({
   });
 
   handle(IPC.invoke.agentSteer, async (req: AgentSteerRequest) => {
+    const acceptedFromQueue = consumeQueuedInputAdmission(req);
     if (!host || !sidecar) throw new Error("backend unavailable");
     if (
       !req?.sessionId || typeof req.content !== "string" || !req.expectedTurnId ||
@@ -303,6 +305,7 @@ export function registerAgentIpc({
       id: req.sessionId, messageLimit: 1,
     });
     const message: UiMessage = {
+      ...(acceptedFromQueue ? { acceptedFromQueue: true as const } : {}),
       id: durableUserMessageId(req.messageId, session.session?.messages ?? []),
       role: "user",
       content: mcpExpansion?.expanded ?? req.content,
@@ -327,6 +330,7 @@ export function registerAgentIpc({
   });
 
   handle(IPC.invoke.agentPrompt, async (req: AgentPromptRequest) => {
+    const acceptedFromQueue = consumeQueuedInputAdmission(req);
     const pluginAdmission = consumePluginPromptAdmission(req);
     if (!sidecar) throw new Error("sidecar unavailable");
     const voiceOrigin = parseVoiceOrigin(req.voiceOrigin);
@@ -603,6 +607,7 @@ export function registerAgentIpc({
     // The renderer already shows this row under its own id (D288); persisting
     // and echoing under the same id lets the echo replace it in place.
     const userMessage = {
+      ...(acceptedFromQueue ? { acceptedFromQueue: true as const } : {}),
       id: durableUserMessageId(
         req.messageId,
         Array.isArray(session.messages) ? session.messages : [],

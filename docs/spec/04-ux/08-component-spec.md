@@ -2877,6 +2877,15 @@ reasoning-level control.
 
 ### 11.3a Session TodoDock
 
+- Finished checklists (only `completed`/`cancelled` items) retain their current
+  summary and disclosure behavior until the next user input is durably accepted.
+  Successful transcript append or first durable queue admission retires that
+  checklist from current progress. Drafts, failed acceptance and unfinished
+  checklists do not retire it. Queue delivery/replay is not another input
+  boundary, and agent-to-agent collaboration input does not trigger retirement.
+  The committed empty snapshot prevents resurrection on session switching or
+  restart; later TodoWrite work displays normally. Historical tool messages stay.
+
 - The Composer stack places TodoDock above Plan/Goal approval surfaces when the
   active session has a non-empty host-owned checklist. An empty checklist does
   not reserve layout space.

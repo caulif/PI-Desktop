@@ -36,6 +36,11 @@ reading the local database.
 
 ## Consequences
 
+- Finished progress is retained until the next successfully accepted user input.
+  Host retirement shares that input's transaction and the existing revisioned
+  empty-snapshot contract. Queue admission is the boundary; delivery/replay and
+  collaboration input are not new human input. Historical tool messages remain.
+
 - Empty checklist writes remain observable through revision advancement.
 - Session deletion cascades checklist rows; forks start with an empty checklist.
 - Plan, Goal, delegated, plugin, and MCP execution paths cannot write the

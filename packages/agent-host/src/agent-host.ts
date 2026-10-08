@@ -983,6 +983,7 @@ export class AgentHost {
         this.startingQueuedTurns.set(sessionId, turn);
         try {
           const started = await this.runtime.prompt({
+            acceptedFromQueue: true,
             sessionId,
             content: record.content,
             ...(record.sessionMessageId ? { sessionMessageId: record.sessionMessageId } : {}),
@@ -1074,6 +1075,7 @@ export class AgentHost {
       let accepted = false;
       try {
         ({ accepted } = await steer({
+          acceptedFromQueue: true,
           sessionId: state.id,
           turnId: runtimeTurnId,
           content: head.content,

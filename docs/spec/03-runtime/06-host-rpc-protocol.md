@@ -499,6 +499,14 @@ deletes per 60 seconds. P2/P3 methods are not present in protocol v11.
 
 ### Session Todo checklist
 
+- A fresh user `session.appendMessage` or first `session.queuePush` atomically
+  retires a nonempty checklist containing only `completed`/`cancelled` items.
+  It advances revision and emits the committed empty `todos.changed` snapshot;
+  failed acceptance, replay, unfinished lists and collaboration input do not.
+  Internal queued delivery carries `message.acceptedFromQueue: true` through
+  the outbox so dequeue cannot retire a later result. This is transport
+  provenance, not a model/tool argument or persisted transcript field.
+
 - `todos.get({ sessionId })` returns the committed checklist snapshot for a live
   Desktop session: `{ sessionId, todos, revision, updatedAt }`. Unknown or
   soft-deleted sessions return `NOT_FOUND`; native Pi sessions and blank ids are
