@@ -8,6 +8,23 @@
 
 ## 1. Goals
 
+### Fork E2E: parallel read batch lifecycle
+
+- Isolate data/project paths; never run against production profiles.
+- A local provider fixture emits two Read calls. Gate real tool-execution
+  entrypoints until both enter, release them in reverse order, then inspect the
+  follow-up model request: results must retain source toolCallId order and final
+  sibling rules must follow preparation order. Repeat with a delegated reader
+  and verify parent instructions and permission scope are isolated.
+- Add Bash or Edit to the batch: all tools must execute sequentially. Stop
+  before execution must skip unstarted calls; running file calls must drain.
+- Current automated coverage: runtime.test.ts uses the production Desktop runtime
+  and pi loop with a deterministic Host adapter; subagent.test.ts verifies real
+  delegate policy/transcript updates. These are integration tests, not proof of
+  an Electron/real Host E2E pass. Real Host cancellation/resource harness coverage
+  follows in the Host coordination PRs. UI-only project-edit E2E is not evidence
+  for agent Edit scheduling.
+
 ### E2E-STORAGE-custom-location-and-maintenance
 
 - **Preconditions:** Dedicated request worktree, current remote-main base, shared

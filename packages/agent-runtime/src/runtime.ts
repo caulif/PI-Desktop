@@ -4,6 +4,8 @@ import {
   mutationTerminationAdvice, mutationTerminationMessage,
 } from "./mutation-recovery.js";
 import { resolveMcpToolSelection } from "./mcp-tool-selection.js";
+import { toolExecutionMode } from "./tool-execution-policy.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { TOOL_ACTIVATION_SECTION, toolDeclarationPolicy, toolActivationSection, restoredToolActivation, syncToolActivation, type ToolDeclarationPolicy } from "./fixed-tool-declarations.js";
 import { orderSystemRows, SystemTranscriptJournal } from "./system-transcript-journal.js";
 import { planWorkspaceRequiredResult } from "./plan-workspace-error.js";
@@ -1744,6 +1746,9 @@ export class DesktopAgentRuntime {
   private commandShell: CommandShellOption;
   private baseProjectInstructions?: ProjectInstructions;
   private projectInstructions?: ProjectInstructions;
+  /** Weak argument identity binds preparation to the exact validated call, without retained IDs. */
+  private preparedPathToolArgs = new WeakMap<object, unknown>();
+  private instructionExecution = new AsyncLocalStorage<(instructions: ProjectInstructions | undefined) => void>();
   private projectMemory?: string;
   /** Per-prompt claims prevent repeated path-resolution RPCs for one directory. */
   private pathInstructionClaims = new Map<
@@ -2143,11 +2148,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       // Sequential execution also makes the host-confirmed mode change visible
       // before the next model request in the same run.
       beforeToolCall: (context) => this.beforeToolCall(context),
-      // Every tool except `Task` carries `executionMode: "sequential"`, and pi
-      // runs a batch sequentially as soon as it contains one such tool. So the
-      // only batch that actually runs concurrently is a batch of nothing but
-      // `Task` calls — subagent fan-out (ADR 0062) — and every existing tool
-      // ordering guarantee is untouched.
+      // pi prepares the entire parallel batch in source order before launching
+      // execution. Any sequential member still makes the whole batch sequential.
       toolExecution: "parallel",
       steeringMode: "all",
       // pi-agent-core 0.87 replaces shouldStopAfterTurn with finishTurn. A
@@ -2493,7 +2495,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       if (!this.isToolAllowedInMode(context.toolCall.name)) {
         return { block: true, reason: modeToolDenial(context.toolCall.name, this.mode) };
       }
-      return this.extensionToolCall(context);
+      const blocked = await this.extensionToolCall(context);
+      if (blocked?.block) return blocked;
+      await this.preparePathToolCall(context);
+      return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
     if (enterKind && this.mode !== "agent") {
@@ -3265,7 +3270,6 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         const mutationPath = PATH_MUTATING_TOOLS.has(toolName) && isRecord(params) && typeof params.path === "string"
           ? await mutationFailureKey(params.path, this.projectPath ?? this.scratchDir)
           : undefined;
-        await this.loadPathInstructions(toolName, params);
         const isBash = toolName === "Bash";
         const timeoutMs = isBash ? commandTimeoutMs(params) : undefined;
         let progress = "";
@@ -3616,8 +3620,16 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         // this line — the lock key, the host call, the transcript record — sees
         // canonical argument names only (D273).
         execute: async (toolCallId, rawParams, signal, onUpdate) => {
-          const params = normalizeToolParams(toolName, rawParams);
+          const prepared = typeof rawParams === "object" && rawParams !== null
+            && this.preparedPathToolArgs.has(rawParams);
+          const params = prepared
+            ? this.preparedPathToolArgs.get(rawParams as object)
+            : normalizeToolParams(toolName, rawParams);
+          if (prepared) this.preparedPathToolArgs.delete(rawParams as object);
           requireAliasedParams(toolName, params);
+          // Direct/internal invocations retain preflight. pi invocations have
+          // already committed instructions in the ordered preparation phase.
+          if (!prepared) await this.loadPathInstructions(toolName, params, this.instructionExecution.getStore());
           return PATH_MUTATING_TOOLS.has(toolName)
             ? this.writeLocks.run(
                 isRecord(params) ? String(params.path ?? "") : "",
@@ -3802,9 +3814,9 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     for (const tool of this.buildToolDefinitions()) {
       if (!this.isToolAllowedInMode(tool.name) && !retainModeToolDeclaration(tool.name)) continue;
       // The execution mode is decided here, in one place, so no tool can grow
-      // an accidental parallel batch: everything is sequential except `Task`.
+      // an accidental parallel batch: unknown tools remain sequential.
       // pi runs a whole batch sequentially when it holds one sequential tool,
-      // so only an all-`Task` batch fans out.
+      // so Read/Glob/Grep/Task can fan out only with other parallel tools.
       // The provider-facing schema is settled here too, at the single origin of
       // every tool, so the session agent and a delegated `Task` run send the
       // same declaration (#864).
@@ -3813,8 +3825,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         withModeExecutionGuard(
           withExplicitRequired({
             ...tool,
-            executionMode:
-              tool.name === SUBAGENT_TOOL_NAME ? "parallel" : "sequential",
+            executionMode: toolExecutionMode(tool.name),
           }),
           () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
         ),
@@ -4220,7 +4231,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
    * collaboration rules are deliberately left out — a delegate has no user to
    * talk to, and its report format is set by `composeSubagentSystemPrompt`.
    */
-  private subagentGuidance(definition: SubagentDefinition): string[] {
+  private subagentGuidance(definition: SubagentDefinition, instructions: ProjectInstructions | null | undefined = this.projectInstructions): string[] {
     const tools = new Set(
       resolveSubagentToolNames(definition, [...this.toolCatalog.keys()]),
     );
@@ -4247,7 +4258,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       const skillsPrompt = pluginSkillsPrompt(this.pluginSkills);
       if (skillsPrompt) blocks.push(skillsPrompt);
     }
-    const projectPrompt = projectInstructionsPrompt(this.projectInstructions);
+    const projectPrompt = projectInstructionsPrompt(instructions ?? undefined);
     if (projectPrompt) blocks.push(projectPrompt);
     return blocks;
   }
@@ -4454,7 +4465,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               `No delegation model overrides are configured. ${DELEGATION_DEFAULT_MODEL_GUIDANCE} ${DELEGATION_MODEL_OPT_IN_GUIDANCE}`,
             ]),
         "`task` is the delegate's only instruction. It cannot see this conversation, and you cannot correct it while it runs, so state the goal, the paths and facts it cannot infer, and exactly what to report back.",
-        "To run delegates concurrently, emit several Task calls in one assistant message. A message that mixes Task with any other tool runs one call at a time. You may keep working or talk to the user while they run; the runtime delivers their reports when they finish. Call TaskStop only to cancel.",
+        "To run delegates concurrently, emit several Task calls in one assistant message. Task can run alongside Read, Glob, and Grep in the same message. A message containing any other tool runs one call at a time. You may keep working or talk to the user while they run; the runtime delivers their reports when they finish. Call TaskStop only to cancel.",
         "To continue a previous subagent, pass its `resume` id (the `delegationId` returned by Task). Saying \"reuse\" in prose is not enough. Do not pass `model` when resuming; start a new delegation to change models.",
         `Available subagents:\n${catalog}`,
       ].join("\n\n"),
@@ -4694,7 +4705,15 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         this.delegations.set(delegationId, record);
         let subagentRun: SubagentRun;
         try {
-          const scopedTools = this.scopeDelegateTools(tools, definition, delegationId);
+          const delegatePrompt = (instructions: ProjectInstructions | undefined) => composeSubagentSystemPrompt({
+            definition,
+            guidance: this.subagentGuidance(definition, instructions ?? null),
+            toolNames: declaredToolNames,
+          });
+          const applyInstructions = (instructions: ProjectInstructions | undefined) => {
+            subagentRun.setSystemPrompt(delegatePrompt(instructions));
+          };
+          const scopedTools = this.scopeDelegateTools(tools, definition, delegationId, applyInstructions);
           subagentRun = new SubagentRun({
             definition,
             sessionId: this.sessionId,
@@ -4726,6 +4745,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               toolNames: declaredToolNames,
             }),
             tools: scopedTools,
+            beforeToolCall: async (context) => {
+              await this.preparePathToolCall(context, applyInstructions);
+              return undefined;
+            },
             onEvent: (envelope) => {
               this.noteDelegationActivity(record, envelope);
               this.onEvent(envelope);
@@ -4816,6 +4839,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     tools: AgentTool[],
     definition: SubagentDefinition,
     mutationOwner: string,
+    applyInstructions?: (instructions: ProjectInstructions | undefined) => void,
   ): AgentTool[] {
     const scope = definition.permission ?? DEFAULT_SUBAGENT_PERMISSION;
     return tools.map((tool) => ({
@@ -4826,7 +4850,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           this.delegatePermissionScopes.set(toolCallId, scope);
         }
         try {
-          return await tool.execute(toolCallId, args, signal, onUpdate);
+          return await this.instructionExecution.run(
+            applyInstructions ?? (() => undefined),
+            () => tool.execute(toolCallId, args, signal, onUpdate),
+          );
         } finally {
           this.delegatePermissionScopes.delete(toolCallId);
           this.mutationOwners.delete(toolCallId);
@@ -5838,9 +5865,24 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     }
   }
 
+  private async preparePathToolCall(
+    context: BeforeToolCallContext,
+    apply?: (instructions: ProjectInstructions | undefined) => void,
+  ): Promise<void> {
+    const name = context.toolCall.name;
+    if (!PATH_SCOPED_INSTRUCTION_TOOLS.has(name)) return;
+    const params = normalizeToolParams(name, context.args);
+    requireAliasedParams(name, params);
+    await this.loadPathInstructions(name, params, apply);
+    if (typeof context.args === "object" && context.args !== null) {
+      this.preparedPathToolArgs.set(context.args, params);
+    }
+  }
+
   private async loadPathInstructions(
     toolName: string,
     params: unknown,
+    apply?: (instructions: ProjectInstructions | undefined) => void,
   ): Promise<void> {
     if (!PATH_SCOPED_INSTRUCTION_TOOLS.has(toolName)) {
       return undefined;
@@ -5876,7 +5918,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     // Rules are scoped to the file currently being accessed. Rebuild the
     // complete chain so sibling-directory rules never leak into one another
     // and edits to an existing instruction file take effect immediately.
-    this.applyProjectInstructions(
+    (apply ?? ((instructions) => this.applyProjectInstructions(instructions)))(
       resolved.fallback ? this.baseProjectInstructions : resolved.instructions,
     );
   }

@@ -1628,7 +1628,9 @@ Saves affect the next prompt without restarting the application.
 
 Tool concurrency is expressed through pi execution modes: every catalog tool is
 `sequential` and `Task` alone is `parallel`, and pi runs a batch sequentially as
-soon as it contains one sequential tool. So an all-`Task` batch is the only batch
+soon as it contains one sequential tool. In the fork experiment, batches containing
+only `Task`, `Read`, `Glob` and `Grep` may run concurrently; any other tool keeps
+the entire batch sequential. Previously an all-`Task` batch was the only batch
 that fans out, and every other ordering guarantee is unchanged. Delegates issue
 host calls independently, and host-core's one-mutation-per-session admission
 keeps writes from tearing but leaves two same-path mutations unordered, so the
