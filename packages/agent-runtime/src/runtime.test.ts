@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { type Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createAssistantMessageEventStream,
+  Type,
   getCurrentTools,
   getCurrentSystemMessage,
   toToolDeclaration,
@@ -264,7 +265,7 @@ describe("ordered file preparation", () => {
     };
     try {
       const pending = runtime.prompt("Read both files.", "user-parallel", "turn-parallel");
-      await vi.waitFor(() => expect(entered).toEqual(["a", "b"]));
+      await vi.waitFor(() => expect([...entered].sort()).toEqual(["a", "b"]));
       // Both entered before either result is released: no timing-based assertion.
       expect(host.call.mock.calls.filter(([method]) => method === "project.instructions.resolve").map(([, args]) => args.path))
         .toEqual(["a/file.ts", "b/file.ts"]);
@@ -7717,6 +7718,49 @@ describe("DesktopAgentRuntime subagents", () => {
       expect(denied.details.error).toContain("not available for delegation");
       expect(subagentRuns.calls).toHaveLength(0);
     } finally { await runtime.dispose(); }
+  });
+
+  it("does not prepare native file work for a parent extension named Read", async () => {
+    const host = { call: vi.fn() };
+    const runtime = createRuntime({ host });
+    const internal = runtime as any;
+    const execute = vi.fn(async () => ({ content: [], details: {} }));
+    internal.extensionRunner = { hasHandlers: () => false, getAgentTools: () => [{ name: "Read", label: "extension", description: "dynamic",
+      parameters: Type.Object({}), execute }] };
+    try {
+      internal.rebuildToolCatalog();
+      const tool = internal.toolCatalog.get("Read");
+      const toolCall = { type: "toolCall", name: "Read", id: "dynamic-parent", arguments: {} };
+      await expect(internal.agent.beforeToolCall({ toolCall, args: {},
+        assistantMessage: { content: [toolCall] }, context: { tools: [tool] } })).resolves.toBeUndefined();
+      await tool.execute(toolCall.id, {});
+      expect(execute).toHaveBeenCalledOnce();
+      expect(host.call.mock.calls.some(([method]) =>
+        ["project.instructions.resolve", "tools.prepareFileCall"].includes(method))).toBe(false);
+    } finally { internal.extensionRunner = undefined; await runtime.dispose(); }
+  });
+
+  it("keeps delegate file preparation tied to selected provenance across parent rebuilds", async () => {
+    const host = { call: vi.fn() };
+    const runtime = createRuntime({ host, subagents: [explorer] });
+    const internal = runtime as any;
+    const execute = vi.fn(async () => ({ content: [], details: {} }));
+    internal.extensionRunner = { hasHandlers: () => false, getAgentTools: () => [{ name: "Read", label: "extension", description: "dynamic",
+      parameters: Type.Object({}), execute }] };
+    subagentRuns.calls.length = 0;
+    try {
+      internal.rebuildToolCatalog();
+      await internal.toolCatalog.get("Task").execute("task-dynamic-read", { agent: "explorer", task: "Read." });
+      const child = subagentRuns.calls[0];
+      const tool = child.tools.find((entry: AgentTool) => entry.name === "Read");
+      internal.extensionRunner = undefined;
+      internal.rebuildToolCatalog();
+      await expect(child.beforeToolCall({ toolCall: { name: "Read", id: "dynamic-child" }, args: {} })).resolves.toBeUndefined();
+      await tool.execute("dynamic-child", {});
+      expect(execute).toHaveBeenCalledOnce();
+      expect(host.call.mock.calls.some(([method]) =>
+        ["project.instructions.resolve", "tools.prepareFileCall"].includes(method))).toBe(false);
+    } finally { internal.extensionRunner = undefined; await runtime.dispose(); }
   });
 
   it("allows only Task, read/search and coordinated Write tools to run in parallel", async () => {

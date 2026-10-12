@@ -24,6 +24,9 @@ Track built-in/plugin/extension provenance on construction with weak object
 identity. Plugin/MCP and trusted extension tools stay sequential even if their
 name collides with a parallel builtin or they declare low risk. The delegate
 loop retains conservative sequential modes selected by its parent's catalog.
+Native path/ticket preparation checks selected builtin provenance, not a tool
+name. Delegates capture that ownership before wrapping tools, so a later parent
+catalog rebuild cannot route an extension named Read into Host file preparation.
 Unknown names fail closed; a newly added builtin must register explicitly.
 No public schema or Plugin SDK field is added.
 

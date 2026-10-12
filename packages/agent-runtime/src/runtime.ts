@@ -2507,8 +2507,11 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       }
       const blocked = await this.extensionToolCall(context);
       if (blocked?.block) return blocked;
-      await this.preparePathToolCall(context);
-      await this.prepareOrderedFileCall(context);
+      const selectedTool = context.context.tools?.find((tool) => tool.name === context.toolCall.name);
+      if (selectedTool && this.toolPolicyOrigins.get(selectedTool) === "builtin") {
+        await this.preparePathToolCall(context);
+        await this.prepareOrderedFileCall(context);
+      }
       return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
@@ -3840,16 +3843,16 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       // The provider-facing schema is settled here too, at the single origin of
       // every tool, so the session agent and a delegated `Task` run send the
       // same declaration (#864).
-      catalog.set(
-        tool.name,
-        withModeExecutionGuard(
+      const origin = this.toolPolicyOrigins.get(tool) ?? "extension";
+      const catalogTool = withModeExecutionGuard(
           withExplicitRequired({
             ...tool,
-            executionMode: toolExecutionMode(tool.name, this.toolPolicyOrigins.get(tool) ?? "extension"),
+            executionMode: toolExecutionMode(tool.name, origin),
           }),
           () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
-        ),
-      );
+        );
+      this.toolPolicyOrigins.set(catalogTool, origin);
+      catalog.set(tool.name, catalogTool);
     }
     this.toolCatalog = catalog;
     this.deferredToolNames = new Set(
@@ -4733,6 +4736,11 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           const applyInstructions = (instructions: ProjectInstructions | undefined) => {
             subagentRun.setSystemPrompt(delegatePrompt(instructions));
           };
+          // Capture selected provenance before delegate wrappers clone tools;
+          // a later parent catalog rebuild must not change this run's ownership.
+          const nativeToolNames = new Set(tools
+            .filter((tool) => this.toolPolicyOrigins.get(tool) === "builtin")
+            .map((tool) => tool.name));
           const scopedTools = this.scopeDelegateTools(tools, definition, delegationId, applyInstructions);
           subagentRun = new SubagentRun({
             definition,
@@ -4766,8 +4774,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             }),
             tools: scopedTools,
             beforeToolCall: async (context) => {
-              await this.preparePathToolCall(context, applyInstructions);
-              await this.prepareOrderedFileCall(context, delegationId, definition.permission, () => abortSignal.aborted);
+              if (nativeToolNames.has(context.toolCall.name)) {
+                await this.preparePathToolCall(context, applyInstructions);
+                await this.prepareOrderedFileCall(context, delegationId, definition.permission, () => abortSignal.aborted);
+              }
               return undefined;
             },
             onEvent: (envelope) => {
