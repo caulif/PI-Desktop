@@ -1,3 +1,4 @@
+mod admission;
 mod config_sync_rpc;
 mod file_calls;
 mod scheduled_rpc;
@@ -13,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::agent_capabilities::CapabilityLevel;
 use crate::artifacts;
@@ -291,8 +292,7 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
     // Keep request tasks bounded as well as tool executions. Tool calls have
     // their own class/session budgets below; this cap protects the host from
     // non-tool RPC bursts and prevents an unbounded tokio task fan-out.
-    const MAX_IN_FLIGHT_RPC: usize = 32;
-    let request_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_RPC));
+    let request_slots = admission::RpcAdmission::new();
     let mut request_tasks = tokio::task::JoinSet::new();
 
     // Keep stdio off Tokio's blocking pool. Under process/thread pressure,
@@ -411,7 +411,7 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
                 let params = req.params.unwrap_or(json!({}));
                 let state = state.clone();
                 let tx = tx.clone();
-                let permit = match request_slots.clone().try_acquire_owned() {
+                let permit = match request_slots.try_acquire(&method) {
                     Ok(permit) => permit,
                     Err(_) => {
                         let response = JsonRpcResponse {

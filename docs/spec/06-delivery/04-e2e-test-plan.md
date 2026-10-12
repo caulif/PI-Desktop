@@ -59,6 +59,28 @@
   follows in the Host coordination PRs. UI-only project-edit E2E is not evidence
   for agent Edit scheduling.
 
+### E2E-RPC-CONTROL-CAPACITY and shell batch boundaries
+
+- **Preconditions:** Candidate-built Host, reused compatible toolchain, throwaway
+  data directory and project, no provider or global subagent registry writes.
+- **Steps:** Run `node scripts/e2e-rpc-control-capacity.mjs` with
+  `PI_DESKTOP_HOST_BIN` pointing at the candidate. Fill 32 ordinary RPC slots with
+  Bash approval waits, observe overload on ordinary traffic, deny one approval,
+  refill, abort through the control lane, drain calls, and query pending state.
+- **Expected:** Approval resolution and cancellation remain reachable at full
+  ordinary capacity; no denied command executes; all waits settle; pending
+  approvals clear and normal requests recover. Unit coverage also proves the
+  separate four-slot control lane is bounded and returns permits after drop.
+- **Batch coverage:** `shell-policy-boundaries.test.ts` drives the real Pi Agent
+  loop with controlled execution barriers for Read → Bash → Read and
+  Write → Bash → Edit. It asserts source-order visibility, stream/result call IDs,
+  and that Stop drains the active tool before the agent ends without starting
+  the following Read. Host `tools_abort_during_execution_kills_bash_and_cleans_registry`
+  and `bash_timeout_and_early_session_error_clean_the_registry` cover actual
+  shell-process cancellation, descendant cleanup, timeout and registry release.
+- **Boundary:** These tests do not claim project-wide isolation between agents'
+  shell writes or cancellation of unmanaged background processes.
+
 ### E2E-STORAGE-custom-location-and-maintenance
 
 - **Preconditions:** Dedicated request worktree, current remote-main base, shared

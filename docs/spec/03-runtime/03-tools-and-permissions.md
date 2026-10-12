@@ -420,6 +420,29 @@ outside directory-tree exclusion and is not a snapshot guarantee.
 
 ## 5. Bash Rules
 
+### Batch ordering and control capacity
+
+`Bash` explicitly uses sequential batch execution. If any call in one model
+message is Bash, the complete batch executes in source order, including otherwise
+parallel file tools before and after it. A following Read observes the preceding
+command's completed result; outputs and terminal events retain their original
+`toolCallId`. Stop waits for the running tool's cleanup and does not start the
+remaining calls in that sequential batch.
+
+The Host keeps the existing shell execution capacity of four. Different agents
+or sessions may still execute shell commands concurrently. File-tool coordination
+does not protect arbitrary shell writes, external editors, unmanaged descendants,
+or other Host processes. There is no project-wide shell lock and no inferred
+command write-set. Hashline validation after a shell write remains unchanged.
+
+The stdio RPC dispatcher admits at most 32 ordinary requests and separately at
+most four control requests (`tools.abort`, `permissions.resolve`, `plans.abort`).
+This reserved lane keeps Stop and approval resolution reachable while ordinary
+requests are waiting for approval or execution capacity. Either saturated lane
+returns `HOST_OVERLOADED`; neither bypasses permissions, tool budgets, session
+ownership, or handler deadlines. It does not guarantee progress if the shared
+state lock itself is blocked.
+
 Host execution baseline:
 
 - A project-bound session workspace is required
