@@ -25,7 +25,7 @@ export const BUILTIN_TOOL_POLICIES = Object.freeze({
   Write: policy("parallel", "host", "blocking-file-drain"),
   Edit: policy("sequential", "host", "blocking-file-drain"),
   Bash: policy("sequential", "host", "process-cancel"),
-  TodoWrite: policy("parallel", "host", "host-state-commit"),
+  TodoWrite: policy("sequential", "host", "host-state-commit"),
   ScheduledTaskList: policy("sequential", "host", "host-state-commit"),
   ScheduledTaskCreate: policy("sequential", "host", "host-state-commit"),
   ScheduledTaskUpdate: policy("sequential", "host", "host-state-commit"),
