@@ -19,14 +19,18 @@ fn path_key(path: &Path) -> String {
 }
 
 fn identity_key(path: &Path) -> Result<Option<String>, String> {
-    if !path.is_file() {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !metadata.is_file() {
         return Ok(None);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-        return Ok(Some(format!("inode:{}:{}", meta.dev(), meta.ino())));
+        return Ok(Some(format!("inode:{}:{}", metadata.dev(), metadata.ino())));
     }
     #[cfg(windows)]
     {
@@ -268,5 +272,44 @@ mod tests {
                 .resources
                 .is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_identity_lookup_fails_closed_instead_of_becoming_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root bypasses the directory permission fixture. The regression runs
+        // on ordinary Unix CI users; Windows needs its own ACL fixture.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("permission fixture requires a non-root Unix user");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(private.join("existing"), "original").unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let metadata_result = std::fs::metadata(private.join("existing"));
+        let access = FileAccessPlan::for_tool(
+            Some(dir.path()),
+            None,
+            "session",
+            "Write",
+            &json!({"path":"private/existing"}),
+            false,
+        );
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            metadata_result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            access.is_err(),
+            "metadata denial must not silently omit the identity key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(private.join("existing")).unwrap(),
+            "original"
+        );
     }
 }

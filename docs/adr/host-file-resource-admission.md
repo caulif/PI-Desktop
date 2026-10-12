@@ -1,4 +1,4 @@
-# Host file resource admission
+# ADR: Host file resource admission
 
 - Status: Implemented candidate (fork experiment, stage B)
 - Date: 2026-10-12
