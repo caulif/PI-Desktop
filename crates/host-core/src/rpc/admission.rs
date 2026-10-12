@@ -23,7 +23,10 @@ impl RpcAdmission {
         method: &str,
     ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         let slots = match method {
-            "tools.abort" | "permissions.resolve" | "plans.abort" | "tools.cancelPreparedFileCalls" => &self.controls,
+            "tools.abort"
+            | "permissions.resolve"
+            | "plans.abort"
+            | "tools.cancelPreparedFileCalls" => &self.controls,
             _ => &self.requests,
         };
         slots.clone().try_acquire_owned()
@@ -42,7 +45,12 @@ mod tests {
             .collect();
         assert!(admission.try_acquire("tools.execute").is_err());
         assert!(admission.try_acquire("session.get").is_err());
-        for method in ["tools.abort", "permissions.resolve", "plans.abort", "tools.cancelPreparedFileCalls"] {
+        for method in [
+            "tools.abort",
+            "permissions.resolve",
+            "plans.abort",
+            "tools.cancelPreparedFileCalls",
+        ] {
             let control = admission.try_acquire(method).unwrap();
             assert!(admission.try_acquire("tools.execute").is_err());
             drop(control);
