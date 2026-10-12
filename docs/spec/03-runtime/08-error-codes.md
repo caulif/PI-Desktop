@@ -130,6 +130,11 @@ does not turn temporary thread pressure into a host process exit.
 | `TOOL_FAILED` | maybe | tool executed but failed |
 | `FILE_NOT_FOUND` | no | Read/Write/Edit target path does not exist (distinct from `TOOL_DENIED`) |
 | `FILE_RESOURCE_CHANGED` | yes | file identity changed during admission, or refreshed resource keys conflict with another call; prepare the call again and reassess current contents before retrying a mutation |
+| `FILE_CALL_ALREADY_PREPARED` | no | this session/tool-call identity already has a preparation or active execution; do not prepare or execute it twice |
+| `FILE_CALL_TICKET_INVALID` | no | the file admission ticket is unknown, expired, cancelled, or already claimed |
+| `FILE_CALL_TICKET_MISMATCH` | no | the ticket does not match the executing session, tool-call identity, tool name, arguments, or scope |
+| `FILE_CALL_TICKET_REQUIRED` | no | this file call has a reserved preparation and must execute with its matching admission ticket |
+| `FILE_CALL_CLEANUP_FAILED` | no | the Runtime could not cancel prepared file calls; stop the run before retrying to avoid leaving reserved work behind |
 | `TOOL_ABORTED` | no | the tool was cancelled by a user stop or a turn abort before it finished |
 | `MUTATION_RETRY_BUDGET_EXHAUSTED` | yes | the repeat guard ended the turn after same-path `Edit` or shell patch failures; carries `details.kind` (`edit` or `patch-command`), the last tool error code, and a class-specific `details.recovery` hint |
 | `PROCESS_RESOURCE_EXHAUSTED` | yes | shell process could not start because the OS temporarily exhausted process resources |

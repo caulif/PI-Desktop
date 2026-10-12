@@ -132,6 +132,11 @@ stdio 与 Tokio 的动态阻塞池隔离，因此后一种情况
 | `TOOL_FAILED` | 也许 | 工具已执行但失败 |
 | `FILE_NOT_FOUND` | 不 | Read/Write/Edit 目标路径不存在（与 `TOOL_DENIED` 可区分） |
 | `FILE_RESOURCE_CHANGED` | yes | 文件准入期间身份发生变化，或刷新后的资源键与其他调用冲突；重试修改前应重新准备调用并重新确认当前内容 |
+| `FILE_CALL_ALREADY_PREPARED` | no | 当前会话和工具调用身份已有准备记录或正在执行；不要重复准备或执行 |
+| `FILE_CALL_TICKET_INVALID` | no | 文件准入票据未知、过期、已取消或已领取 |
+| `FILE_CALL_TICKET_MISMATCH` | no | 票据与执行会话、工具调用身份、工具名称、参数或作用域不匹配 |
+| `FILE_CALL_TICKET_REQUIRED` | no | 此文件调用已有预留的准备记录，必须使用对应准入票据执行 |
+| `FILE_CALL_CLEANUP_FAILED` | no | Runtime 未能取消已准备的文件调用；重试前请停止本轮，避免遗留预留工作 |
 | `TOOL_ABORTED` | 不 | 工具在完成前被用户停止或回合中止取消 |
 | `MUTATION_RETRY_BUDGET_EXHAUSTED` | 是 | 重复保护在同路径 `Edit` 或 shell patch 反复失败后终止了本轮；携带 `details.kind`（`edit` 或 `patch-command`）与最后一个工具错误代码 |
 | `PROCESS_RESOURCE_EXHAUSTED` | 是的 | shell 进程无法启动，因为操作系统暂时耗尽了进程资源 |

@@ -144,6 +144,11 @@ export const ErrorCodes = {
   FILE_NOT_FOUND: "FILE_NOT_FOUND",
   /** File identity changed during admission; prepare the call again before retrying. */
   FILE_RESOURCE_CHANGED: "FILE_RESOURCE_CHANGED",
+  FILE_CALL_ALREADY_PREPARED: "FILE_CALL_ALREADY_PREPARED",
+  FILE_CALL_TICKET_INVALID: "FILE_CALL_TICKET_INVALID",
+  FILE_CALL_TICKET_MISMATCH: "FILE_CALL_TICKET_MISMATCH",
+  FILE_CALL_TICKET_REQUIRED: "FILE_CALL_TICKET_REQUIRED",
+  FILE_CALL_CLEANUP_FAILED: "FILE_CALL_CLEANUP_FAILED",
   /**
    * The mutation recovery guard stopped the turn after repeated same-path Edit
    * or patch-command failures (spec 18-line-anchored-edit-contract §9.3). Retriable: the user may continue.
