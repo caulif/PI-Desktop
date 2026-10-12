@@ -96,12 +96,25 @@ impl ToolPermit {
                 count.0 -= 1;
             }
         }
+        let added: Vec<_> =
+            resources
+                .iter()
+                .filter(|resource| {
+                    !self.request.resources.iter().any(|old| {
+                        old.key == resource.key && (old.exclusive || !resource.exclusive)
+                    })
+                })
+                .cloned()
+                .collect();
         let available = resources.iter().all(|r| {
             state
                 .resources
                 .get(&r.key)
                 .is_none_or(|(reads, writes)| *writes == 0 && (!r.exclusive || *reads == 0))
-        });
+        }) && !state
+            .waiting
+            .iter()
+            .any(|entry| !entry.granted && conflicts(&added, &entry.request.resources));
         let restore = if available {
             &resources
         } else {

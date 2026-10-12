@@ -562,3 +562,32 @@ async fn refreshed_inactive_registration_preserves_order_without_capacity() {
     drop(admitted(second.as_mut()));
     assert!(budget.lock().resources.is_empty());
 }
+
+#[tokio::test]
+async fn identity_refresh_cannot_overtake_a_queued_alias_writer() {
+    let budget = ToolBudget::new();
+    let mut reader = budget
+        .acquire_resources("reader", "Read", vec![resource("path:new", false)])
+        .await
+        .unwrap();
+    let held = budget
+        .acquire_resources("writer", "Write", vec![resource("unrelated", true)])
+        .await
+        .unwrap();
+    let mut writer = Box::pin(budget.acquire_resources(
+        "writer",
+        "Write",
+        vec![resource("inode:appeared", true)],
+    ));
+    assert!(poll_once(writer.as_mut()).is_pending());
+    assert!(!reader.try_refresh_resources(vec![
+        resource("path:new", false),
+        resource("inode:appeared", false)
+    ]));
+    assert!(budget.lock().resources.contains_key("path:new"));
+    assert!(!budget.lock().resources.contains_key("inode:appeared"));
+    drop(held);
+    drop(admitted(writer.as_mut()));
+    drop(reader);
+    assert!(budget.lock().resources.is_empty());
+}

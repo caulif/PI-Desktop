@@ -722,3 +722,8 @@ created aliases and directory swaps remain limitations. See
 Baseline documentation drift: the current single-path review metadata does not
 implement the compound MV rollback described above. This admission change protects
 the paths actually restored; it does not add compound review persistence.
+
+Explicit timeoutMs on these five blocking file tools does not impose a Host RPC
+body deadline: the server drains the accepted body instead of abandoning its
+resource permit while blocking work continues. Clients may stop awaiting a
+response, but that does not mean execution or review bookkeeping has stopped.

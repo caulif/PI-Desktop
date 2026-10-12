@@ -524,6 +524,12 @@ fn request_budget_ms(method: &str, params: &Value) -> Option<u64> {
         .or_else(|| params.get("tool_name"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // File work runs on spawn_blocking and cannot be stopped by dropping
+    // its future. Keep the server-owned request (and resource permit) alive
+    // through actual completion, even when a client supplies timeoutMs.
+    if matches!(tool_name, "Read" | "Glob" | "Grep" | "Write" | "Edit") {
+        return None;
+    }
     let timeout_ms = params
         .get("timeoutMs")
         .or_else(|| params.get("timeout_ms"))
@@ -9939,6 +9945,19 @@ mod update_settings_tests {
 #[cfg(test)]
 mod file_admission_tests {
     use super::*;
+
+    #[test]
+    fn explicit_file_timeout_cannot_drop_a_blocking_job_or_its_resources() {
+        for tool in ["Read", "Glob", "Grep", "Write", "Edit"] {
+            assert_eq!(
+                request_budget_ms("tools.execute", &json!({"toolName":tool,"timeoutMs":1})),
+                None
+            );
+        }
+        assert!(
+            request_budget_ms("tools.execute", &json!({"toolName":"Bash","timeoutMs":1})).is_some()
+        );
+    }
 
     #[tokio::test]
     async fn queued_file_call_can_abort_and_rollback_waits_without_holding_app_state() {

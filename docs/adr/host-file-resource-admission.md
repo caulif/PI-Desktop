@@ -31,8 +31,8 @@ keys (Windows conservatively case-folded), and existing file identities (Unix
 volume/inode, Windows volume/file index). This coordinates existing hardlinks as
 well as canonical aliases. Missing leaves use their resolved existing ancestor.
 After admission, canonical paths must be unchanged. Identity keys may be refreshed
-atomically if they do not conflict with another active permit; otherwise the call
-fails with FILE_RESOURCE_CHANGED. This supports a queued read after creation
+atomically if they do not conflict with another active permit or overtake a queued
+alias writer; otherwise the call fails with FILE_RESOURCE_CHANGED. This supports a queued read after creation
 without unlocking and losing its place. Planning never reads file contents or
 creates directories; approved external paths use the same resolver as execution.
 
@@ -40,8 +40,9 @@ Permissions stay before admission. Read/Glob/Grep/Write/Edit join the existing
 call-ID cancellation registry. Approval and queue waits may be cancelled; an
 admitted blocking body is drained through Hashline commits, review finalization
 and audit before the permit drops. The production RPC server owns these file
-request tasks in its JoinSet, gives file tools no request-body timeout, and drains
-them after shutdown cancellation. Do not race their execution future against a
+request tasks in its JoinSet. This change ignores explicit timeoutMs for file
+request budgets (the baseline forwarded it and could abandon spawn_blocking),
+and drains them after shutdown cancellation. Do not race their execution future against a
 Stop signal or add a request timeout that drops it: that would release a permit
 before spawn_blocking finished. Grep cancellation drains its current process;
 this change does not promise immediate termination of that process.
