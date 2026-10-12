@@ -1,4 +1,4 @@
-# Ordered preparation and parallel read batches
+# ADR: Ordered preparation and parallel read batches
 
 - Status: Fork experiment
 - Date: 2026-10-12
