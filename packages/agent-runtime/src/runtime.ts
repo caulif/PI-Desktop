@@ -4,7 +4,7 @@ import {
   mutationTerminationAdvice, mutationTerminationMessage,
 } from "./mutation-recovery.js";
 import { resolveMcpToolSelection } from "./mcp-tool-selection.js";
-import { toolExecutionMode } from "./tool-execution-policy.js";
+import { toolExecutionMode, requireBuiltinToolPolicy, type ToolPolicyOrigin } from "./tool-execution-policy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { TOOL_ACTIVATION_SECTION, toolDeclarationPolicy, toolActivationSection, restoredToolActivation, syncToolActivation, type ToolDeclarationPolicy } from "./fixed-tool-declarations.js";
 import { orderSystemRows, SystemTranscriptJournal } from "./system-transcript-journal.js";
@@ -1750,6 +1750,7 @@ export class DesktopAgentRuntime {
   /** Weak argument identity binds preparation to the exact validated call, without retained IDs. */
   private preparedPathToolArgs = new WeakMap<object, unknown>();
   private fileCalls: FileCallPreparation;
+  private toolPolicyOrigins = new WeakMap<AgentTool, ToolPolicyOrigin>();
   private instructionExecution = new AsyncLocalStorage<(instructions: ProjectInstructions | undefined) => void>();
   private projectMemory?: string;
   /** Per-prompt claims prevent repeated path-resolution RPCs for one directory. */
@@ -3804,17 +3805,23 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     // Trusted extension tools are non-core: the per-mode allowlist and
     // ToolSearch deferral treat them like plugin tools (spec 16 §7).
     const extensionTools = this.extensionRunner?.getAgentTools() ?? [];
-    return [
+    const internalTools = [
       ...builtins,
       ...jevTools,
       askTool,
-      ...pluginTools,
       ...skillTools,
       ...modeTools,
       ...subagentTools,
       ...contextTools,
-      ...extensionTools,
     ];
+    for (const tool of internalTools) {
+      requireBuiltinToolPolicy(tool.name);
+      this.toolPolicyOrigins.set(tool, "builtin");
+    }
+    for (const tool of pluginTools) this.toolPolicyOrigins.set(tool, "plugin");
+    for (const tool of extensionTools) this.toolPolicyOrigins.set(tool, "extension");
+    return [...builtins, ...jevTools, askTool, ...pluginTools, ...skillTools,
+      ...modeTools, ...subagentTools, ...contextTools, ...extensionTools];
   }
 
   /**
@@ -3838,7 +3845,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         withModeExecutionGuard(
           withExplicitRequired({
             ...tool,
-            executionMode: toolExecutionMode(tool.name),
+            executionMode: toolExecutionMode(tool.name, this.toolPolicyOrigins.get(tool) ?? "extension"),
           }),
           () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
         ),
@@ -3860,7 +3867,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         TOOL_SEARCH_NAME,
         withExplicitRequired({
           ...this.buildToolSearchTool(),
-          executionMode: "sequential",
+          executionMode: requireBuiltinToolPolicy(TOOL_SEARCH_NAME).executionMode,
         }),
       );
     }

@@ -7,6 +7,16 @@
 
 ### Fork experiment: coordinated parallel file batches
 
+All built-ins have an explicit typed entry in `tool-execution-policy.ts`, naming
+batch mode, executor owner and existing lifecycle contract. A missing builtin
+entry is rejected when constructing the catalog. Plugin/MCP and trusted extension
+tools use sequential fallback irrespective of risk, schema hints or collisions
+with builtin names. Dynamic activation/restoration selects policy-bearing catalog
+tools; it cannot revive an obsolete parallel hint. Delegates preserve conservative
+catalog decisions. See [the registry ADR](../../adr/tool-policy-registry.md) for
+the concrete owner/cleanup paths. Policy metadata does not grant permission,
+implement cancellation or coordinate arbitrary external writes.
+
 Read, Glob, Grep, coordinated Write and Task are the only parallel batch tools. Both parent and
 delegate loops use pi's parallel strategy; any sequential tool (including
 Edit, Bash and unknown tools) makes its entire assistant batch sequential.

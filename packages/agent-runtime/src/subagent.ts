@@ -298,7 +298,11 @@ export class SubagentRun {
       initialState: {
         systemPrompt: opts.systemPrompt,
         model: binding.model,
-        tools: opts.tools.map((tool) => ({ ...tool, executionMode: toolExecutionMode(tool.name) })),
+        tools: opts.tools.map((tool) => ({ ...tool,
+          // A dynamic tool must not regain Read's policy merely by sharing its
+          // name. Preserve the catalog's conservative provenance decision.
+          executionMode: tool.executionMode === "sequential" ? "sequential" : toolExecutionMode(tool.name),
+        })),
         thinkingLevel: binding.agentThinkingLevel,
         messages: initialSystemTranscript(opts.systemPrompt, opts.tools, opts.initialMessages ? [...opts.initialMessages] : []),
       },

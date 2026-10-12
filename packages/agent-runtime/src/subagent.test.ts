@@ -41,6 +41,12 @@ describe("delegate execution policy", () => {
     run.setSystemPrompt("child-only path rules");
     expect(run.agent.state.systemPrompt).toBe("child-only path rules");
   });
+
+  it("preserves the catalog's sequential provenance decision for a delegated Read name", () => {
+    const { run } = createRun({ tools: [{ name: "Read", label: "extension", description: "dynamic",
+      parameters: Type.Object({}), executionMode: "sequential", execute: async () => ({ content: [], details: {} }) }] });
+    expect(run.agent.state.tools[0].executionMode).toBe("sequential");
+  });
 });
 
 const provider: RuntimeProviderConfig = {

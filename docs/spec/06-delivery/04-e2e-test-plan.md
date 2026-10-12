@@ -41,6 +41,19 @@
   old-Host failure, and cleanup appended while another cleanup is settling.
   Runtime and subagent integration suites exercise the production hooks. This
   stage does not open Write/Edit parallelism or claim cross-agent Shell isolation.
+### Fork coverage: dynamic execution policy
+
+- Enumerate actual runtime catalogs in Agent/Plan/Goal with optional Jev, Skill
+  and delegate definitions. Every builtin requires an explicit policy; unknown
+  builtin registration must fail visibly.
+- Contribute plugin/MCP and trusted extension tools (including a collision with
+  Read), activate and rebuild their catalog, and verify sequential fallback.
+- Restore successful ToolSearch activation from persisted transcript/checkpoint
+  through the existing HTTP/SSE fixed-tool fixture: activation and Host permission
+  behavior remain unchanged, and restored tools remain sequential.
+- Coverage: `tool-execution-policy.test.ts`, `fixed-tool-runtime.test.ts`,
+  `subagent.test.ts`; these are runtime integration tests with fixture services,
+  not evidence of a full Electron/Host E2E run.
 
 ### Fork E2E: parallel read batch lifecycle
 
