@@ -417,7 +417,7 @@ Headroom 是 16,384 个代币储备底线的最大值，模型最大输出
 可配置。
 
 **估算校准（D606）。** 上述每个阈值都对着同一个数字比较，而该数字会按请求的真实开销校正。pi 的 `estimateContextTokens`
-以最后一条助手用量为锚，其余一律按 `chars / 4` 估算：该常数会低估中文文本，且在没有锚点时完全不含系统提示与工具结构，
+以最后一条助手用量为锚，并使用 pi-ai 1.1.0 的 provider 消息估算（文本按每个 token 3.5 个字符）；文本截断也按相同比例换算 token 预算。没有锚点时，估算完全不含系统提示与工具结构，
 而下一次请求仍要为它们付费。两类误差分开处理——逐字符偏差以「猜测尾部」上的比例表示（与量级无关）；无锚点残差只在与之
 量级相当的样本（0.5×–2×）上按比例应用，否则只加上观测到的固定开销（上限 32,000 词元）。
 
@@ -447,7 +447,9 @@ Headroom 是 16,384 个代币储备底线的最大值，模型最大输出
 低于安全预算，用户行和助理错误仍然持久并且
 没有提供商请求开始。提供商报告的上下文溢出是最后一个
 恢复层：从模型上下文中省略失败的助手，压缩一次，
-并重试一次。第二次溢出仍处于终止状态。基岩的
+并重试一次。第二次溢出仍处于终止状态，并报告为 `CONTEXT_TOO_LARGE`：错误分类器
+识别 pi-ai 的 `isContextOverflow` 能识别的每种溢出措辞，因此 DashScope/Qwen 或
+z.ai 等提供商不会先按溢出恢复、随后又被报告为通用的 `PROVIDER_ERROR`。基岩的
 `prompt is too long: N tokens > M maximum` 形式映射到此路径。
 
 自动保护始终启用且用户不可配置。的
@@ -583,7 +585,10 @@ Goal 批准所承诺的内容与 Plan 批准所承诺的内容完全相同：`mo
   `message_update.deltaThinking`。他们从不附加到 `content` 或
   `deltaText`。
 - 恢复的助手历史重建单独的文本和思维块
-  在下一个回合之前。
+  在下一个回合之前。助手传输身份使用 `model.provider` / `model.id`
+  （与实时请求相同），而不是账户行 id；`vendorKey` 绑定的模型上两者不同。
+  Task(resume) 的 `seedDelegateMessages` 同样遵守该规则，避免 pi-ai 把同模型
+  reasoning 当成跨模型历史而清空 `reasoning_content`。
 - 恢复的历史记录还可以从持久保存的工具 call/result 对中重建工具
   工具行（`off`/`minimal`/`low`），因此重新创建了运行时
   保持其完整的工作上下文——读取的文件内容、命令输出——
@@ -802,7 +807,9 @@ Electron main 里解析一次——凭据与 Pi catalog 快照都在那里——
 
 当摘要无法生成，或压缩后的上下文仍然超出预算时，该次运行降级：只保留原始任务简报
 加最近的若干条消息，丢弃其余历史，继续运行，并记录它已被降级，因此报告与生命周期
-details 会说明该委托丢失了历史，而不是把一个不完整的答案当作完整答案呈现。若连这样
+details 会说明该委托丢失了历史，而不是把一个不完整的答案当作完整答案呈现。提取后
+为空或仅空白的摘要文本（包括只有 thinking、没有任何 text 块，或因输出长度截断而
+没有正文的回复）一律视为「无法生成」—— 不得安装一个空的、却被当成成功的检查点。若连这样
 也放不下，该次运行以 `SUBAGENT_CONTEXT_OVERFLOW`（不可重试）失败，点名父级可以改变
 什么 —— 缩小任务范围、改用窗口更大的模型、一次读取更少内容 —— 而不是把提供商的
 溢出文本转发出去。
@@ -1120,8 +1127,11 @@ sidecar 无法选择不同的根。在一次提示期间，路径解析
 所有发现都保留在会话项目根目录中。目标路径位于项目根之外，
 或目标就是项目根本身时，解析结果回退为根目录自身的链，而不是空结果，
 因此对附件或其他位置的工具调用会保留根链（根链本身也可能为空）。
-空的、不可读的以及根目录外的指令文件仍会被跳过。合并的 UTF-8 内容上限为 32 KiB
-源路径标记在 `# Project instructions` 下。
+空的、不可读的以及根目录外的指令文件仍会被跳过。全局文件与项目条目各有独立的
+32 KiB UTF-8 预算，过大的全局文件不会挤掉项目指令。超出剩余预算的文件按 UTF-8
+字符边界截断，并在末尾附加
+`[PI-Desktop truncated <source>: loaded the first <n> of <total> bytes; ...]`
+提示；被截断文件之后的项目文件不再加载。源路径标记在 `# Project instructions` 下。
 sidecar 从不直接读取工作区指令。改变的根链
 在下一个提示时重新创建空闲运行时；嵌套指令已解决
 当相关文件工具运行时再次。解析器的超时和 fallback 是运行时保护措施；
@@ -1201,7 +1211,7 @@ System/Direct/Custom 代理路由保持不变。
 provider transport 重建。`EPROTO` 等协议错误继续使用原有重试行为。详见
 [证书信任 ADR](../../../adr/provider-system-certificates.md)。
 
-## Pi 1.0.1 execution boundary
+## Pi 1.1.0 execution boundary
 
 Published model metadata and account entitlement come from one account-scoped
 Pi Models collection. Effective binding projection is shared by launch, delegates

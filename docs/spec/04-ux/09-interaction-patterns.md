@@ -229,12 +229,13 @@ may be retained while exactly one workspace supplies the visible shell context.
    bridge. Its path then drives topbar identity, active workspace state, and
    new-task scope.
 3. **Collapse** — disclosure state belongs to each project path. Collapsing
-   hides children only; it neither changes the selected session nor stops a
-   run. The directory row is one full-width disclosure target containing its
-   chevron, folder, and label: selecting an inactive directory activates it
-   first, and every directory-row click toggles that group's children without
-   changing any other group's state. Project actions are separate sibling
-   controls and never toggle the directory.
+   does not change the selected session or stop a run, and clears that group's
+   loaded-more session history so its next expansion starts with the initial
+   ten unpinned sessions. The directory row is one full-width disclosure target
+   containing its chevron, folder, and label: selecting an inactive directory
+   activates it first, and every directory-row click toggles that group's
+   children without changing any other group's state. Project actions are
+   separate sibling controls and never toggle the directory.
 4. **Close** — closing removes only the retained tab. If it was active, the
    last remaining tab is selected or the visible workspace is cleared. Durable
    projects, sessions, and transcripts remain.
@@ -271,7 +272,8 @@ may be retained while exactly one workspace supplies the visible shell context.
   permanent delete, and the folder on disk is never touched. A project whose
   turn is still live still opens the confirmation dialog that names those
   sessions and stops them first; an idle project is removed on that second
-  click.
+  click. Sidebar overflow menus stay inside the window; a tall menu scrolls
+  within the available viewport so its last action remains reachable.
 - **Create branch** snapshots an idle conversation's complete active
   transcript into an independent session in the same project/Temporary scope.
   The command is disabled while the source runs. Success selects the child and
@@ -856,6 +858,12 @@ may be retained while exactly one workspace supplies the visible shell context.
 - The context usage inspector keeps one muted line for the newest checkpoint,
   shown while its panel is open — the count and summary cost sit below the
   compact model/tool usage summaries without adding explanatory copy.
+- The open context usage inspector also shows the session's elapsed wall time
+  and the cumulative duration of its top-level model responses. The response
+  percentage compares those recorded request-to-completion durations with the
+  session span; nested delegate responses are excluded because they may overlap.
+  Long transcripts load earlier response timings in bounded pages only while
+  the inspector is open.
 
 ## 4. Long content collapse / expand
 

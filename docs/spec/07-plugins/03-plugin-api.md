@@ -803,6 +803,7 @@ hrefs (D330 / ADR 0168). Other schemes fail with `INVALID_ARGUMENT`.
 
 ### browser (requires `browser.cdp`)
 ```ts
+pi.browser.reveal(): Promise<void>
 pi.browser.navigate(input: { url?: string; path?: string }): Promise<BrowserState | null>
 pi.browser.action(input: { action: "back" | "forward" | "reload" | "stop" }): Promise<void>
 pi.browser.setBounds(hole: { x: number; y: number; width: number; height: number }): Promise<unknown>
@@ -835,8 +836,11 @@ storage, target, and network-interception methods fail with
 `plugins.execute` `sessionId`, not from plugin arguments (D333 / ADR 0170).
 Page operations (`navigate`, `action`, `openExternal`, `getState`, snapshot,
 screenshot, and CDP calls) are available only while the Browser view is
-visible. Calls made while it is hidden fail with `UNAVAILABLE`; use
-`BrowserPreview` to ask the host to reveal the Browser view before continuing.
+visible. `reveal()` asks the host to activate the Browser tab for the calling
+session and resolves only after that session's view is visible. A background
+session never takes focus; if it cannot become visible, `reveal()` fails with
+`UNAVAILABLE`. The bundled Browser agent tool calls `reveal()` before each
+operation. `BrowserPreview` remains the live-reloading workspace-file preview.
 
 `getHistory` returns newest-first entries explicitly recorded by the host, with
 text and images interleaved in capture order. Content written through
@@ -895,8 +899,36 @@ pi.net.fetch(input: {
  headers?: Record<string, string>
  body?: string
  timeoutMs?: number
+ redirect?: "follow" | "error" | "manual"
 }): Promise<{ status: number; headers: Record<string, string>; bodyText: string }>
 ```
+
+
+`redirect` is optional: omitted or `follow` preserves the existing policy (up to
+five followed 3xx responses with Location, relative to the current URL, each
+checked against the granted egress policy). Existing method/header/body handling
+is unchanged; this is not a promise of browser Fetch redirect rewriting.
+`manual` returns the first response's status, headers (including Location) and
+body without visiting its target. `error` rejects **any 300–399 response** with
+`REDIRECT_DISALLOWED`, even without Location; it never visits the target. Other
+statuses, including 429, remain normal responses. In follow mode a 3xx without
+Location is returned unchanged; a loop exceeds the five-hop cap with
+`UNAVAILABLE`. One timeout covers the whole chain and response body (`TIMEOUT`).
+Invalid redirect values fail with `INVALID_ARGUMENT` before network I/O.
+
+The host owns redirect handling for both the default and injected single-hop
+transport. Every followed hop still passes the existing permission/egress
+checks; these modes grant no additional network access. Policy refusals are
+audited without response bodies or headers.
+
+Before using the option on a potentially older host, query
+`pi.net.getCapabilities(): Promise<{ fetchRedirectModes: string[] }>` and require
+the desired mode. This read-only query needs no network permission and performs
+no network I/O. A missing method, rejected query, or absent mode means
+unsupported: do not send the request. Older hosts may silently ignore unknown
+fetch options, so passing `redirect` alone is **not** capability detection.
+This API is unreleased; released 0.17.0 and older do not advertise it.
+No same-origin-only mode is introduced by this change.
 
 `fetch` answers with the upstream response unchanged — `status`, `headers`, and
 `bodyText` — so a `429` is data your plugin can read, `Retry-After` included,

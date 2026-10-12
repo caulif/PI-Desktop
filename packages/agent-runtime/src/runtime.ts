@@ -140,6 +140,7 @@ import { buildSessionContext } from "./session-context.js";
 import { prepareCompaction } from "./pi-runtime-compaction-plan.js";
 import { compact } from "./pi-runtime-compaction-summary.js";
 import {
+  ESTIMATED_TEXT_CHARS_PER_TOKEN,
   estimateContextTokens,
   estimateTokens,
 } from "./pi-runtime-estimates.js";
@@ -1470,7 +1471,7 @@ function truncateUserMessageForCheckpoint(
     ...message,
     content: truncateTextForCheckpoint(
       userMessageTextForCheckpoint(message),
-      Math.max(1, tokenBudget) * 4,
+      Math.max(1, Math.floor(tokenBudget * ESTIMATED_TEXT_CHARS_PER_TOKEN)),
     ),
   };
 }
@@ -1499,6 +1500,58 @@ function selectRetainedUserMessages(
     break;
   }
   return selected.reverse();
+}
+
+/**
+ * Model-visible text for one host tool content block. Besides plain `text`
+ * blocks, MCP servers return file bodies as embedded text resources and large
+ * payloads as resource links (github-mcp-server `get_file_contents` sends a
+ * status line plus one of these), so dropping them next to a sibling text
+ * block hides the actual result from the model. Binary resources and other
+ * block kinds have no text to show and stay out of the text channel.
+ */
+function hostContentBlockText(block: unknown): string | undefined {
+  if (!isRecord(block)) return undefined;
+  if (block.type === "text" && typeof block.text === "string") return block.text;
+  if (
+    block.type === "resource" &&
+    isRecord(block.resource) &&
+    typeof block.resource.text === "string"
+  ) {
+    return block.resource.text;
+  }
+  if (block.type === "resource_link" && typeof block.uri === "string") {
+    const name = typeof block.name === "string" && block.name.trim()
+      ? `${block.name.trim()}: `
+      : "";
+    return `[resource link] ${name}${block.uri}`;
+  }
+  return undefined;
+}
+
+/**
+ * JSON text fallback for a host result that produced no text blocks. Image
+ * `data` and resource `blob` bytes stay off the text channel; type, mimeType,
+ * and uri remain so the model still sees what was attached.
+ */
+function withoutInlineBinary(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => withoutInlineBinary(entry));
+  if (!isRecord(value)) return value;
+  const next: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "data" && value.type === "image") continue;
+    if (key === "resource" && value.type === "resource" && isRecord(entry)) {
+      const resource: Record<string, unknown> = {};
+      for (const [resourceKey, resourceValue] of Object.entries(entry)) {
+        if (resourceKey === "blob") continue;
+        resource[resourceKey] = withoutInlineBinary(resourceValue);
+      }
+      next.resource = resource;
+      continue;
+    }
+    next[key] = withoutInlineBinary(entry);
+  }
+  return next;
 }
 
 /** Rebuild a pi-ai tool result from a persisted tool row. Rows that never
@@ -3544,24 +3597,26 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           // and hand images to the model instead of stringifying (#1360).
           const textParts: string[] = [];
           for (const block of rawContent) {
-            if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-              textParts.push(block.text);
-            }
+            const blockText = hostContentBlockText(block);
+            if (blockText !== undefined) textParts.push(blockText);
           }
           collectImageBlocks(rawContent);
-          text = textParts.join("\n") || JSON.stringify(rawContent, null, 2);
+          text =
+            textParts.join("\n") ||
+            JSON.stringify(withoutInlineBinary(rawContent), null, 2);
           details = { blocks: rawContent, imageCount: imageBlocks.length };
         } else if (isRecord(rawContent) && Array.isArray(rawContent.content)) {
           // MCP tools return `content: [{ type: "image" | "text", ... }]`.
           const contentBlocks = rawContent.content;
           const textParts: string[] = [];
           for (const block of contentBlocks) {
-            if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-              textParts.push(block.text);
-            }
+            const blockText = hostContentBlockText(block);
+            if (blockText !== undefined) textParts.push(blockText);
           }
           collectImageBlocks(contentBlocks);
-          text = textParts.join("\n") || JSON.stringify(rawContent, null, 2);
+          text =
+            textParts.join("\n") ||
+            JSON.stringify(withoutInlineBinary(rawContent), null, 2);
           details = { ...rawContent, imageCount: imageBlocks.length };
         } else if (isRecord(rawContent) && Array.isArray(rawContent.images)) {
           text =
@@ -5428,6 +5483,58 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     };
   }
 
+  /** Shared cancellation path for TaskStop and explicit desktop controls. */
+  async stopSubagents(ids: string[] = []) {
+    const targets = ids.length
+      ? [...new Set(ids)]
+          .map((id) => this.delegations.get(id))
+          .filter(
+            (record): record is DelegationRecord =>
+              record !== undefined && record.status === "running",
+          )
+      : this.runningDelegations();
+    for (const record of targets) {
+      record.stopRequested = true;
+      record.abort();
+    }
+    // Cancellation is cooperative: bound the wait so a worker that ignores
+    // abort cannot wedge the caller. Still-running workers are
+    // explicitly returned as pending, never mislabeled as stopped.
+    let stopTimeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(targets.map((record) => record.completion)),
+      new Promise<void>((resolve) => {
+        stopTimeout = setTimeout(resolve, 5_000);
+      }),
+    ]);
+    if (stopTimeout !== undefined) clearTimeout(stopTimeout);
+    const pending = targets.filter((record) => record.status === "running");
+    const stopped = targets.filter((record) => record.status === "stopped");
+    const settled = targets.filter(
+      (record) => record.status !== "running" && record.status !== "stopped",
+    );
+    const text =
+      targets.length === 0
+        ? "No matching running subagents to stop."
+        : pending.length > 0
+          ? `Cancellation requested for ${targets.length} subagent${targets.length === 1 ? "" : "s"}; ${pending.length} have not confirmed termination and remain running.`
+          : settled.length > 0
+            ? `Cancellation settled for ${targets.length} subagent${targets.length === 1 ? "" : "s"}: ${stopped.length} stopped and ${settled.length} had already finished.`
+            : `Stopped ${stopped.length} subagent${stopped.length === 1 ? "" : "s"}.`;
+    return {
+      content: [{ type: "text" as const, text }],
+      details: {
+        stopped: stopped.map(delegationSummary),
+        ...(pending.length > 0
+          ? { stopPending: pending.map(delegationSummary) }
+          : {}),
+        ...(settled.length > 0
+          ? { settled: settled.map(delegationSummary) }
+          : {}),
+      },
+    };
+  }
+
   /** `TaskStop`: stop running delegations (ADR 0089). */
   private buildSubagentStopTool(): AgentTool {
     return {
@@ -5449,54 +5556,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           isRecord(params) && Array.isArray(params.delegationIds)
             ? params.delegationIds.map(String)
             : [];
-        const targets = ids.length
-          ? ids
-              .map((id) => this.delegations.get(id))
-              .filter(
-                (record): record is DelegationRecord =>
-                  record !== undefined && record.status === "running",
-              )
-          : this.runningDelegations();
-        for (const record of targets) {
-          record.stopRequested = true;
-          record.abort();
-        }
-        // Cancellation is cooperative: bound the wait so a worker that ignores
-        // abort cannot wedge the parent tool call. Still-running workers are
-        // explicitly returned as pending, never mislabeled as stopped.
-        let stopTimeout: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([
-          Promise.all(targets.map((record) => record.completion)),
-          new Promise<void>((resolve) => {
-            stopTimeout = setTimeout(resolve, 5_000);
-          }),
-        ]);
-        if (stopTimeout !== undefined) clearTimeout(stopTimeout);
-        const pending = targets.filter((record) => record.status === "running");
-        const stopped = targets.filter((record) => record.status === "stopped");
-        const settled = targets.filter(
-          (record) => record.status !== "running" && record.status !== "stopped",
-        );
-        const text =
-          targets.length === 0
-            ? "No matching running subagents to stop."
-            : pending.length > 0
-              ? `Cancellation requested for ${targets.length} subagent${targets.length === 1 ? "" : "s"}; ${pending.length} have not confirmed termination and remain running.`
-              : settled.length > 0
-                ? `Cancellation settled for ${targets.length} subagent${targets.length === 1 ? "" : "s"}: ${stopped.length} stopped and ${settled.length} had already finished.`
-                : `Stopped ${stopped.length} subagent${stopped.length === 1 ? "" : "s"}.`;
-        return {
-          content: [{ type: "text", text }],
-          details: {
-            stopped: stopped.map(delegationSummary),
-            ...(pending.length > 0
-              ? { stopPending: pending.map(delegationSummary) }
-              : {}),
-            ...(settled.length > 0
-              ? { settled: settled.map(delegationSummary) }
-              : {}),
-          },
-        };
+        return this.stopSubagents(ids);
       },
     };
   }
@@ -8070,10 +8130,17 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             this.streamStartedAt = undefined;
             break;
           }
+          // Pi 1.1.0 measures from request start with a monotonic clock. Keep the
+          // sidecar stopwatch for stopped and older streams that have no final message.
+          const piDurationMs = event.message.durationMs;
           const responseDurationMs =
-            this.streamStartedAt !== undefined
-              ? Math.max(0, endedAt - this.streamStartedAt)
-              : undefined;
+            typeof piDurationMs === "number" &&
+            Number.isFinite(piDurationMs) &&
+            piDurationMs > 0
+              ? piDurationMs
+              : this.streamStartedAt !== undefined
+                ? Math.max(0, endedAt - this.streamStartedAt)
+                : undefined;
           const responseOutputTokens =
             aborted && (!usage || usage.outputTokens <= 0)
               ? estimateVisibleResponseOutputTokens({
