@@ -5,6 +5,41 @@
 
 ## 0. Frozen policy summary
 
+### Fork experiment: coordinated parallel file batches
+
+All built-ins have an explicit typed entry in `tool-execution-policy.ts`, naming
+batch mode, executor owner and existing lifecycle contract. A missing builtin
+entry is rejected when constructing the catalog. Plugin/MCP and trusted extension
+tools use sequential fallback irrespective of risk, schema hints or collisions
+with builtin names. Dynamic activation/restoration selects policy-bearing catalog
+tools; it cannot revive an obsolete parallel hint. Delegates preserve conservative
+catalog decisions. See [the registry ADR](../../adr/tool-policy-registry.md) for
+the concrete owner/cleanup paths. Policy metadata does not grant permission,
+implement cancellation or coordinate arbitrary external writes.
+
+Read, Glob, Grep, coordinated Write and Task are the only parallel batch tools. Both parent and
+delegate loops use pi's parallel strategy; any sequential tool (including
+Edit, Bash and unknown tools) makes its entire assistant batch sequential.
+Task may therefore overlap read/search/Write calls in the same message. This is a
+per-agent batch rule, not application-wide exclusion or a Shell safety lock.
+
+The pinned pi-agent-core 1.0.1 prepares all parallel calls in source order before
+launching their execution bodies. Path instruction resolution and prompt updates
+occur during that preparation, after existing parent mode/extension checks.
+Execution consumes the same normalized arguments. Direct internal invocations
+retain preflight. Child preflight updates the child's system transcript only;
+it never replaces parent instructions. Sibling instruction chains replace one
+another according to preparation order, regardless of completion order.
+
+Permissions, Host capacities, mutation recovery, Hashline validation and tool
+result IDs remain authoritative. Completion events may arrive out of order;
+model tool results remain in source order. Host admission coordinates participating
+Read/Write/Edit file conflicts; no directory snapshot is promised. Stop skips
+unstarted calls, cancels registered approval/admission waits, and drains already
+started file work through its real lifecycle before permits release.
+
+See [the fork ADR](../../adr/parallel-read-batches.md).
+
 | Topic | Decision |
 |---|---|
 | Default mode | Agent |
@@ -316,11 +351,45 @@ type ReviewChange = {
 
 ## 4d. Mutation ordering and edit recovery
 
-`Write` and `Edit` are serialized within each session. Read/search tools may
-continue in parallel, and different sessions may mutate different roots
-concurrently, but a session never has two in-flight mutations. The host holds
-the per-session mutation permit before consuming a global mutation slot, so a
-queued mutation cannot reserve capacity while it waits for an earlier edit.
+### Fork experiment: source-ordered file admission
+
+Pi prepares `Read`, `Write`, and `Edit` in source order through the internal
+`tools.prepareFileCall` RPC before starting a parallel batch. The Host creates
+an inactive bounded registration: preparation acquires no execution capacity or
+file lease and grants no permission. Its single-use ticket binds the session,
+tool call ID, tool name, normalized argument digest, and delegate permission scope.
+
+`tools.execute` claims the ticket, runs the unchanged session-owned permission
+gate, refreshes the resource plan, and activates its original queue position.
+Later conflicting calls cannot overtake an earlier registration when approvals
+arrive in reverse order. Admitted work revalidates paths and refreshes file
+identities before execution. Unprepared legacy calls retain the existing API;
+omitting a ticket for an already prepared call fails closed.
+A claimed call retains its identity until its handler settles, so a concurrent
+unticketed retry cannot steal the call ID during approval or execute out of order.
+
+Cancellation covers asynchronous preparation, unused tickets, approval waits,
+and admission waits. Unclaimed tickets expire after ten minutes, with an
+independent thirty-second cleanup sweep; claimed calls keep indefinite approval
+waits. Shutdown releases unclaimed registrations. Runtime cleanup requests are
+batched, serialized, bounded by ten-second transport deadlines, and drained on
+Stop/disposal and delegate settlement. Cleanup failures are reported explicitly.
+Failed call identities remain reserved until cleanup is confirmed. A later drain
+retries those identities once in bounded batches, including repeated Stop or
+disposal requests; successful cleanup clears the failure state. Persistent Host
+failures reject the drain without an unbounded retry loop.
+
+Ticketed mutations bypass the sidecar PathMutex to avoid ordering inversion;
+direct legacy invocations keep their existing lock. The follow-up Write stage
+enables Write and raises per-session mutation capacity to two while preserving
+the global cap of two. Edit stays sequential: file ordering alone does not order
+sidecar Edit recovery outcomes.
+See [ordered-file-call-preparation](../../adr/ordered-file-call-preparation.md).
+
+Host can admit two distinct-file mutations in one session. Conflicting file
+accesses and source-ordered tickets still queue; queueing reserves no execution
+capacity. Runtime Edit batches remain sequential, while independent Write calls
+may overlap. Both the per-session and global mutation caps are two.
 
 `Edit` names positions and supplies new content only; it never matches existing
 text. Every call carries the whole-file `tag` minted by whichever tool last
@@ -360,11 +429,35 @@ the session's provenance, so the same `tag` retried unchanged applies. That
 retry is also the one grace `EDIT_LINES_UNSEEN` gets on the path, so a second
 one does count toward the guard.
 
-Serialization also protects the snapshot store, which both producers and `Edit`
-mutate: without the per-session permit, a concurrent record could land between a
-validation and its write.
+Exclusive file admission protects participating Read/Write/Edit validation and
+write intervals on the same file. Hashline store updates retain their existing
+short mutex; different-file operations can progress independently. Grep remains
+outside directory-tree exclusion and is not a snapshot guarantee.
 
 ## 5. Bash Rules
+
+### Batch ordering and control capacity
+
+`Bash` explicitly uses sequential batch execution. If any call in one model
+message is Bash, the complete batch executes in source order, including otherwise
+parallel file tools before and after it. A following Read observes the preceding
+command's completed result; outputs and terminal events retain their original
+`toolCallId`. Stop waits for the running tool's cleanup and does not start the
+remaining calls in that sequential batch.
+
+The Host keeps the existing shell execution capacity of four. Different agents
+or sessions may still execute shell commands concurrently. File-tool coordination
+does not protect arbitrary shell writes, external editors, unmanaged descendants,
+or other Host processes. There is no project-wide shell lock and no inferred
+command write-set. Hashline validation after a shell write remains unchanged.
+
+The stdio RPC dispatcher admits at most 32 ordinary requests and separately at
+most four control requests (`tools.abort`, `permissions.resolve`, `plans.abort`, `tools.cancelPreparedFileCalls`).
+This reserved lane keeps Stop and approval resolution reachable while ordinary
+requests are waiting for approval or execution capacity. Either saturated lane
+returns `HOST_OVERLOADED`; neither bypasses permissions, tool budgets, session
+ownership, or handler deadlines. It does not guarantee progress if the shared
+state lock itself is blocked.
 
 Host execution baseline:
 
@@ -676,3 +769,35 @@ Naming:
 before the trusted desktop executes the request. Plan/Goal remain denied even
 under Auto. See [image generation](21-image-generation.md) for cancellation,
 limits and result semantics.
+
+
+## Fork experiment: shared file-resource admission
+
+Host file tools now reserve file resources together with the existing ToolBudget
+capacity. Read shares a file; Write/Edit (including REM and both MV paths) require
+exclusive access. Named-register Edit operations also reserve their Host session's
+register namespace. Review rollback uses the same exclusive resource coordinator.
+Older conflicting pending writes block newer reads; unrelated paths can proceed.
+Permission waits hold no execution capacity. Queue/cancellation cleanup releases
+all grants, including grants not yet claimed. Admitted file work drains through
+review and bookkeeping before releasing resources; Stop is not a proof that a
+blocking file operation has already finished.
+
+The Write follow-up enables sidecar parallel Write and a per-session mutation
+limit of two, matching the unchanged global limit. Edit remains sequential.
+See [parallel-file-writes](../../adr/parallel-file-writes.md).
+No directory-tree lock, Bash filesystem lock, snapshot
+search guarantee, or cross-process filesystem transaction is introduced. A changed
+canonical path or conflicting replacement identity fails with FILE_RESOURCE_CHANGED.
+Existing hardlinks are coordinated using platform file identities; externally
+created aliases and directory swaps remain limitations. See
+[Host file resource admission](../../adr/host-file-resource-admission.md).
+
+Baseline documentation drift: the current single-path review metadata does not
+implement the compound MV rollback described above. This admission change protects
+the paths actually restored; it does not add compound review persistence.
+
+Explicit timeoutMs on these five blocking file tools does not impose a Host RPC
+body deadline: the server drains the accepted body instead of abandoning its
+resource permit while blocking work continues. Clients may stop awaiting a
+response, but that does not mean execution or review bookkeeping has stopped.

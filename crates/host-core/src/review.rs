@@ -505,6 +505,22 @@ fn restore_before(target: &Path, before: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the same trusted snapshot target used by rollback without mutating it.
+pub fn rollback_paths(
+    data_dir: &Path,
+    session_id: &str,
+    snapshot_id: &str,
+    workspace_root: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    let meta = read_meta(data_dir, session_id, snapshot_id)?;
+    let Some(root) = workspace_root else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![
+        workspace::resolve_in_workspace(root, &meta.path).map_err(anyhow::Error::msg)?
+    ])
+}
+
 pub fn rollback_change(
     data_dir: &Path,
     session_id: &str,

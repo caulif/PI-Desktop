@@ -8,7 +8,7 @@ pub const MAX_IN_FLIGHT_TOOLS: usize = 16;
 pub const MAX_IN_FLIGHT_SHELL: usize = 4;
 pub const MAX_IN_FLIGHT_READS: usize = 8;
 pub const MAX_IN_FLIGHT_MUTATIONS: usize = 2;
-pub const MAX_IN_FLIGHT_MUTATIONS_PER_SESSION: usize = 1;
+pub const MAX_IN_FLIGHT_MUTATIONS_PER_SESSION: usize = 2;
 pub const MAX_IN_FLIGHT_PLUGINS: usize = 4;
 pub const MAX_IN_FLIGHT_PER_SESSION: usize = 4;
 pub const MAX_QUEUED_TOOLS: usize = 64;
@@ -18,6 +18,20 @@ pub const MAX_QUEUED_TOOLS: usize = 64;
 /// `packages/shared/src/rpc-timeouts.ts`.
 pub const TOOL_QUEUE_WAIT_MS: u64 = 30_000;
 const QUEUE_WAIT: Duration = Duration::from_millis(TOOL_QUEUE_WAIT_MS);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileResource {
+    pub key: String,
+    pub exclusive: bool,
+}
+
+fn conflicts(left: &[FileResource], right: &[FileResource]) -> bool {
+    left.iter().any(|a| {
+        right
+            .iter()
+            .any(|b| a.key == b.key && (a.exclusive || b.exclusive))
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolClass {
@@ -66,6 +80,62 @@ pub struct ToolPermit {
     request: Request,
 }
 
+impl ToolPermit {
+    /// Refresh identity keys while retaining path locks and execution capacity.
+    /// The caller must first prove the canonical path set did not change.
+    pub fn try_refresh_resources(&mut self, resources: Vec<FileResource>) -> bool {
+        let mut state = self.budget.lock();
+        for old in &self.request.resources {
+            let count = state
+                .resources
+                .get_mut(&old.key)
+                .expect("permit owns resource");
+            if old.exclusive {
+                count.1 -= 1;
+            } else {
+                count.0 -= 1;
+            }
+        }
+        let added: Vec<_> =
+            resources
+                .iter()
+                .filter(|resource| {
+                    !self.request.resources.iter().any(|old| {
+                        old.key == resource.key && (old.exclusive || !resource.exclusive)
+                    })
+                })
+                .cloned()
+                .collect();
+        let available = resources.iter().all(|r| {
+            state
+                .resources
+                .get(&r.key)
+                .is_none_or(|(reads, writes)| *writes == 0 && (!r.exclusive || *reads == 0))
+        }) && !state
+            .waiting
+            .iter()
+            .any(|entry| !entry.granted && conflicts(&added, &entry.request.resources));
+        let restore = if available {
+            &resources
+        } else {
+            &self.request.resources
+        };
+        for r in restore {
+            let count = state.resources.entry(r.key.clone()).or_default();
+            if r.exclusive {
+                count.1 += 1;
+            } else {
+                count.0 += 1;
+            }
+        }
+        state.resources.retain(|_, count| *count != (0, 0));
+        if available {
+            self.request.resources = resources;
+        }
+        available
+    }
+}
+
 impl Drop for ToolPermit {
     fn drop(&mut self) {
         let mut state = self.budget.lock();
@@ -89,6 +159,7 @@ pub struct ToolBudgetSnapshot {
 struct Request {
     session_id: String,
     class: ToolClass,
+    resources: Vec<FileResource>,
 }
 
 #[derive(Default)]
@@ -102,6 +173,7 @@ struct WaitingRequest {
     request: Request,
     ready: Arc<Notify>,
     granted: bool,
+    activated: bool,
 }
 
 #[derive(Default)]
@@ -112,6 +184,7 @@ struct BudgetState {
     waiting: VecDeque<WaitingRequest>,
     queued: usize,
     next_id: u64,
+    resources: HashMap<String, (usize, usize)>,
 }
 
 impl ToolClass {
@@ -132,6 +205,15 @@ impl BudgetState {
         {
             return false;
         }
+        if request.resources.iter().any(|resource| {
+            self.resources
+                .get(&resource.key)
+                .is_some_and(|(readers, writers)| {
+                    *writers > 0 || (resource.exclusive && *readers > 0)
+                })
+        }) {
+            return false;
+        }
         self.sessions.get(&request.session_id).is_none_or(|usage| {
             usage.active < MAX_IN_FLIGHT_PER_SESSION
                 && (request.class != ToolClass::Mutation
@@ -140,6 +222,14 @@ impl BudgetState {
     }
 
     fn reserve(&mut self, request: &Request) {
+        for resource in &request.resources {
+            let count = self.resources.entry(resource.key.clone()).or_default();
+            if resource.exclusive {
+                count.1 += 1;
+            } else {
+                count.0 += 1;
+            }
+        }
         self.active += 1;
         self.classes[request.class as usize] += 1;
         let usage = self.sessions.entry(request.session_id.clone()).or_default();
@@ -150,6 +240,20 @@ impl BudgetState {
     }
 
     fn release(&mut self, request: &Request) {
+        for resource in &request.resources {
+            let count = self
+                .resources
+                .get_mut(&resource.key)
+                .expect("permit owns resource");
+            if resource.exclusive {
+                count.1 -= 1;
+            } else {
+                count.0 -= 1;
+            }
+            if *count == (0, 0) {
+                self.resources.remove(&resource.key);
+            }
+        }
         self.active -= 1;
         self.classes[request.class as usize] -= 1;
         let usage = self
@@ -170,7 +274,14 @@ impl BudgetState {
         // must not prevent unrelated runnable work from using spare capacity.
         for index in 0..self.waiting.len() {
             let entry = &self.waiting[index];
-            if entry.granted || !self.can_admit(&entry.request) {
+            if entry.granted
+                || !entry.activated
+                || !self.can_admit(&entry.request)
+                || self.waiting.iter().take(index).any(|earlier| {
+                    !earlier.granted
+                        && conflicts(&earlier.request.resources, &entry.request.resources)
+                })
+            {
                 continue;
             }
             let request = entry.request.clone();
@@ -233,6 +344,55 @@ impl Drop for QueueGuard {
     }
 }
 
+/// A bounded ordering reservation. It holds neither execution capacity nor files
+/// until activated after permission. Dropping it cancels even a granted request.
+pub struct AdmissionRegistration {
+    guard: QueueGuard,
+    ready: Arc<Notify>,
+}
+
+impl AdmissionRegistration {
+    /// Refresh a trusted plan before activation while preserving its queue position.
+    #[allow(dead_code)] // Activated by the following ordered-ticket protocol stage.
+    pub fn update_resources(&mut self, resources: Vec<FileResource>) {
+        let mut state = self.guard.budget.lock();
+        let id = self.guard.id.expect("registration owns queue entry");
+        let entry = state
+            .waiting
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .expect("registered entry exists");
+        assert!(
+            !entry.activated && !entry.granted,
+            "only inactive plans may change"
+        );
+        entry.request.resources = resources;
+        state.dispatch();
+    }
+
+    pub async fn activate(self) -> Result<ToolPermit, AdmissionError> {
+        self.activate_with_timeout(QUEUE_WAIT).await
+    }
+
+    async fn activate_with_timeout(self, wait: Duration) -> Result<ToolPermit, AdmissionError> {
+        {
+            let mut state = self.guard.budget.lock();
+            let id = self.guard.id.expect("registration owns queue entry");
+            state
+                .waiting
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .expect("registered entry exists")
+                .activated = true;
+            state.dispatch();
+        }
+        match tokio::time::timeout(wait, self.ready.notified()).await {
+            Ok(()) => Ok(self.guard.into_permit()),
+            Err(_) => Err(AdmissionError::QueueWaitTimeout),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ToolBudget {
     state: Arc<Mutex<BudgetState>>,
@@ -251,6 +411,7 @@ impl ToolBudget {
             .expect("tool budget state lock is not poisoned")
     }
 
+    #[allow(dead_code)] // Compatibility entry point; resource-aware RPC uses acquire_resources.
     pub async fn acquire(
         &self,
         session_id: &str,
@@ -260,48 +421,62 @@ impl ToolBudget {
             .await
     }
 
+    pub fn register(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        resources: Vec<FileResource>,
+    ) -> Result<AdmissionRegistration, AdmissionError> {
+        let ready = Arc::new(Notify::new());
+        let mut state = self.lock();
+        let queue_depth = state.queued + 1;
+        if queue_depth > MAX_QUEUED_TOOLS {
+            return Err(AdmissionError::QueueFull { queue_depth });
+        }
+        let id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        state.queued += 1;
+        state.waiting.push_back(WaitingRequest {
+            id,
+            request: Request {
+                session_id: session_id.into(),
+                class: ToolClass::from_name(tool_name),
+                resources,
+            },
+            ready: ready.clone(),
+            granted: false,
+            activated: false,
+        });
+        Ok(AdmissionRegistration {
+            guard: QueueGuard {
+                budget: self.clone(),
+                id: Some(id),
+            },
+            ready,
+        })
+    }
+
+    pub async fn acquire_resources(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        resources: Vec<FileResource>,
+    ) -> Result<ToolPermit, AdmissionError> {
+        self.register(session_id, tool_name, resources)?
+            .activate()
+            .await
+    }
+
+    #[allow(dead_code)] // Also retained for deterministic capacity/timeout regression tests.
     async fn acquire_with_timeout(
         &self,
         session_id: &str,
         tool_name: &str,
         wait: Duration,
     ) -> Result<ToolPermit, AdmissionError> {
-        let request = Request {
-            session_id: session_id.to_string(),
-            class: ToolClass::from_name(tool_name),
-        };
-        let ready = Arc::new(Notify::new());
-        let guard = {
-            let mut state = self.lock();
-            if state.can_admit(&request) {
-                state.reserve(&request);
-                return Ok(ToolPermit {
-                    budget: self.clone(),
-                    request,
-                });
-            }
-            let queue_depth = state.queued + 1;
-            if queue_depth > MAX_QUEUED_TOOLS {
-                return Err(AdmissionError::QueueFull { queue_depth });
-            }
-            let id = state.next_id;
-            state.next_id = state.next_id.wrapping_add(1);
-            state.queued += 1;
-            state.waiting.push_back(WaitingRequest {
-                id,
-                request,
-                ready: ready.clone(),
-                granted: false,
-            });
-            QueueGuard {
-                budget: self.clone(),
-                id: Some(id),
-            }
-        };
-        match tokio::time::timeout(wait, ready.notified()).await {
-            Ok(()) => Ok(guard.into_permit()),
-            Err(_) => Err(AdmissionError::QueueWaitTimeout),
-        }
+        self.register(session_id, tool_name, Vec::new())?
+            .activate_with_timeout(wait)
+            .await
     }
 
     pub fn snapshot(&self) -> ToolBudgetSnapshot {

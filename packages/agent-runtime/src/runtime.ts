@@ -4,6 +4,8 @@ import {
   mutationTerminationAdvice, mutationTerminationMessage,
 } from "./mutation-recovery.js";
 import { resolveMcpToolSelection } from "./mcp-tool-selection.js";
+import { toolExecutionMode, requireBuiltinToolPolicy, type ToolPolicyOrigin } from "./tool-execution-policy.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { TOOL_ACTIVATION_SECTION, toolDeclarationPolicy, toolActivationSection, restoredToolActivation, syncToolActivation, type ToolDeclarationPolicy } from "./fixed-tool-declarations.js";
 import { orderSystemRows, SystemTranscriptJournal } from "./system-transcript-journal.js";
 import { planWorkspaceRequiredResult } from "./plan-workspace-error.js";
@@ -123,6 +125,7 @@ import {
 } from "@pi-desktop/shared";
 import { createStreamCoalescer, type StreamCoalescer } from "./stream-coalescer.js";
 import type { RuntimeHost } from "./host-client.js";
+import { FileCallPreparation } from "./file-call-preparation.js";
 import { classifyAgentError } from "./agent-errors.js";
 import {
   assistantContent,
@@ -1797,6 +1800,11 @@ export class DesktopAgentRuntime {
   private commandShell: CommandShellOption;
   private baseProjectInstructions?: ProjectInstructions;
   private projectInstructions?: ProjectInstructions;
+  /** Weak argument identity binds preparation to the exact validated call, without retained IDs. */
+  private preparedPathToolArgs = new WeakMap<object, unknown>();
+  private fileCalls: FileCallPreparation;
+  private toolPolicyOrigins = new WeakMap<AgentTool, ToolPolicyOrigin>();
+  private instructionExecution = new AsyncLocalStorage<(instructions: ProjectInstructions | undefined) => void>();
   private projectMemory?: string;
   /** Per-prompt claims prevent repeated path-resolution RPCs for one directory. */
   private pathInstructionClaims = new Map<
@@ -1960,6 +1968,13 @@ export class DesktopAgentRuntime {
     });
     this.streamSink = createStreamCoalescer(opts.onEvent);
     this.onEvent = (envelope) => this.streamSink.push(envelope);
+    this.fileCalls = new FileCallPreparation(this.host, this.sessionId, () => {
+      this.emit({ type: "error", error: {
+        code: "FILE_CALL_CLEANUP_FAILED",
+        message: "Could not cancel prepared file calls; stop this run before retrying.",
+        retriable: false,
+      } });
+    });
     this.pluginTools = opts.pluginTools ?? [];
     this.pluginSkills = [...(opts.pluginSkills ?? [])].sort((left, right) => left.id.localeCompare(right.id));
     this.trustedExtensionSpecs = opts.trustedExtensions ?? [];
@@ -2196,11 +2211,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       // Sequential execution also makes the host-confirmed mode change visible
       // before the next model request in the same run.
       beforeToolCall: (context) => this.beforeToolCall(context),
-      // Every tool except `Task` carries `executionMode: "sequential"`, and pi
-      // runs a batch sequentially as soon as it contains one such tool. So the
-      // only batch that actually runs concurrently is a batch of nothing but
-      // `Task` calls — subagent fan-out (ADR 0062) — and every existing tool
-      // ordering guarantee is untouched.
+      // pi prepares the entire parallel batch in source order before launching
+      // execution. Any sequential member still makes the whole batch sequential.
       toolExecution: "parallel",
       steeringMode: "all",
       // pi-agent-core 0.87 replaces shouldStopAfterTurn with finishTurn. A
@@ -2546,7 +2558,14 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       if (!this.isToolAllowedInMode(context.toolCall.name)) {
         return { block: true, reason: modeToolDenial(context.toolCall.name, this.mode) };
       }
-      return this.extensionToolCall(context);
+      const blocked = await this.extensionToolCall(context);
+      if (blocked?.block) return blocked;
+      const selectedTool = context.context.tools?.find((tool) => tool.name === context.toolCall.name);
+      if (selectedTool && this.toolPolicyOrigins.get(selectedTool) === "builtin") {
+        await this.preparePathToolCall(context);
+        await this.prepareOrderedFileCall(context);
+      }
+      return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
     if (enterKind && this.mode !== "agent") {
@@ -3315,10 +3334,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         signal,
         onUpdate,
       ) => {
+        const fileAdmissionTicket = this.fileCalls.take(toolCallId);
         const mutationPath = PATH_MUTATING_TOOLS.has(toolName) && isRecord(params) && typeof params.path === "string"
           ? await mutationFailureKey(params.path, this.projectPath ?? this.scratchDir)
           : undefined;
-        await this.loadPathInstructions(toolName, params);
         const isBash = toolName === "Bash";
         const timeoutMs = isBash ? commandTimeoutMs(params) : undefined;
         let progress = "";
@@ -3365,7 +3384,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             })
           : undefined;
         const abort = () => {
-          if ((!isBash && toolName !== "GenerateImages") || abortRequested || settled) return;
+          if ((!isBash && toolName !== "GenerateImages" && !["Read", "Glob", "Grep", "Write", "Edit"].includes(toolName)) || abortRequested || settled) return;
           abortRequested = true;
           abortPromise = this.host
             .call("tools.abort", {
@@ -3424,6 +3443,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               toolCallId,
               toolName,
               args: params,
+              ...(fileAdmissionTicket ? { fileAdmissionTicket } : {}),
               mode: this.mode,
               ...(isBash
                 ? {
@@ -3459,6 +3479,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           executionFailed = true;
           executionError = error;
         } finally {
+          this.fileCalls.finish(toolCallId, executionFailed);
           this.delegatePermissionScopes.delete(toolCallId);
           cleanup(true);
         }
@@ -3671,9 +3692,17 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         // this line — the lock key, the host call, the transcript record — sees
         // canonical argument names only (D273).
         execute: async (toolCallId, rawParams, signal, onUpdate) => {
-          const params = normalizeToolParams(toolName, rawParams);
+          const prepared = typeof rawParams === "object" && rawParams !== null
+            && this.preparedPathToolArgs.has(rawParams);
+          const params = prepared
+            ? this.preparedPathToolArgs.get(rawParams as object)
+            : normalizeToolParams(toolName, rawParams);
+          if (prepared) this.preparedPathToolArgs.delete(rawParams as object);
           requireAliasedParams(toolName, params);
-          return PATH_MUTATING_TOOLS.has(toolName)
+          // Direct/internal invocations retain preflight. pi invocations have
+          // already committed instructions in the ordered preparation phase.
+          if (!prepared) await this.loadPathInstructions(toolName, params, this.instructionExecution.getStore());
+          return PATH_MUTATING_TOOLS.has(toolName) && !this.fileCalls.has(toolCallId)
             ? this.writeLocks.run(
                 isRecord(params) ? String(params.path ?? "") : "",
                 () => run(toolCallId, params, signal, onUpdate),
@@ -3834,17 +3863,23 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     // Trusted extension tools are non-core: the per-mode allowlist and
     // ToolSearch deferral treat them like plugin tools (spec 16 §7).
     const extensionTools = this.extensionRunner?.getAgentTools() ?? [];
-    return [
+    const internalTools = [
       ...builtins,
       ...jevTools,
       askTool,
-      ...pluginTools,
       ...skillTools,
       ...modeTools,
       ...subagentTools,
       ...contextTools,
-      ...extensionTools,
     ];
+    for (const tool of internalTools) {
+      requireBuiltinToolPolicy(tool.name);
+      this.toolPolicyOrigins.set(tool, "builtin");
+    }
+    for (const tool of pluginTools) this.toolPolicyOrigins.set(tool, "plugin");
+    for (const tool of extensionTools) this.toolPolicyOrigins.set(tool, "extension");
+    return [...builtins, ...jevTools, askTool, ...pluginTools, ...skillTools,
+      ...modeTools, ...subagentTools, ...contextTools, ...extensionTools];
   }
 
   /**
@@ -3857,23 +3892,22 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     for (const tool of this.buildToolDefinitions()) {
       if (!this.isToolAllowedInMode(tool.name) && !retainModeToolDeclaration(tool.name)) continue;
       // The execution mode is decided here, in one place, so no tool can grow
-      // an accidental parallel batch: everything is sequential except `Task`.
+      // an accidental parallel batch: unknown tools remain sequential.
       // pi runs a whole batch sequentially when it holds one sequential tool,
-      // so only an all-`Task` batch fans out.
+      // so Read/Glob/Grep/Write/Task can fan out only with other parallel tools.
       // The provider-facing schema is settled here too, at the single origin of
       // every tool, so the session agent and a delegated `Task` run send the
       // same declaration (#864).
-      catalog.set(
-        tool.name,
-        withModeExecutionGuard(
+      const origin = this.toolPolicyOrigins.get(tool) ?? "extension";
+      const catalogTool = withModeExecutionGuard(
           withExplicitRequired({
             ...tool,
-            executionMode:
-              tool.name === SUBAGENT_TOOL_NAME ? "parallel" : "sequential",
+            executionMode: toolExecutionMode(tool.name, origin),
           }),
           () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
-        ),
-      );
+        );
+      this.toolPolicyOrigins.set(catalogTool, origin);
+      catalog.set(tool.name, catalogTool);
     }
     this.toolCatalog = catalog;
     this.deferredToolNames = new Set(
@@ -3891,7 +3925,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         TOOL_SEARCH_NAME,
         withExplicitRequired({
           ...this.buildToolSearchTool(),
-          executionMode: "sequential",
+          executionMode: requireBuiltinToolPolicy(TOOL_SEARCH_NAME).executionMode,
         }),
       );
     }
@@ -4275,7 +4309,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
    * collaboration rules are deliberately left out — a delegate has no user to
    * talk to, and its report format is set by `composeSubagentSystemPrompt`.
    */
-  private subagentGuidance(definition: SubagentDefinition): string[] {
+  private subagentGuidance(definition: SubagentDefinition, instructions: ProjectInstructions | null | undefined = this.projectInstructions): string[] {
     const tools = new Set(
       resolveSubagentToolNames(definition, [...this.toolCatalog.keys()]),
     );
@@ -4302,7 +4336,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       const skillsPrompt = pluginSkillsPrompt(this.pluginSkills);
       if (skillsPrompt) blocks.push(skillsPrompt);
     }
-    const projectPrompt = projectInstructionsPrompt(this.projectInstructions);
+    const projectPrompt = projectInstructionsPrompt(instructions ?? undefined);
     if (projectPrompt) blocks.push(projectPrompt);
     return blocks;
   }
@@ -4509,7 +4543,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               `No delegation model overrides are configured. ${DELEGATION_DEFAULT_MODEL_GUIDANCE} ${DELEGATION_MODEL_OPT_IN_GUIDANCE}`,
             ]),
         "`task` is the delegate's only instruction. It cannot see this conversation, and you cannot correct it while it runs, so state the goal, the paths and facts it cannot infer, and exactly what to report back.",
-        "To run delegates concurrently, emit several Task calls in one assistant message. A message that mixes Task with any other tool runs one call at a time. You may keep working or talk to the user while they run; the runtime delivers their reports when they finish. Call TaskStop only to cancel.",
+        "To run delegates concurrently, emit several Task calls in one assistant message. Task can run alongside Read, Glob, Grep, and coordinated Write in the same message. A message containing any other tool runs one call at a time. You may keep working or talk to the user while they run; the runtime delivers their reports when they finish. Call TaskStop only to cancel.",
         "To continue a previous subagent, pass its `resume` id (the `delegationId` returned by Task). Saying \"reuse\" in prose is not enough. Do not pass `model` when resuming; start a new delegation to change models.",
         `Available subagents:\n${catalog}`,
       ].join("\n\n"),
@@ -4749,7 +4783,20 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         this.delegations.set(delegationId, record);
         let subagentRun: SubagentRun;
         try {
-          const scopedTools = this.scopeDelegateTools(tools, definition, delegationId);
+          const delegatePrompt = (instructions: ProjectInstructions | undefined) => composeSubagentSystemPrompt({
+            definition,
+            guidance: this.subagentGuidance(definition, instructions ?? null),
+            toolNames: declaredToolNames,
+          });
+          const applyInstructions = (instructions: ProjectInstructions | undefined) => {
+            subagentRun.setSystemPrompt(delegatePrompt(instructions));
+          };
+          // Capture selected provenance before delegate wrappers clone tools;
+          // a later parent catalog rebuild must not change this run's ownership.
+          const nativeToolNames = new Set(tools
+            .filter((tool) => this.toolPolicyOrigins.get(tool) === "builtin")
+            .map((tool) => tool.name));
+          const scopedTools = this.scopeDelegateTools(tools, definition, delegationId, applyInstructions);
           subagentRun = new SubagentRun({
             definition,
             sessionId: this.sessionId,
@@ -4781,6 +4828,13 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               toolNames: declaredToolNames,
             }),
             tools: scopedTools,
+            beforeToolCall: async (context) => {
+              if (nativeToolNames.has(context.toolCall.name)) {
+                await this.preparePathToolCall(context, applyInstructions);
+                await this.prepareOrderedFileCall(context, delegationId, definition.permission, () => abortSignal.aborted);
+              }
+              return undefined;
+            },
             onEvent: (envelope) => {
               this.noteDelegationActivity(record, envelope);
               this.onEvent(envelope);
@@ -4823,7 +4877,13 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           runPromise = Promise.reject(error);
         }
         void runPromise
-          .then((result) => this.settleDelegation(record, result))
+          .then((result) => {
+            this.fileCalls.cancelOwner(delegationId);
+            if (this.fileCalls.hasCleanup) {
+              return this.fileCalls.drainCleanup().then(() => this.settleDelegation(record, result));
+            }
+            this.settleDelegation(record, result);
+          })
           .catch((error: unknown) => {
             this.settleDelegation(record, {
               agentName: definition.name,
@@ -4871,6 +4931,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     tools: AgentTool[],
     definition: SubagentDefinition,
     mutationOwner: string,
+    applyInstructions?: (instructions: ProjectInstructions | undefined) => void,
   ): AgentTool[] {
     const scope = definition.permission ?? DEFAULT_SUBAGENT_PERMISSION;
     return tools.map((tool) => ({
@@ -4881,7 +4942,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           this.delegatePermissionScopes.set(toolCallId, scope);
         }
         try {
-          return await tool.execute(toolCallId, args, signal, onUpdate);
+          return await this.instructionExecution.run(
+            applyInstructions ?? (() => undefined),
+            () => tool.execute(toolCallId, args, signal, onUpdate),
+          );
         } finally {
           this.delegatePermissionScopes.delete(toolCallId);
           this.mutationOwners.delete(toolCallId);
@@ -4895,6 +4959,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     record: DelegationRecord,
     result: SubagentRunResult,
   ): void {
+    this.fileCalls.cancelOwner(record.delegationId);
     if (record.status !== "running") return;
     if (result.status === "aborted" && record.parentErrorInterrupted && !record.stopRequested) {
       const message = `The parent turn failed and interrupted this delegation. Continue it with Task(resume: "${record.delegationId}").`;
@@ -5898,9 +5963,36 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     }
   }
 
+  private async preparePathToolCall(
+    context: BeforeToolCallContext,
+    apply?: (instructions: ProjectInstructions | undefined) => void,
+  ): Promise<void> {
+    const name = context.toolCall.name;
+    if (!PATH_SCOPED_INSTRUCTION_TOOLS.has(name)) return;
+    const params = normalizeToolParams(name, context.args);
+    requireAliasedParams(name, params);
+    await this.loadPathInstructions(name, params, apply);
+    if (typeof context.args === "object" && context.args !== null) {
+      this.preparedPathToolArgs.set(context.args, params);
+    }
+  }
+
+  private async prepareOrderedFileCall(
+    context: BeforeToolCallContext,
+    owner = "parent",
+    permissionScope?: string,
+    cancelled = () => this.runCancelled || this.disposed,
+  ): Promise<void> {
+    const args = typeof context.args === "object" && context.args !== null
+      ? this.preparedPathToolArgs.get(context.args) ?? context.args
+      : context.args;
+    await this.fileCalls.prepare(context.toolCall.id, context.toolCall.name, args, owner, permissionScope, cancelled);
+  }
+
   private async loadPathInstructions(
     toolName: string,
     params: unknown,
+    apply?: (instructions: ProjectInstructions | undefined) => void,
   ): Promise<void> {
     if (!PATH_SCOPED_INSTRUCTION_TOOLS.has(toolName)) {
       return undefined;
@@ -5936,7 +6028,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     // Rules are scoped to the file currently being accessed. Rebuild the
     // complete chain so sibling-directory rules never leak into one another
     // and edits to an existing instruction file take effect immediately.
-    this.applyProjectInstructions(
+    (apply ?? ((instructions) => this.applyProjectInstructions(instructions)))(
       resolved.fallback ? this.baseProjectInstructions : resolved.instructions,
     );
   }
@@ -8228,6 +8320,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         // results are in, so this is the anchor for the next providerWaitMs.
         {
           const endedAt = Date.now();
+          this.fileCalls.cancelCall(event.toolCallId);
           const activeTool = this.activeToolCalls.get(event.toolCallId);
           this.activeToolCalls.delete(event.toolCallId);
           if (
@@ -8285,6 +8378,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           this.keepTurnOpenForDelegates()
         )
           break;
+        this.fileCalls.cancelOwner("parent");
         const subagentUsage = this.turnSubagentUsage;
         this.turnSubagentUsage = undefined;
         this.emit({
@@ -8833,6 +8927,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   }
 
   async abort(): Promise<void> {
+    this.fileCalls.cancelOwner();
     this.acceptingSteering = false;
     this.gracefulStopRequested = false;
     this.runCancelled = true;
@@ -8845,6 +8940,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.providerRetryAbort?.abort();
     if (this.compactionInProgress) this.compactionAborted = true;
     this.compactionAbort?.abort();
+    await this.fileCalls.drainCleanup();
   }
 
   /** Ask pi-agent-core to stop after the current assistant/tool turn. */
@@ -8875,7 +8971,11 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
+    this.fileCalls.cancelOwner();
+    if (this.disposed) {
+      await this.fileCalls.drainCleanup();
+      return;
+    }
     const runner = this.extensionRunner;
     this.extensionRunner = undefined;
     const closingExtensions = runner?.dispose();
@@ -8905,6 +9005,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.cleanupActiveToolProgress();
     if (this.compactionInProgress) this.compactionAborted = true;
     this.compactionAbort?.abort();
+    await this.fileCalls.drainCleanup();
     await closingExtensions;
   }
 }

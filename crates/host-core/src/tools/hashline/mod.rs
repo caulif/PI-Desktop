@@ -4,7 +4,7 @@
 //! `tools::mod` can keep Read/Write/Grep/Edit as thin adapters.
 
 mod apply;
-mod parse;
+pub(crate) mod parse;
 mod store;
 mod tag;
 

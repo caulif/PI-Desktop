@@ -103,6 +103,7 @@ describe("fixed Flash declarations through runtime and HTTP/SSE", () => {
       await f.prompt();
       expect(f.errors).toEqual([]);
       declared = wire.requests.at(-1)!.tools;
+      expect((f.runtime as any).toolCatalog.get("plugin_alpha").executionMode).toBe("sequential");
       history = structuredClone(f.rows);
       if (checkpoint) {
         const system = systemTranscriptCheckpoint(history.filter((row) => row.modelSystem)
@@ -116,6 +117,8 @@ describe("fixed Flash declarations through runtime and HTTP/SSE", () => {
     try {
       await restored.prompt("restored-user");
       expect(restored.errors).toEqual([]);
+      expect((restored.runtime as any).toolCatalog.get("plugin_alpha").executionMode).toBe("sequential");
+      expect((restored.runtime as any).toolCatalog.get("plugin_beta").executionMode).toBe("sequential");
       expect(restored.executed).toEqual(["plugin_alpha"]);
       expect(resumed.requests[0].tools).toEqual(declared!);
       expect([...restored.rows].reverse().find((row) => row.toolName === "plugin_beta")).toMatchObject({ isError: true });

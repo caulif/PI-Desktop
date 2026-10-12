@@ -1,14 +1,18 @@
 /**
- * Serialize mutating tool calls that target the same file.
+ * Serialize legacy direct mutating calls that target the same file.
+ *
+ * Prepared pi calls use Host-owned ordering registrations and bypass this
+ * mutex: layering the two queues could invert their order. Direct/internal
+ * callers without a ticket retain this legacy bookkeeping guard.
  *
  * The parent agent and its subagents run in one sidecar process but issue
- * `tools.execute` calls independently. host-core admits one mutation per
- * session at a time, so the writes themselves cannot tear; what it does not
- * give is a defined order for two same-path mutations, and the sidecar's own
- * per-path bookkeeping needs one. The edit-recovery contract allows three
+ * `tools.execute` calls independently. Host resource admission excludes
+ * conflicting participating file accesses; ticketed calls also preserve their
+ * registration order. Direct legacy calls have no source-order ticket, and
+ * the sidecar's per-path bookkeeping still needs one. The edit-recovery contract allows three
  * counted failures per path before terminating the prompt, which only means
  * "read fresh content and try again" if the attempts were ordered.
- * ordered. With subagents able to fan out (ADR 0062) they no longer are, so the
+ * With subagents able to fan out (ADR 0062) they no longer are, so the
  * sidecar queues same-path mutations before they reach the host.
  *
  * Different paths never wait on each other, which is the point: fan-out stays

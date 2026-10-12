@@ -20,6 +20,12 @@ Each ADR includes:
 
 | ID | Title | Status |
 |---|---|---|
+| parallel-file-writes | [Enable coordinated parallel Write calls](parallel-file-writes.md) | Fork experiment |
+| tool-policy-registry | [Complete internal tool execution policy registry](tool-policy-registry.md) | Fork experiment |
+| parallel-read-batches | [Ordered preparation and parallel read batches](parallel-read-batches.md) | Fork experiment |
+| host-file-resource-admission | [Host file resource admission](host-file-resource-admission.md) | Implemented candidate (fork) |
+| ordered-file-call-preparation | [Ordered file call preparation](ordered-file-call-preparation.md) | Implemented candidate (fork) |
+| bounded-rpc-control-capacity | [Reserve bounded RPC capacity for cancellation and approvals](bounded-rpc-control-capacity.md) | Accepted for fork experiment |
 | device-local-project-lists-in-config-sync | [Device-local project lists in configuration sync](device-local-project-lists-in-config-sync.md) | Accepted |
 | s3-only-configuration-backup-sync | [S3-only encrypted configuration backup and synchronization](s3-only-configuration-backup-sync.md) | Accepted; supersedes WebDAV decisions in 0300 / 0301 |
 | remote-provider-import | [Explicit provider import into a running remote Host](remote-provider-import.md) | Accepted for the experimental SSH MVP |

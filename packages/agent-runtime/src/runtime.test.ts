@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { type Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createAssistantMessageEventStream,
+  Type,
   getCurrentTools,
   getCurrentSystemMessage,
   toToolDeclaration,
@@ -58,13 +59,18 @@ vi.mock("./subagent.js", async (importOriginal) => {
     ...actual,
     SubagentRun: class {
       private signal?: AbortSignal;
+      private options: any;
       constructor(options: unknown) {
         if (subagentRuns.constructorError !== undefined) {
           throw subagentRuns.constructorError;
         }
         subagentRuns.calls.push(options);
+        this.options = options;
         // Per-instance: concurrent delegates must abort on their own signal.
         this.signal = (options as { signal?: AbortSignal }).signal;
+      }
+      setSystemPrompt(prompt: string) {
+        this.options.systemPrompt = prompt;
       }
       run() {
         if (subagentRuns.deferred) {
@@ -216,6 +222,108 @@ function runtimeTool(runtime: DesktopAgentRuntime, name: string): AgentTool {
   if (!tool) throw new Error(`Runtime tool not found: ${name}`);
   return tool;
 }
+
+describe("ordered file preparation", () => {
+  it.each(["Read", "Write"])("prepares %s instructions in order, overlaps execution and preserves result IDs", async (toolName) => {
+    const entered: string[] = [];
+    const resolvers = new Map<string, (value: unknown) => void>();
+    const requests: AgentMessage[][] = [];
+    const host = {
+      call: vi.fn(async (method: string, args: any) => {
+        if (method === "project.instructions.resolve") {
+          return { entries: [{ source: `${args.path}/AGENTS.md`, content: `rules:${args.path}` }] };
+        }
+        if (method === "tools.prepareFileCall") return { ticket: `ticket-${args.toolCallId}` };
+        if (method === "tools.execute") {
+          entered.push(args.toolCallId);
+          return new Promise((resolve) => resolvers.set(args.toolCallId, resolve));
+        }
+        return undefined;
+      }),
+    };
+    const runtime = createRuntime({ host });
+    const internal = runtime as any;
+    internal.models = {
+      streamSimple: (_model: unknown, context: { messages: AgentMessage[] }) => {
+        requests.push([...context.messages]);
+        const first = requests.length === 1;
+        const message = assistantMessage({
+          content: first
+            ? ["a", "b"].map((id) => ({ type: "toolCall", id, name: toolName,
+              arguments: { path: `${id}/file.ts`, ...(toolName === "Write" ? { content: id } : {}) } }))
+            : [{ type: "text", text: "done" }],
+          stopReason: first ? "toolUse" : "stop",
+        }) as AssistantMessage;
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
+          stream.end(message);
+        });
+        return stream;
+      },
+    };
+    try {
+      const pending = runtime.prompt("Read both files.", "user-parallel", "turn-parallel");
+      await vi.waitFor(() => expect([...entered].sort()).toEqual(["a", "b"]));
+      // Both entered before either result is released: no timing-based assertion.
+      expect(host.call.mock.calls.filter(([method]) => method === "project.instructions.resolve").map(([, args]) => args.path))
+        .toEqual(["a/file.ts", "b/file.ts"]);
+      expect(internal.agent.state.systemPrompt).toContain("rules:b/file.ts");
+      expect(internal.agent.state.systemPrompt).not.toContain("rules:a/file.ts");
+      resolvers.get("b")!({ ok: true, content: "B" });
+      await Promise.resolve();
+      resolvers.get("a")!({ ok: true, content: "A" });
+      await pending;
+      expect(requests[1].filter((message) => message.role === "toolResult").map((message: any) => message.toolCallId))
+        .toEqual(["a", "b"]);
+      expect(internal.agent.state.systemPrompt).toContain("rules:b/file.ts");
+    } finally {
+      for (const resolve of resolvers.values()) resolve({ ok: true, content: "cleanup" });
+      await runtime.dispose();
+    }
+  });
+
+  it("keeps a delegate's direct-call instruction updates out of the parent", async () => {
+    const host = { call: vi.fn(async (method: string, args: any) => method === "project.instructions.resolve"
+      ? { entries: [{ source: "AGENTS.md", content: `rules:${args.path}` }] }
+      : method === "tools.prepareFileCall" ? { ticket: `ticket-${args.toolCallId}` }
+      : { ok: true, content: "read" }) };
+    const runtime = createRuntime({ host });
+    const internal = runtime as any;
+    const apply = vi.fn();
+    const childTools = internal.scopeDelegateTools([runtimeTool(runtime, "Read")], { permission: "default" }, "child", apply);
+    try {
+      await runtimeTool(runtime, "Read").execute("parent-read", { path: "parent/a.ts" });
+      await childTools[0].execute("child-read", { path: "child/b.ts" });
+      expect(apply).toHaveBeenCalledWith({ entries: [{ source: "AGENTS.md", content: "rules:child/b.ts" }] });
+      expect(internal.agent.state.systemPrompt).toContain("rules:parent/a.ts");
+      expect(internal.agent.state.systemPrompt).not.toContain("rules:child/b.ts");
+    } finally { await runtime.dispose(); }
+  });
+
+  it("prepares delegated reads against the child's prompt and reuses canonical arguments", async () => {
+    const host = { call: vi.fn(async (method: string, args: any) => method === "project.instructions.resolve"
+      ? { entries: [{ source: "AGENTS.md", content: `rules:${args.path}` }] }
+      : method === "tools.prepareFileCall" ? { ticket: `ticket-${args.toolCallId}` }
+      : { ok: true, content: "read" }) };
+    const runtime = createRuntime({ host, subagents: [{ name: "reader", description: "Read", tools: ["Read"], prompt: "Read", source: "builtin" }] });
+    subagentRuns.calls.length = 0;
+    try {
+      await runtimeTool(runtime, "Task").execute("task-prepared", { agent: "reader", task: "Read the child file." });
+      const child = subagentRuns.calls[0];
+      const args = { file_path: "child/file.ts" };
+      await child.beforeToolCall({ toolCall: { name: "Read", id: "child-prepared" }, args });
+      expect(child.systemPrompt).toContain("rules:child/file.ts");
+      expect((runtime as any).agent.state.systemPrompt).not.toContain("rules:child/file.ts");
+      await child.tools.find((tool: AgentTool) => tool.name === "Read").execute("child-prepared", args);
+      expect(host.call.mock.calls.filter(([method]) => method === "project.instructions.resolve")).toHaveLength(1);
+      expect(host.call).toHaveBeenCalledWith("tools.execute", expect.objectContaining({
+        toolCallId: "child-prepared", args: { path: "child/file.ts" },
+      }));
+    } finally { await runtime.dispose(); }
+  });
+});
 
 /** Minimal pi-ai assistant message; overrides carry the shape under test. */
 function assistantMessage(overrides: {
@@ -7753,13 +7861,59 @@ describe("DesktopAgentRuntime subagents", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("is the only tool allowed to run in parallel", async () => {
+  it("does not prepare native file work for a parent extension named Read", async () => {
+    const host = { call: vi.fn() };
+    const runtime = createRuntime({ host });
+    const internal = runtime as any;
+    const execute = vi.fn(async () => ({ content: [], details: {} }));
+    internal.extensionRunner = { hasHandlers: () => false, getAgentTools: () => [{ name: "Read", label: "extension", description: "dynamic",
+      parameters: Type.Object({}), execute }] };
+    try {
+      internal.rebuildToolCatalog();
+      const tool = internal.toolCatalog.get("Read");
+      const toolCall = { type: "toolCall", name: "Read", id: "dynamic-parent", arguments: {} };
+      await expect(internal.agent.beforeToolCall({ toolCall, args: {},
+        assistantMessage: { content: [toolCall] }, context: { tools: [tool] } })).resolves.toBeUndefined();
+      await tool.execute(toolCall.id, {});
+      expect(execute).toHaveBeenCalledOnce();
+      expect(host.call.mock.calls.some(([method]) =>
+        ["project.instructions.resolve", "tools.prepareFileCall"].includes(method))).toBe(false);
+    } finally { internal.extensionRunner = undefined; await runtime.dispose(); }
+  });
+
+  it("keeps delegate file preparation tied to selected provenance across parent rebuilds", async () => {
+    const host = { call: vi.fn() };
+    const runtime = createRuntime({ host, subagents: [explorer] });
+    const internal = runtime as any;
+    const execute = vi.fn(async () => ({ content: [], details: {} }));
+    internal.extensionRunner = { hasHandlers: () => false, getAgentTools: () => [{ name: "Read", label: "extension", description: "dynamic",
+      parameters: Type.Object({}), execute }] };
+    subagentRuns.calls.length = 0;
+    try {
+      internal.rebuildToolCatalog();
+      await internal.toolCatalog.get("Task").execute("task-dynamic-read", { agent: "explorer", task: "Read." });
+      const child = subagentRuns.calls[0];
+      const tool = child.tools.find((entry: AgentTool) => entry.name === "Read");
+      internal.extensionRunner = undefined;
+      internal.rebuildToolCatalog();
+      await expect(child.beforeToolCall({ toolCall: { name: "Read", id: "dynamic-child" }, args: {} })).resolves.toBeUndefined();
+      await tool.execute("dynamic-child", {});
+      expect(execute).toHaveBeenCalledOnce();
+      expect(host.call.mock.calls.some(([method]) =>
+        ["project.instructions.resolve", "tools.prepareFileCall"].includes(method))).toBe(false);
+    } finally { internal.extensionRunner = undefined; await runtime.dispose(); }
+  });
+
+  it("allows only Task, read/search and coordinated Write tools to run in parallel", async () => {
     const runtime = createRuntime({ subagents: [explorer] });
     const catalog = (runtime as any).toolCatalog as Map<string, any>;
 
     expect(catalog.get("Task").executionMode).toBe("parallel");
     for (const [name, tool] of catalog) {
-      if (name === "Task") continue;
+      if (["Task", "Read", "Glob", "Grep", "Write"].includes(name)) {
+        expect(tool.executionMode).toBe("parallel");
+        continue;
+      }
       expect(tool.executionMode).toBe("sequential");
     }
 
@@ -11733,4 +11887,70 @@ describe("inline image placement", () => {
       await runtime.dispose();
     }
   });
+});
+it.each(["abort", "dispose"] as const)("recovers file cleanup after a failed %s", async (operation) => {
+  let unavailable = true;
+  const host = { call: vi.fn(async (method: string) => {
+    if (method === "tools.prepareFileCall") return { ticket: "ticket" };
+    if (method === "tools.cancelPreparedFileCalls" && unavailable) throw new Error("HOST_OVERLOADED");
+    return {};
+  }) };
+  const runtime = createRuntime({ host });
+  const fileCalls = (runtime as any).fileCalls;
+  try {
+    await fileCalls.prepare("cleanup-recovery", "Read", { path: "file.ts" }, "parent", undefined, () => false);
+    await expect(runtime[operation]()).rejects.toThrow("cleanup failed");
+    unavailable = false;
+    await runtime[operation]();
+    expect(fileCalls.hasCleanup).toBe(false);
+    expect(host.call.mock.calls.filter(([method]) => method === "tools.cancelPreparedFileCalls")).toHaveLength(2);
+  } finally {
+    unavailable = false;
+    await runtime.dispose();
+  }
+});
+
+// The production pi loop must not let a later successful Edit response clear
+// recovery strikes before an earlier failed Edit response is processed.
+it("keeps Edit response processing in source order while Write becomes parallel", async () => {
+  const entered: string[] = [];
+  const release = new Map<string, (value: unknown) => void>();
+  const host = { call: vi.fn(async (method: string, args: any) => {
+    if (method === "tools.prepareFileCall") return { ticket: `ticket:${args.toolCallId}` };
+    if (method !== "tools.execute") return undefined;
+    entered.push(args.toolCallId);
+    return new Promise((resolve) => release.set(args.toolCallId, resolve));
+  }) };
+  const runtime = createRuntime({ host });
+  const internal = runtime as any;
+  let requests = 0;
+  internal.models = { streamSimple: () => {
+    const first = ++requests === 1;
+    const message = assistantMessage({
+      content: first ? ["earlier-failure", "later-success"].map((id) => ({
+        type: "toolCall", id, name: "Edit", arguments: { path: "file.ts", tag: "ABCD", ops: "PUT >$:\n+updated" },
+      })) : [{ type: "text", text: "done" }], stopReason: first ? "toolUse" : "stop",
+    }) as AssistantMessage;
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => { stream.push({ type: "start", partial: message });
+      stream.push({ type: "done", reason: first ? "toolUse" : "stop", message }); stream.end(message); });
+    return stream;
+  } };
+  try {
+    const pending = runtime.prompt("Edit twice.", "edit-order-user", "edit-order-turn");
+    await vi.waitFor(() => expect(entered).toEqual(["earlier-failure"]));
+    // Keep the earlier Host response gated. A microtask flush cannot start the
+    // second execution; no fragile elapsed-time assertion is used.
+    await Promise.resolve();
+    expect(entered).toEqual(["earlier-failure"]);
+    release.get("earlier-failure")!({ ok: false, isError: true, errorCode: "EDIT_PARSE_FAILED", content: {} });
+    await vi.waitFor(() => expect(entered).toEqual(["earlier-failure", "later-success"]));
+    expect([...internal.mutationFailureCounts.values()]).toEqual([1]);
+    release.get("later-success")!({ ok: true, content: {} });
+    await pending;
+    expect(internal.mutationFailureCounts.size).toBe(0);
+  } finally {
+    for (const resolve of release.values()) resolve({ ok: true, content: {} });
+    await runtime.dispose();
+  }
 });

@@ -5,6 +5,8 @@ mod audit;
 mod config_sync;
 mod data_relocation;
 mod db;
+mod file_access;
+mod file_call_tickets;
 mod keyboard;
 mod mcp_servers;
 mod network_policy;

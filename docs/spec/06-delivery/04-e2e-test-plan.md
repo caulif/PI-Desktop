@@ -8,6 +8,92 @@
 
 ## 1. Goals
 
+### Fork E2E: coordinated Write parallelism
+
+- Runtime fixture emits two different-file Write calls. Gate both execution
+  entries, release responses in reverse order, and inspect source-order model
+  results and final path instructions. Add Edit/Bash: retain sequential batches.
+- Gate an earlier failed Edit response and verify a later successful Edit cannot
+  enter before it settles; failure count increments then clears in source order.
+- Host budget barriers hold two distinct-file permits in one session, queue a
+  third under the unchanged global cap, and prove same-file waiters leave the
+  spare slot usable. Real Host ordered-file/admission harnesses must still pass.
+- Coverage: runtime.test.ts, subagent.test.ts, tool_budget tests,
+  e2e-ordered-file-calls.mjs and e2e-file-resource-admission.mjs. Runtime fixtures
+  and budget barriers are not full Electron E2E or measured real-workload speedup.
+
+### E2E-ORDERED-FILE-CALLS
+
+- **Preconditions:** Candidate-built Host selected by `PI_DESKTOP_HOST_BIN`,
+  isolated throwaway data/project paths, no provider or global registry writes.
+- **Steps:** Run `node scripts/e2e-ordered-file-calls.mjs`. Prepare conflicting
+  writes in source order, execute and approve them in reverse order, verify the
+  final file, then test creating a file followed by a previously prepared Read.
+  Reject ticket replay, argument changes, omitted tickets, and external-path
+  access denied after preparation. Abort an unused prepared call.
+- **Expected:** Permission waits hold no execution capacity; conflicting writes
+  preserve registration order; Read observes the preceding create despite a new
+  filesystem identity. Invalid tickets fail closed, external denial preserves
+  bytes, and active/queued/resource counts return to zero after completion.
+- **Lifecycle coverage:** `file_call_tickets` tests cover argument/scope/session
+  binding, replay, expiry, preflight cancellation, and reversed activation.
+  `file-call-preparation.test.ts` covers owner-scoped cancellation, late responses,
+  old-Host failure, and cleanup appended while another cleanup is settling.
+  Runtime and subagent integration suites exercise the production hooks. This
+  stage does not open Write/Edit parallelism or claim cross-agent Shell isolation.
+### Fork coverage: dynamic execution policy
+
+- Enumerate actual runtime catalogs in Agent/Plan/Goal with optional Jev, Skill
+  and delegate definitions. Every builtin requires an explicit policy; unknown
+  builtin registration must fail visibly.
+- Contribute plugin/MCP and trusted extension tools (including a collision with
+  Read), activate and rebuild their catalog, and verify sequential fallback.
+- Restore successful ToolSearch activation from persisted transcript/checkpoint
+  through the existing HTTP/SSE fixed-tool fixture: activation and Host permission
+  behavior remain unchanged, and restored tools remain sequential.
+- Coverage: `tool-execution-policy.test.ts`, `fixed-tool-runtime.test.ts`,
+  `subagent.test.ts`; these are runtime integration tests with fixture services,
+  not evidence of a full Electron/Host E2E run.
+
+### Fork E2E: parallel read batch lifecycle
+
+- Isolate data/project paths; never run against production profiles.
+- A local provider fixture emits two Read calls. Gate real tool-execution
+  entrypoints until both enter, release them in reverse order, then inspect the
+  follow-up model request: results must retain source toolCallId order and final
+  sibling rules must follow preparation order. Repeat with a delegated reader
+  and verify parent instructions and permission scope are isolated.
+- Add Bash or Edit to the batch: all tools must execute sequentially. Stop
+  before execution must skip unstarted calls; running file calls must drain.
+- Current automated coverage: runtime.test.ts uses the production Desktop runtime
+  and pi loop with a deterministic Host adapter; subagent.test.ts verifies real
+  delegate policy/transcript updates. These are integration tests, not proof of
+  an Electron/real Host E2E pass. Real Host cancellation/resource harness coverage
+  follows in the Host coordination PRs. UI-only project-edit E2E is not evidence
+  for agent Edit scheduling.
+
+### E2E-RPC-CONTROL-CAPACITY and shell batch boundaries
+
+- **Preconditions:** Candidate-built Host, reused compatible toolchain, throwaway
+  data directory and project, no provider or global subagent registry writes.
+- **Steps:** Run `node scripts/e2e-rpc-control-capacity.mjs` with
+  `PI_DESKTOP_HOST_BIN` pointing at the candidate. Fill 32 ordinary RPC slots with
+  Bash approval waits, observe overload on ordinary traffic, deny one approval,
+  refill, abort through the control lane, drain calls, and query pending state.
+- **Expected:** Approval resolution and cancellation remain reachable at full
+  ordinary capacity; no denied command executes; all waits settle; pending
+  approvals clear and normal requests recover. Unit coverage also proves the
+  separate four-slot control lane is bounded and returns permits after drop.
+- **Batch coverage:** `shell-policy-boundaries.test.ts` drives the real Pi Agent
+  loop with controlled execution barriers for Read → Bash → Read and
+  Write → Bash → Edit. It asserts source-order visibility, stream/result call IDs,
+  and that Stop drains the active tool before the agent ends without starting
+  the following Read. Host `tools_abort_during_execution_kills_bash_and_cleans_registry`
+  and `bash_timeout_and_early_session_error_clean_the_registry` cover actual
+  shell-process cancellation, descendant cleanup, timeout and registry release.
+- **Boundary:** These tests do not claim project-wide isolation between agents'
+  shell writes or cancellation of unmanaged background processes.
+
 ### E2E-STORAGE-custom-location-and-maintenance
 
 - **Preconditions:** Dedicated request worktree, current remote-main base, shared
@@ -17420,6 +17506,31 @@ host-created files. The full app's file-preview viewer is covered separately.
   is simulated in the Electron flow. The fixture profile and screenshots stay
   under `.artifacts/` for inspection; no user profile or paid model is used.
 
+
+### Fork E2E-TOOLS-file-resource-admission
+
+- Preconditions: isolated request worktree and temporary data/workspace; no
+  production database, user registry or global installation changes.
+- Scenarios: shared readers; same-file read/write and cross-session writer
+  exclusion; independent-file overlap; MV source/target all-or-nothing admission;
+  older-writer fairness; inactive registration cancellation; grant-before-claim
+  cancellation; timeout cleanup; canonical aliases/new leaves/hardlinks;
+  approved external path resolution; register namespace; rollback exclusion;
+  Stop while queued and shutdown while a blocking file job is draining.
+- Automated coverage: Rust ToolBudget tests deterministically poll queue states;
+  FileAccessPlan tests use real temporary files and hardlinks; existing Host RPC
+  permissions/abort/Hashline/review tests exercise production handlers.
+- Remaining acceptance: real transport simultaneous-file overlap and delayed
+  blocking-job drain with process shutdown need integration harness coverage;
+  unit admission assertions do not substitute for that E2E evidence.
+
+- Real transport harness: `node scripts/e2e-file-resource-admission.mjs`, with
+  `PI_DESKTOP_HOST_BIN` pointing to the candidate binary and shared dist built.
+  It checks persisted bytes for Read/Write/Edit/register transfer/MV/REM rollback,
+  stale cross-session Hashline rejection, concurrent independent RPC writes,
+  approval cancellation, idle counters, and graceful EOF approval cleanup.
+  It does not claim a timing-based overlap proof or delayed admitted-body shutdown
+  proof; deterministic resource scheduling remains covered by Rust tests.
 ### E2E-COMPOSER-configured-context-window
 
 - **Steps:** Save a 500K user context limit for a model whose catalog publishes 1M. Open the Composer model list, then send a short message and inspect context usage. Repeat with a catalog-owned limit and with discovery unavailable.

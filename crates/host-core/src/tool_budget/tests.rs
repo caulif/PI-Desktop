@@ -61,15 +61,31 @@ async fn separates_session_capacity() {
 }
 
 #[tokio::test]
-async fn serializes_mutations_within_a_session() {
+async fn admits_two_independent_mutations_within_a_session_but_keeps_global_cap() {
     let budget = ToolBudget::new();
-    let first = budget.acquire("session-a", "Edit").await.unwrap();
-    let mut waiter = Box::pin(budget.acquire("session-a", "Write"));
+    let first = budget
+        .acquire_resources("session-a", "Write", vec![resource("a", true)])
+        .await
+        .unwrap();
+    let second = budget
+        .acquire_resources("session-a", "Write", vec![resource("b", true)])
+        .await
+        .unwrap();
+    let mut waiter =
+        Box::pin(budget.acquire_resources("session-a", "Write", vec![resource("c", true)]));
     assert!(poll_once(waiter.as_mut()).is_pending());
-    assert_eq!(budget.snapshot().mutations, 1);
+    assert_eq!(budget.snapshot().mutations, 2);
+    // Another session cannot bypass the unchanged global mutation cap.
+    let mut other =
+        Box::pin(budget.acquire_resources("session-b", "Write", vec![resource("d", true)]));
+    assert!(poll_once(other.as_mut()).is_pending());
 
     drop(first);
-    drop(admitted(waiter.as_mut()));
+    let third = admitted(waiter.as_mut());
+    assert!(poll_once(other.as_mut()).is_pending());
+    drop(second);
+    drop(admitted(other.as_mut()));
+    drop(third);
     assert_eq!(budget.snapshot().mutations, 0);
 }
 
@@ -280,8 +296,12 @@ async fn session_capacity_applies_across_classes() {
 #[tokio::test]
 async fn mutation_backlog_does_not_reserve_other_sessions_mutation_capacity() {
     let budget = ToolBudget::new();
-    let first = budget.acquire("busy", "Write").await.unwrap();
-    let mut waiter = Box::pin(budget.acquire("busy", "Edit"));
+    let first = budget
+        .acquire_resources("busy", "Write", vec![resource("same-file", true)])
+        .await
+        .unwrap();
+    let mut waiter =
+        Box::pin(budget.acquire_resources("busy", "Edit", vec![resource("same-file", true)]));
     assert!(poll_once(waiter.as_mut()).is_pending());
     let other = admitted(Box::pin(budget.acquire("other", "Write")).as_mut());
     assert_eq!(budget.snapshot().mutations, 2);
@@ -418,4 +438,207 @@ async fn dispatch_skips_a_blocked_class_for_the_oldest_runnable_request() {
     assert_eq!(budget.snapshot().queued, 0);
     drop((write_permit, shell_permit, running));
     assert_eq!(budget.snapshot().active, 0);
+}
+
+fn resource(key: &str, exclusive: bool) -> super::FileResource {
+    super::FileResource {
+        key: key.into(),
+        exclusive,
+    }
+}
+
+#[tokio::test]
+async fn same_session_conflicting_writes_keep_order_without_consuming_the_second_slot() {
+    let budget = ToolBudget::new();
+    let first = budget
+        .acquire_resources("session", "Write", vec![resource("same", true)])
+        .await
+        .unwrap();
+    let registered = budget
+        .register("session", "Write", vec![resource("same", true)])
+        .unwrap();
+    let mut second = Box::pin(registered.activate());
+    assert!(poll_once(second.as_mut()).is_pending());
+    let other = budget
+        .acquire_resources("session", "Write", vec![resource("other", true)])
+        .await
+        .unwrap();
+    assert_eq!(budget.snapshot().mutations, 2);
+    assert_eq!(budget.snapshot().queued, 1);
+    drop(first);
+    let ordered = admitted(second.as_mut());
+    assert_eq!(budget.snapshot().mutations, 2);
+    assert_eq!(budget.snapshot().queued, 0);
+    drop((ordered, other));
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn resource_readers_share_and_older_writer_prevents_reader_starvation() {
+    let budget = ToolBudget::new();
+    let a = budget
+        .acquire_resources("a", "Read", vec![resource("file", false)])
+        .await
+        .unwrap();
+    let b = budget
+        .acquire_resources("b", "Read", vec![resource("file", false)])
+        .await
+        .unwrap();
+    let mut writer = Box::pin(budget.acquire_resources("c", "Write", vec![resource("file", true)]));
+    assert!(poll_once(writer.as_mut()).is_pending());
+    let mut reader = Box::pin(budget.acquire_resources("d", "Read", vec![resource("file", false)]));
+    assert!(poll_once(reader.as_mut()).is_pending());
+    let other = budget
+        .acquire_resources("e", "Write", vec![resource("other", true)])
+        .await
+        .unwrap();
+    assert_eq!(budget.snapshot().active, 3);
+    drop((a, b));
+    let writing = admitted(writer.as_mut());
+    assert!(poll_once(reader.as_mut()).is_pending());
+    drop(writing);
+    drop(admitted(reader.as_mut()));
+    drop(other);
+    assert_eq!(budget.snapshot().active, 0);
+    assert_eq!(budget.snapshot().queued, 0);
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn inactive_order_reservation_holds_no_capacity_and_cancel_unblocks_conflicts() {
+    let budget = ToolBudget::new();
+    let registered = budget
+        .register("a", "Write", vec![resource("file", true)])
+        .unwrap();
+    assert_eq!(budget.snapshot().active, 0);
+    let mut later = Box::pin(budget.acquire_resources("b", "Read", vec![resource("file", false)]));
+    assert!(poll_once(later.as_mut()).is_pending());
+    let other = budget
+        .acquire_resources("c", "Read", vec![resource("other", false)])
+        .await
+        .unwrap();
+    drop(registered);
+    drop(admitted(later.as_mut()));
+    drop(other);
+    assert!(budget.lock().resources.is_empty());
+    assert_eq!(budget.snapshot().queued, 0);
+}
+
+#[tokio::test]
+async fn multiresource_waiter_holds_nothing_and_cross_moves_cannot_deadlock() {
+    let budget = ToolBudget::new();
+    let held = budget
+        .acquire_resources("a", "Write", vec![resource("b", true)])
+        .await
+        .unwrap();
+    let mut mv_ab = Box::pin(budget.acquire_resources(
+        "b",
+        "Edit",
+        vec![resource("a", true), resource("b", true)],
+    ));
+    assert!(poll_once(mv_ab.as_mut()).is_pending());
+    assert!(!budget.lock().resources.contains_key("a"));
+    let mut mv_ba = Box::pin(budget.acquire_resources(
+        "c",
+        "Edit",
+        vec![resource("b", true), resource("a", true)],
+    ));
+    assert!(poll_once(mv_ba.as_mut()).is_pending());
+    drop(held);
+    let first = admitted(mv_ab.as_mut());
+    assert!(poll_once(mv_ba.as_mut()).is_pending());
+    drop(first);
+    drop(admitted(mv_ba.as_mut()));
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_after_resource_grant_releases_all_resources() {
+    let budget = ToolBudget::new();
+    let held = budget
+        .acquire_resources("a", "Write", vec![resource("file", true)])
+        .await
+        .unwrap();
+    let mut waiter = Box::pin(budget.acquire_resources("b", "Write", vec![resource("file", true)]));
+    assert!(poll_once(waiter.as_mut()).is_pending());
+    drop(held);
+    assert_eq!(budget.snapshot().active, 1);
+    drop(waiter);
+    assert_eq!(budget.snapshot().active, 0);
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn identity_refresh_keeps_paths_locked_and_rejects_active_alias_conflict() {
+    let budget = ToolBudget::new();
+    let mut permit = budget
+        .acquire_resources("a", "Read", vec![resource("path:a", false)])
+        .await
+        .unwrap();
+    assert!(permit.try_refresh_resources(vec![
+        resource("path:a", false),
+        resource("inode:new", false)
+    ]));
+    let other = budget
+        .acquire_resources("b", "Write", vec![resource("inode:alias", true)])
+        .await
+        .unwrap();
+    assert!(!permit.try_refresh_resources(vec![
+        resource("path:a", false),
+        resource("inode:alias", false)
+    ]));
+    assert!(budget.lock().resources.contains_key("inode:new"));
+    assert_eq!(budget.snapshot().active, 2);
+    drop((permit, other));
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn refreshed_inactive_registration_preserves_order_without_capacity() {
+    let budget = ToolBudget::new();
+    let mut first = budget
+        .register("a", "Write", vec![resource("path", true)])
+        .unwrap();
+    first.update_resources(vec![resource("path", true), resource("inode", true)]);
+    let mut second = Box::pin(budget.acquire_resources("b", "Read", vec![resource("path", false)]));
+    assert!(poll_once(second.as_mut()).is_pending());
+    let writing = first.activate().await.unwrap();
+    assert!(poll_once(second.as_mut()).is_pending());
+    drop(writing);
+    drop(admitted(second.as_mut()));
+    assert!(budget.lock().resources.is_empty());
+}
+
+#[tokio::test]
+async fn identity_refresh_cannot_overtake_a_queued_alias_writer() {
+    let budget = ToolBudget::new();
+    let mut reader = budget
+        .acquire_resources("reader", "Read", vec![resource("path:new", false)])
+        .await
+        .unwrap();
+    let held = budget
+        .acquire_resources("writer", "Write", vec![resource("unrelated", true)])
+        .await
+        .unwrap();
+    let second_held = budget
+        .acquire_resources("writer", "Write", vec![resource("also-unrelated", true)])
+        .await
+        .unwrap();
+    let mut writer = Box::pin(budget.acquire_resources(
+        "writer",
+        "Write",
+        vec![resource("inode:appeared", true)],
+    ));
+    assert!(poll_once(writer.as_mut()).is_pending());
+    assert!(!reader.try_refresh_resources(vec![
+        resource("path:new", false),
+        resource("inode:appeared", false)
+    ]));
+    assert!(budget.lock().resources.contains_key("path:new"));
+    assert!(!budget.lock().resources.contains_key("inode:appeared"));
+    drop(held);
+    drop(admitted(writer.as_mut()));
+    drop(second_held);
+    drop(reader);
+    assert!(budget.lock().resources.is_empty());
 }

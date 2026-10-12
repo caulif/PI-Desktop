@@ -59,6 +59,7 @@ pub struct AppState {
     pub plugin_batch_import_rates: HashMap<String, Vec<Instant>>,
     pub plugin_delete_rates: HashMap<String, Vec<Instant>>,
     pub tool_budget: ToolBudget,
+    pub file_call_tickets: crate::file_call_tickets::FileCallTickets,
     /// (session_id, tool_call_id) -> cancellation signal for an active Bash
     /// process. The signal is removed by the execution owner in all outcomes.
     pub active_bash_cancellations: HashMap<(String, String), tokio::sync::watch::Sender<bool>>,
@@ -146,6 +147,7 @@ impl AppState {
             plugin_batch_import_rates: HashMap::new(),
             plugin_delete_rates: HashMap::new(),
             tool_budget: ToolBudget::new(),
+            file_call_tickets: crate::file_call_tickets::FileCallTickets::default(),
             active_bash_cancellations: HashMap::new(),
             pending_permissions: HashMap::new(),
             pending_bash_aborts: HashMap::new(),
@@ -290,6 +292,7 @@ impl AppState {
     }
 
     pub fn shutdown(&mut self) {
+        self.file_call_tickets.clear();
         self.shutting_down = true;
         for sender in self.active_bash_cancellations.values() {
             let _ = sender.send(true);
