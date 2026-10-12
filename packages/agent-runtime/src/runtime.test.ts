@@ -232,6 +232,7 @@ describe("ordered read preparation", () => {
         if (method === "project.instructions.resolve") {
           return { entries: [{ source: `${args.path}/AGENTS.md`, content: `rules:${args.path}` }] };
         }
+        if (method === "tools.prepareFileCall") return { ticket: `ticket-${args.toolCallId}` };
         if (method === "tools.execute") {
           entered.push(args.toolCallId);
           return new Promise((resolve) => resolvers.set(args.toolCallId, resolve));
@@ -284,6 +285,7 @@ describe("ordered read preparation", () => {
   it("keeps a delegate's direct-call instruction updates out of the parent", async () => {
     const host = { call: vi.fn(async (method: string, args: any) => method === "project.instructions.resolve"
       ? { entries: [{ source: "AGENTS.md", content: `rules:${args.path}` }] }
+      : method === "tools.prepareFileCall" ? { ticket: `ticket-${args.toolCallId}` }
       : { ok: true, content: "read" }) };
     const runtime = createRuntime({ host });
     const internal = runtime as any;
@@ -301,6 +303,7 @@ describe("ordered read preparation", () => {
   it("prepares delegated reads against the child's prompt and reuses canonical arguments", async () => {
     const host = { call: vi.fn(async (method: string, args: any) => method === "project.instructions.resolve"
       ? { entries: [{ source: "AGENTS.md", content: `rules:${args.path}` }] }
+      : method === "tools.prepareFileCall" ? { ticket: `ticket-${args.toolCallId}` }
       : { ok: true, content: "read" }) };
     const runtime = createRuntime({ host, subagents: [{ name: "reader", description: "Read", tools: ["Read"], prompt: "Read", source: "builtin" }] });
     subagentRuns.calls.length = 0;

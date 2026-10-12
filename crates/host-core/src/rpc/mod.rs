@@ -1,4 +1,5 @@
 mod config_sync_rpc;
+mod file_calls;
 mod scheduled_rpc;
 mod scheduled_tools;
 mod todos;
@@ -332,6 +333,20 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
         }
     });
 
+    // Ticket expiry must not wait for potentially long remote configuration
+    // synchronization. This task only performs bounded in-memory cleanup.
+    let file_call_reaper = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                state.lock().await.file_call_tickets.prune();
+            }
+        }
+    });
+
     let mut input_error = None;
     let mut writer_done = false;
     'serve: loop {
@@ -455,6 +470,8 @@ pub async fn serve(state: Arc<Mutex<AppState>>) -> Result<()> {
 
     config_sync_scheduler.abort();
     let _ = config_sync_scheduler.await;
+    file_call_reaper.abort();
+    let _ = file_call_reaper.await;
     {
         let mut st = state.lock().await;
         st.shutdown();
@@ -3668,10 +3685,43 @@ async fn handle_request(
             }
             Ok(json!({ "tools": definitions }))
         }
+        "tools.prepareFileCall" => file_calls::prepare(state, params).await,
+        "tools.cancelPreparedFileCalls" => file_calls::cancel(state, params).await,
         "tools.execute" => {
             let call_started = std::time::Instant::now();
             let p: ToolsExecuteParams = serde_json::from_value(params.clone())
                 .map_err(|e| rpc_err(1002, e.to_string(), "INVALID_PARAMS"))?;
+            let prepared = {
+                let mut st = state.lock().await;
+                match params.get("fileAdmissionTicket") {
+                    Some(Value::String(ticket)) => Some(
+                        st.file_call_tickets
+                            .claim(ticket, &p)
+                            .map_err(|code| rpc_err(1002, "invalid file admission ticket", code))?,
+                    ),
+                    Some(_) => {
+                        return Err(rpc_err(
+                            1002,
+                            "invalid file admission ticket",
+                            "INVALID_PARAMS",
+                        ))
+                    }
+                    None if st
+                        .file_call_tickets
+                        .contains_call(&p.session_id, &p.tool_call_id) =>
+                    {
+                        return Err(rpc_err(
+                            1002,
+                            "prepared call requires its ticket",
+                            "FILE_CALL_TICKET_REQUIRED",
+                        ))
+                    }
+                    None => None,
+                }
+            };
+            let (mut prepared_admission, _prepared_claim) = prepared
+                .map(|(registration, claim)| (Some(registration), Some(claim)))
+                .unwrap_or((None, None));
             let execution_timeout_ms = tools::effective_timeout_ms(&p.tool_name, p.timeout_ms);
 
             let command_shell_id = if p.tool_name == "Bash" {
@@ -4045,7 +4095,14 @@ async fn handle_request(
                     ws_path.as_deref(), scratch_path.as_deref(), &p.session_id,
                     &p.tool_name, &p.args, external_path_permission,
                 ).map_err(|error| rpc_err(1002, error, "INVALID_ARGUMENT"))?;
-                let admission = tool_budget.acquire_resources(&p.session_id, &p.tool_name, access_plan.resources.clone());
+                let admission = async {
+                    if let Some(mut registration) = prepared_admission.take() {
+                        registration.update_resources(access_plan.resources.clone());
+                        registration.activate().await
+                    } else {
+                        tool_budget.acquire_resources(&p.session_id, &p.tool_name, access_plan.resources.clone()).await
+                    }
+                };
                 tokio::pin!(admission);
                 let mut admission_cancellation = cancellation_receiver.clone();
                 let admitted = if bash_cancellation_requested(&admission_cancellation) {
@@ -4312,8 +4369,12 @@ async fn handle_request(
                 .ok_or_else(|| rpc_err(1002, "toolCallId required", "INVALID_PARAMS"))?;
             let mut st = state.lock().await;
             let permission_found = st.cancel_pending_permission(session_id, tool_call_id);
+            let prepared_found = st
+                .file_call_tickets
+                .cancel(session_id, &[tool_call_id.to_string()])
+                > 0;
             let (process_found, queued) = st.abort_or_queue_bash(session_id, tool_call_id);
-            let found = process_found || permission_found;
+            let found = process_found || permission_found || prepared_found;
             Ok(json!({
                 "ok": true,
                 "found": found,

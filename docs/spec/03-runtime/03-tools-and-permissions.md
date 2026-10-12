@@ -339,6 +339,36 @@ type ReviewChange = {
 
 ## 4d. Mutation ordering and edit recovery
 
+### Fork experiment: source-ordered file admission
+
+Pi prepares `Read`, `Write`, and `Edit` in source order through the internal
+`tools.prepareFileCall` RPC before starting a parallel batch. The Host creates
+an inactive bounded registration: preparation acquires no execution capacity or
+file lease and grants no permission. Its single-use ticket binds the session,
+tool call ID, tool name, normalized argument digest, and delegate permission scope.
+
+`tools.execute` claims the ticket, runs the unchanged session-owned permission
+gate, refreshes the resource plan, and activates its original queue position.
+Later conflicting calls cannot overtake an earlier registration when approvals
+arrive in reverse order. Admitted work revalidates paths and refreshes file
+identities before execution. Unprepared legacy calls retain the existing API;
+omitting a ticket for an already prepared call fails closed.
+A claimed call retains its identity until its handler settles, so a concurrent
+unticketed retry cannot steal the call ID during approval or execute out of order.
+
+Cancellation covers asynchronous preparation, unused tickets, approval waits,
+and admission waits. Unclaimed tickets expire after ten minutes, with an
+independent thirty-second cleanup sweep; claimed calls keep indefinite approval
+waits. Shutdown releases unclaimed registrations. Runtime cleanup requests are
+batched, serialized, bounded by ten-second transport deadlines, and drained on
+Stop/disposal and delegate settlement. Cleanup failures are reported explicitly.
+
+Ticketed mutations bypass the sidecar PathMutex to avoid ordering inversion;
+direct legacy invocations keep their existing lock. This stage keeps Write and
+Edit sequential and preserves the per-session mutation limit of one. In
+particular, file ordering alone does not order sidecar Edit recovery outcomes.
+See [ordered-file-call-preparation](../../adr/ordered-file-call-preparation.md).
+
 `Write` and `Edit` are serialized within each session. Read/search tools may
 continue in parallel, and different sessions may mutate different roots
 concurrently, but a session never has two in-flight mutations. The host holds

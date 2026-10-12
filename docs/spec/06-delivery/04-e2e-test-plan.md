@@ -8,6 +8,26 @@
 
 ## 1. Goals
 
+### E2E-ORDERED-FILE-CALLS
+
+- **Preconditions:** Candidate-built Host selected by `PI_DESKTOP_HOST_BIN`,
+  isolated throwaway data/project paths, no provider or global registry writes.
+- **Steps:** Run `node scripts/e2e-ordered-file-calls.mjs`. Prepare conflicting
+  writes in source order, execute and approve them in reverse order, verify the
+  final file, then test creating a file followed by a previously prepared Read.
+  Reject ticket replay, argument changes, omitted tickets, and external-path
+  access denied after preparation. Abort an unused prepared call.
+- **Expected:** Permission waits hold no execution capacity; conflicting writes
+  preserve registration order; Read observes the preceding create despite a new
+  filesystem identity. Invalid tickets fail closed, external denial preserves
+  bytes, and active/queued/resource counts return to zero after completion.
+- **Lifecycle coverage:** `file_call_tickets` tests cover argument/scope/session
+  binding, replay, expiry, preflight cancellation, and reversed activation.
+  `file-call-preparation.test.ts` covers owner-scoped cancellation, late responses,
+  old-Host failure, and cleanup appended while another cleanup is settling.
+  Runtime and subagent integration suites exercise the production hooks. This
+  stage does not open Write/Edit parallelism or claim cross-agent Shell isolation.
+
 ### Fork E2E: parallel read batch lifecycle
 
 - Isolate data/project paths; never run against production profiles.

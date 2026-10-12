@@ -22,6 +22,7 @@ Each ADR includes:
 |---|---|---|
 | parallel-read-batches | [Ordered preparation and parallel read batches](parallel-read-batches.md) | Fork experiment |
 | host-file-resource-admission | [Host file resource admission](host-file-resource-admission.md) | Implemented candidate (fork) |
+| ordered-file-call-preparation | [Ordered file call preparation](ordered-file-call-preparation.md) | Implemented candidate (fork) |
 | composer-mcp-invocations | [Composer MCP Invocations](composer-mcp-invocations.md) | Accepted |
 | chronological-system-transcript | [Preserve chronological model system state](chronological-system-transcript.md) | Accepted |
 | mcp-tool-approval-risk | [User MCP tools keep the normal approval path](mcp-tool-approval-risk.md) | Accepted |

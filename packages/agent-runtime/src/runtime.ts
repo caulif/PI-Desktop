@@ -125,6 +125,7 @@ import {
 } from "@pi-desktop/shared";
 import { createStreamCoalescer, type StreamCoalescer } from "./stream-coalescer.js";
 import type { RuntimeHost } from "./host-client.js";
+import { FileCallPreparation } from "./file-call-preparation.js";
 import { classifyAgentError } from "./agent-errors.js";
 import {
   assistantContent,
@@ -1748,6 +1749,7 @@ export class DesktopAgentRuntime {
   private projectInstructions?: ProjectInstructions;
   /** Weak argument identity binds preparation to the exact validated call, without retained IDs. */
   private preparedPathToolArgs = new WeakMap<object, unknown>();
+  private fileCalls: FileCallPreparation;
   private instructionExecution = new AsyncLocalStorage<(instructions: ProjectInstructions | undefined) => void>();
   private projectMemory?: string;
   /** Per-prompt claims prevent repeated path-resolution RPCs for one directory. */
@@ -1912,6 +1914,13 @@ export class DesktopAgentRuntime {
     });
     this.streamSink = createStreamCoalescer(opts.onEvent);
     this.onEvent = (envelope) => this.streamSink.push(envelope);
+    this.fileCalls = new FileCallPreparation(this.host, this.sessionId, () => {
+      this.emit({ type: "error", error: {
+        code: "FILE_CALL_CLEANUP_FAILED",
+        message: "Could not cancel prepared file calls; stop this run before retrying.",
+        retriable: false,
+      } });
+    });
     this.pluginTools = opts.pluginTools ?? [];
     this.pluginSkills = [...(opts.pluginSkills ?? [])].sort((left, right) => left.id.localeCompare(right.id));
     this.trustedExtensionSpecs = opts.trustedExtensions ?? [];
@@ -2498,6 +2507,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       const blocked = await this.extensionToolCall(context);
       if (blocked?.block) return blocked;
       await this.preparePathToolCall(context);
+      await this.prepareOrderedFileCall(context);
       return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
@@ -3267,6 +3277,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         signal,
         onUpdate,
       ) => {
+        const fileAdmissionTicket = this.fileCalls.take(toolCallId);
         const mutationPath = PATH_MUTATING_TOOLS.has(toolName) && isRecord(params) && typeof params.path === "string"
           ? await mutationFailureKey(params.path, this.projectPath ?? this.scratchDir)
           : undefined;
@@ -3316,7 +3327,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             })
           : undefined;
         const abort = () => {
-          if ((!isBash && toolName !== "GenerateImages") || abortRequested || settled) return;
+          if ((!isBash && toolName !== "GenerateImages" && !["Read", "Glob", "Grep", "Write", "Edit"].includes(toolName)) || abortRequested || settled) return;
           abortRequested = true;
           abortPromise = this.host
             .call("tools.abort", {
@@ -3375,6 +3386,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
               toolCallId,
               toolName,
               args: params,
+              ...(fileAdmissionTicket ? { fileAdmissionTicket } : {}),
               mode: this.mode,
               ...(isBash
                 ? {
@@ -3410,6 +3422,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           executionFailed = true;
           executionError = error;
         } finally {
+          this.fileCalls.finish(toolCallId, executionFailed);
           this.delegatePermissionScopes.delete(toolCallId);
           cleanup(true);
         }
@@ -3630,7 +3643,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           // Direct/internal invocations retain preflight. pi invocations have
           // already committed instructions in the ordered preparation phase.
           if (!prepared) await this.loadPathInstructions(toolName, params, this.instructionExecution.getStore());
-          return PATH_MUTATING_TOOLS.has(toolName)
+          return PATH_MUTATING_TOOLS.has(toolName) && !this.fileCalls.has(toolCallId)
             ? this.writeLocks.run(
                 isRecord(params) ? String(params.path ?? "") : "",
                 () => run(toolCallId, params, signal, onUpdate),
@@ -4747,6 +4760,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             tools: scopedTools,
             beforeToolCall: async (context) => {
               await this.preparePathToolCall(context, applyInstructions);
+              await this.prepareOrderedFileCall(context, delegationId, definition.permission, () => abortSignal.aborted);
               return undefined;
             },
             onEvent: (envelope) => {
@@ -4791,7 +4805,13 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           runPromise = Promise.reject(error);
         }
         void runPromise
-          .then((result) => this.settleDelegation(record, result))
+          .then((result) => {
+            this.fileCalls.cancelOwner(delegationId);
+            if (this.fileCalls.hasCleanup) {
+              return this.fileCalls.drainCleanup().then(() => this.settleDelegation(record, result));
+            }
+            this.settleDelegation(record, result);
+          })
           .catch((error: unknown) => {
             this.settleDelegation(record, {
               agentName: definition.name,
@@ -4867,6 +4887,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     record: DelegationRecord,
     result: SubagentRunResult,
   ): void {
+    this.fileCalls.cancelOwner(record.delegationId);
     if (record.status !== "running") return;
     if (result.status === "aborted" && record.parentErrorInterrupted && !record.stopRequested) {
       const message = `The parent turn failed and interrupted this delegation. Continue it with Task(resume: "${record.delegationId}").`;
@@ -5877,6 +5898,18 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     if (typeof context.args === "object" && context.args !== null) {
       this.preparedPathToolArgs.set(context.args, params);
     }
+  }
+
+  private async prepareOrderedFileCall(
+    context: BeforeToolCallContext,
+    owner = "parent",
+    permissionScope?: string,
+    cancelled = () => this.runCancelled || this.disposed,
+  ): Promise<void> {
+    const args = typeof context.args === "object" && context.args !== null
+      ? this.preparedPathToolArgs.get(context.args) ?? context.args
+      : context.args;
+    await this.fileCalls.prepare(context.toolCall.id, context.toolCall.name, args, owner, permissionScope, cancelled);
   }
 
   private async loadPathInstructions(
@@ -8203,6 +8236,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         // results are in, so this is the anchor for the next providerWaitMs.
         {
           const endedAt = Date.now();
+          this.fileCalls.cancelCall(event.toolCallId);
           const activeTool = this.activeToolCalls.get(event.toolCallId);
           this.activeToolCalls.delete(event.toolCallId);
           if (
@@ -8260,6 +8294,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           this.keepTurnOpenForDelegates()
         )
           break;
+        this.fileCalls.cancelOwner("parent");
         const subagentUsage = this.turnSubagentUsage;
         this.turnSubagentUsage = undefined;
         this.emit({
@@ -8808,6 +8843,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   }
 
   async abort(): Promise<void> {
+    this.fileCalls.cancelOwner();
     this.acceptingSteering = false;
     this.gracefulStopRequested = false;
     this.runCancelled = true;
@@ -8820,6 +8856,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.providerRetryAbort?.abort();
     if (this.compactionInProgress) this.compactionAborted = true;
     this.compactionAbort?.abort();
+    await this.fileCalls.drainCleanup();
   }
 
   /** Ask pi-agent-core to stop after the current assistant/tool turn. */
@@ -8850,6 +8887,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   }
 
   async dispose(): Promise<void> {
+    this.fileCalls.cancelOwner();
     if (this.disposed) return;
     const runner = this.extensionRunner;
     this.extensionRunner = undefined;
@@ -8880,6 +8918,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.cleanupActiveToolProgress();
     if (this.compactionInProgress) this.compactionAborted = true;
     this.compactionAbort?.abort();
+    await this.fileCalls.drainCleanup();
     await closingExtensions;
   }
 }
