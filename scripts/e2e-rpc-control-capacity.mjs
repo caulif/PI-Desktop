@@ -92,6 +92,9 @@ try {
     assert.ok((await host.call("session.get", { id: session.id })).session);
     const pending = await host.call("permissions.pending");
     assert.equal(pending.requests.length, 0);
+    const health = await host.call("app.health");
+    assert.equal(health.toolBudget.active, 0);
+    assert.equal(health.toolBudget.queued, 0);
     console.log("PASS E2E-RPC-CONTROL-CAPACITY: 32 approval waits, deny, abort, drain, recovery");
   }, resolveHostBinary(), tempRoot);
 } finally {
