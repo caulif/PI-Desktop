@@ -14,7 +14,8 @@ existing lifecycle failure easier to reach.
 ## Decision
 
 Keep 32 ordinary request slots and add four independent bounded slots exclusively
-for `tools.abort`, `permissions.resolve`, and `plans.abort`. Dispatch through the
+for `tools.abort`, `permissions.resolve`, `plans.abort`, and
+`tools.cancelPreparedFileCalls`. Dispatch through the
 same handlers and deadlines; release each owned permit only when its handler and
 durable transcript writes settle. Excess traffic in either lane fails with the
 existing overload contract. Controls do not consume or bypass tool execution
