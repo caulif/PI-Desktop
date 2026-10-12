@@ -129,6 +129,7 @@ does not turn temporary thread pressure into a host process exit.
 | `TOOL_TIMEOUT` | yes | tool execution timeout |
 | `TOOL_FAILED` | maybe | tool executed but failed |
 | `FILE_NOT_FOUND` | no | Read/Write/Edit target path does not exist (distinct from `TOOL_DENIED`) |
+| `FILE_RESOURCE_CHANGED` | yes | file identity changed during admission, or refreshed resource keys conflict with another call; prepare the call again and reassess current contents before retrying a mutation |
 | `TOOL_ABORTED` | no | the tool was cancelled by a user stop or a turn abort before it finished |
 | `MUTATION_RETRY_BUDGET_EXHAUSTED` | yes | the repeat guard ended the turn after same-path `Edit` or shell patch failures; carries `details.kind` (`edit` or `patch-command`), the last tool error code, and a class-specific `details.recovery` hint |
 | `PROCESS_RESOURCE_EXHAUSTED` | yes | shell process could not start because the OS temporarily exhausted process resources |
