@@ -17135,3 +17135,11 @@ host-created files. The full app's file-preview viewer is covered separately.
 - Remaining acceptance: real transport simultaneous-file overlap and delayed
   blocking-job drain with process shutdown need integration harness coverage;
   unit admission assertions do not substitute for that E2E evidence.
+
+- Real transport harness: `node scripts/e2e-file-resource-admission.mjs`, with
+  `PI_DESKTOP_HOST_BIN` pointing to the candidate binary and shared dist built.
+  It checks persisted bytes for Read/Write/Edit/register transfer/MV/REM rollback,
+  stale cross-session Hashline rejection, concurrent independent RPC writes,
+  approval cancellation, idle counters, and graceful EOF approval cleanup.
+  It does not claim a timing-based overlap proof or delayed admitted-body shutdown
+  proof; deterministic resource scheduling remains covered by Rust tests.

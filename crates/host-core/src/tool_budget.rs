@@ -411,6 +411,7 @@ impl ToolBudget {
             .expect("tool budget state lock is not poisoned")
     }
 
+    #[allow(dead_code)] // Compatibility entry point; resource-aware RPC uses acquire_resources.
     pub async fn acquire(
         &self,
         session_id: &str,
@@ -466,6 +467,7 @@ impl ToolBudget {
             .await
     }
 
+    #[allow(dead_code)] // Also retained for deterministic capacity/timeout regression tests.
     async fn acquire_with_timeout(
         &self,
         session_id: &str,
