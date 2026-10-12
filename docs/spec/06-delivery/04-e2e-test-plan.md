@@ -17117,3 +17117,21 @@ host-created files. The full app's file-preview viewer is covered separately.
   Playwright can be supplied through `PI_TEST_PLAYWRIGHT`). Only the model server
   is simulated in the Electron flow. The fixture profile and screenshots stay
   under `.artifacts/` for inspection; no user profile or paid model is used.
+
+
+### Fork E2E-TOOLS-file-resource-admission
+
+- Preconditions: isolated request worktree and temporary data/workspace; no
+  production database, user registry or global installation changes.
+- Scenarios: shared readers; same-file read/write and cross-session writer
+  exclusion; independent-file overlap; MV source/target all-or-nothing admission;
+  older-writer fairness; inactive registration cancellation; grant-before-claim
+  cancellation; timeout cleanup; canonical aliases/new leaves/hardlinks;
+  approved external path resolution; register namespace; rollback exclusion;
+  Stop while queued and shutdown while a blocking file job is draining.
+- Automated coverage: Rust ToolBudget tests deterministically poll queue states;
+  FileAccessPlan tests use real temporary files and hardlinks; existing Host RPC
+  permissions/abort/Hashline/review tests exercise production handlers.
+- Remaining acceptance: real transport simultaneous-file overlap and delayed
+  blocking-job drain with process shutdown need integration harness coverage;
+  unit admission assertions do not substitute for that E2E evidence.

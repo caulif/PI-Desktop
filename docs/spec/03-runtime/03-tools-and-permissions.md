@@ -697,3 +697,28 @@ Naming:
 before the trusted desktop executes the request. Plan/Goal remain denied even
 under Auto. See [image generation](21-image-generation.md) for cancellation,
 limits and result semantics.
+
+
+## Fork experiment: shared file-resource admission
+
+Host file tools now reserve file resources together with the existing ToolBudget
+capacity. Read shares a file; Write/Edit (including REM and both MV paths) require
+exclusive access. Named-register Edit operations also reserve their Host session's
+register namespace. Review rollback uses the same exclusive resource coordinator.
+Older conflicting pending writes block newer reads; unrelated paths can proceed.
+Permission waits hold no execution capacity. Queue/cancellation cleanup releases
+all grants, including grants not yet claimed. Admitted file work drains through
+review and bookkeeping before releasing resources; Stop is not a proof that a
+blocking file operation has already finished.
+
+The implementation preserves sidecar sequential Write/Edit and the per-session
+mutation limit of one. No directory-tree lock, Bash filesystem lock, snapshot
+search guarantee, or cross-process filesystem transaction is introduced. A changed
+canonical path or conflicting replacement identity fails with FILE_RESOURCE_CHANGED.
+Existing hardlinks are coordinated using platform file identities; externally
+created aliases and directory swaps remain limitations. See
+[Host file resource admission](../../adr/host-file-resource-admission.md).
+
+Baseline documentation drift: the current single-path review metadata does not
+implement the compound MV rollback described above. This admission change protects
+the paths actually restored; it does not add compound review persistence.

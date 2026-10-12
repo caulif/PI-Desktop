@@ -1479,7 +1479,10 @@ fn bash_cancellation_requested(receiver: &Option<tokio::sync::watch::Receiver<bo
 }
 
 async fn clear_bash_cancellation(state: &Arc<Mutex<AppState>>, p: &ToolsExecuteParams) {
-    if !matches!(p.tool_name.as_str(), "Bash" | "GenerateImages") {
+    if !matches!(
+        p.tool_name.as_str(),
+        "Bash" | "GenerateImages" | "Read" | "Glob" | "Grep" | "Write" | "Edit"
+    ) {
         return;
     }
     let mut st = state.lock().await;
@@ -2147,8 +2150,45 @@ async fn handle_request(
                 .get("snapshotId")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| rpc_err(1002, "snapshotId required", "INVALID_PARAMS"))?;
+            let (workspace_root, data_dir, tool_budget) = {
+                let st = state.lock().await;
+                (
+                    resolve_tool_workspace(&st, session_id)?,
+                    st.data_dir.clone(),
+                    st.tool_budget.clone(),
+                )
+            };
+            let paths = review::rollback_paths(
+                &data_dir,
+                session_id,
+                snapshot_id,
+                workspace_root.as_deref().map(Path::new),
+            )
+            .map_err(|error| rpc_err(1000, error.to_string(), "INTERNAL"))?;
+            let access_plan = crate::file_access::FileAccessPlan::for_paths(&paths)
+                .map_err(|error| rpc_err(1000, error, "FILE_RESOURCE_CHANGED"))?;
+            let _permit = tool_budget
+                .acquire_resources(session_id, "Edit", access_plan.resources.clone())
+                .await
+                .map_err(|error| rpc_err(1000, error.message(), error.code()))?;
+            let current_paths = review::rollback_paths(
+                &data_dir,
+                session_id,
+                snapshot_id,
+                workspace_root.as_deref().map(Path::new),
+            )
+            .map_err(|error| rpc_err(1000, error.to_string(), "INTERNAL"))?;
+            if crate::file_access::FileAccessPlan::for_paths(&current_paths)
+                .map_err(|error| rpc_err(1000, error, "FILE_RESOURCE_CHANGED"))?
+                != access_plan
+            {
+                return Err(rpc_err(
+                    1000,
+                    "rollback file identity changed during admission",
+                    "FILE_RESOURCE_CHANGED",
+                ));
+            }
             let st = state.lock().await;
-            let workspace_root = resolve_tool_workspace(&st, session_id)?;
             let outcome = review::rollback_change(
                 &st.data_dir,
                 session_id,
@@ -3690,8 +3730,10 @@ async fn handle_request(
 
             // Register before permission evaluation so tools.abort can cancel
             // an approval wait as well as an already-spawned process.
-            let cancellation_receiver = if matches!(p.tool_name.as_str(), "Bash" | "GenerateImages")
-            {
+            let cancellation_receiver = if matches!(
+                p.tool_name.as_str(),
+                "Bash" | "GenerateImages" | "Read" | "Glob" | "Grep" | "Write" | "Edit"
+            ) {
                 let mut st = state.lock().await;
                 match st.register_bash_cancellation(&p.session_id, &p.tool_call_id) {
                     Ok(receiver) => Some(receiver),
@@ -3992,7 +4034,25 @@ async fn handle_request(
                     let st = state.lock().await;
                     st.tool_budget.clone()
                 };
-                let _tool_permit = match tool_budget.acquire(&p.session_id, &p.tool_name).await {
+                let ws_path = workspace_path.map(PathBuf::from);
+                let access_plan = crate::file_access::FileAccessPlan::for_tool(
+                    ws_path.as_deref(), scratch_path.as_deref(), &p.session_id,
+                    &p.tool_name, &p.args, external_path_permission,
+                ).map_err(|error| rpc_err(1002, error, "INVALID_ARGUMENT"))?;
+                let admission = tool_budget.acquire_resources(&p.session_id, &p.tool_name, access_plan.resources.clone());
+                tokio::pin!(admission);
+                let mut admission_cancellation = cancellation_receiver.clone();
+                let admitted = if bash_cancellation_requested(&admission_cancellation) {
+                    return Ok(json!({ "toolCallId": p.tool_call_id, "ok": false, "isError": true, "content": { "error": "tool aborted", "code": "TOOL_ABORTED" }, "durationMs": 0, "errorCode": "TOOL_ABORTED" }));
+                } else if let Some(receiver) = admission_cancellation.as_mut() {
+                    tokio::select! {
+                        result = &mut admission => result,
+                        _ = receiver.changed() => {
+                            return Ok(json!({ "toolCallId": p.tool_call_id, "ok": false, "isError": true, "content": { "error": "tool aborted", "code": "TOOL_ABORTED" }, "durationMs": 0, "errorCode": "TOOL_ABORTED" }));
+                        }
+                    }
+                } else { admission.await };
+                let mut _tool_permit = match admitted {
                     Ok(permit) => permit,
                     Err(error) => {
                         tracing::warn!(
@@ -4020,7 +4080,18 @@ async fn handle_request(
                     }
                 };
 
-                let ws_path = workspace_path.map(PathBuf::from);
+                // Re-resolve after waiting: a permission/resource key may not
+                // authorize a directory or file replaced while this call queued.
+                let current_plan = crate::file_access::FileAccessPlan::for_tool(
+                    ws_path.as_deref(), scratch_path.as_deref(), &p.session_id,
+                    &p.tool_name, &p.args, external_path_permission,
+                ).map_err(|error| rpc_err(1002, error, "FILE_RESOURCE_CHANGED"))?;
+                if !current_plan.same_paths(&access_plan) || !_tool_permit.try_refresh_resources(current_plan.resources) {
+                    return Err(rpc_err(1002, "file identity changed during admission; retry the call", "FILE_RESOURCE_CHANGED"));
+                }
+                if bash_cancellation_requested(&cancellation_receiver) {
+                    return Ok(json!({ "toolCallId": p.tool_call_id, "ok": false, "isError": true, "content": { "error": "tool aborted", "code": "TOOL_ABORTED" }, "durationMs": 0, "errorCode": "TOOL_ABORTED" }));
+                }
                 let (data_dir, hashline_store) = {
                     let st = state.lock().await;
                     (st.data_dir.clone(), st.hashline.clone())
@@ -9862,5 +9933,126 @@ mod update_settings_tests {
         ] {
             assert!(validate_settings_value(&value).is_err(), "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod file_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_file_call_can_abort_and_rollback_waits_without_holding_app_state() {
+        let data = tempfile::tempdir().unwrap();
+        let project = data.path().join("workspace");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("note.txt"), "before").unwrap();
+        let mut app = AppState::open(data.path()).unwrap();
+        app.handshook = true;
+        let session = sessions::create_session(
+            &app.db,
+            Some("file admission".into()),
+            Some("agent".into()),
+            None,
+            None,
+            Some(project.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let pending = review::prepare_change(
+            data.path(),
+            &session.id,
+            "write-call",
+            Some(&project),
+            None,
+            "Write",
+            &json!({"path":"note.txt"}),
+        )
+        .unwrap()
+        .unwrap();
+        std::fs::write(project.join("note.txt"), "after").unwrap();
+        let change = review::finalize_change(&pending).unwrap();
+        let budget = app.tool_budget.clone();
+        let plan = crate::file_access::FileAccessPlan::for_tool(
+            Some(&project),
+            None,
+            "other",
+            "Write",
+            &json!({"path":"note.txt"}),
+            false,
+        )
+        .unwrap();
+        let held = budget
+            .acquire_resources("other", "Write", plan.resources)
+            .await
+            .unwrap();
+        let state = Arc::new(Mutex::new(app));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let read = tokio::spawn({
+            let state = state.clone();
+            let tx = tx.clone();
+            let id = session.id.clone();
+            async move {
+                handle_request(state, "tools.execute", json!({"sessionId":id,"toolCallId":"queued-read","toolName":"Read","args":{"path":"note.txt"},"mode":"agent"}),tx).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.snapshot().queued != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let aborted = handle_request(
+            state.clone(),
+            "tools.abort",
+            json!({"sessionId":session.id,"toolCallId":"queued-read"}),
+            tx.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aborted["found"], true);
+        let result = read.await.unwrap().unwrap();
+        assert_eq!(result["errorCode"], "TOOL_ABORTED");
+        assert_eq!(budget.snapshot().queued, 0);
+        assert!(state.lock().await.active_bash_cancellations.is_empty());
+        let rollback = tokio::spawn({
+            let state = state.clone();
+            let tx = tx.clone();
+            let id = session.id.clone();
+            async move {
+                handle_request(
+                    state,
+                    "review.rollback",
+                    json!({"sessionId":id,"snapshotId":change.snapshot_id}),
+                    tx,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.snapshot().queued != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Accessing AppState here would deadlock if rollback held it while queued.
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(1), state.lock())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("note.txt")).unwrap(),
+            "after"
+        );
+        drop(held);
+        let result = rollback.await.unwrap().unwrap();
+        assert_eq!(result["status"], "rolledBack");
+        assert_eq!(
+            std::fs::read_to_string(project.join("note.txt")).unwrap(),
+            "before"
+        );
+        assert_eq!(budget.snapshot().active, 0);
+        assert_eq!(budget.snapshot().queued, 0);
     }
 }
