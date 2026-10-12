@@ -476,7 +476,14 @@ same vendor key.
 
 ### Anthropic token endpoint rate limits
 
-The pinned pi-ai 1.0.1 patch gives Anthropic authorization-code exchange and
+Every token request sends pi-ai's own `User-Agent` (`pi (<platform> <release>;
+<arch>)`). Electron Main replaces the global `fetch` with `net.fetch`, whose
+default is Chromium's browser `User-Agent`; the token endpoint answers browser
+and `claude-code/` agents with a 429 `rate_limit_error` on every attempt, so
+without an explicit agent sign-in could never succeed (issue #1337). A custom
+`User-Agent` on the provider row still overrides it.
+
+The pinned pi-ai 1.1.0 patch gives Anthropic authorization-code exchange and
 refresh a shared, bounded token-request policy: retry only an explicit HTTP
 429, at most three total requests. Wait at least 1 s then 2 s, or longer when
 `Retry-After` gives delta seconds or an HTTP date. A server delay beyond the

@@ -387,6 +387,7 @@ function buildApi() {
       openExternal: (url) => call("shell.openExternal", [url]),
     },
     browser: {
+      reveal: () => call("browser.reveal"),
       navigate: (input) => call("browser.navigate", [input ?? {}]),
       action: (input) => call("browser.action", [input]),
       setBounds: (hole) => call("browser.setBounds", [hole]),
@@ -402,6 +403,7 @@ function buildApi() {
       cdp: (input) => call("browser.cdp", [input]),
     },
     net: {
+      getCapabilities: () => call("net.getCapabilities"),
       fetch: (input) => call("net.fetch", [input]),
       // Real-time connections (`net.websocket`). Frames arrive back as
       // `net:websocket:message` host events, so a plugin subscribes with
