@@ -33,7 +33,10 @@ reorder an approval already being awaited. Shutdown releases unclaimed tickets.
 
 The runtime batches and serializes cleanup RPCs, with a ten-second timeout, and
 awaits outstanding cleanup during Stop/disposal and delegate settlement. Cleanup
-failure is reported explicitly. Ticketed mutations bypass the sidecar PathMutex
+failure is reported explicitly. Failed identities remain reserved for a bounded
+retry on a later drain; confirmed cleanup clears their failure state. Repeated
+Stop/disposal can recover after Host availability returns without an unbounded
+retry loop. Ticketed mutations bypass the sidecar PathMutex
 to avoid inversion. Direct legacy invocations retain their original lock and
 budget path. Edit remains sequential: Host filesystem order alone does not prove
 ordered sidecar mutation-recovery outcomes.

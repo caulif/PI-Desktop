@@ -9,6 +9,64 @@ function deferred() {
 }
 
 describe("ordered file call preparation", () => {
+  it("retries failed cleanup identities on a later drain and recovers", async () => {
+    let unavailable = true;
+    const errors = vi.fn();
+    const call = vi.fn(async (method: string, args: any) => {
+      if (method === "tools.prepareFileCall") return { ticket: `ticket-${args.toolCallId}` };
+      if (unavailable) throw new Error("HOST_OVERLOADED");
+      return {};
+    });
+    const preparations = new FileCallPreparation({ call } as RuntimeHost, "s", errors);
+    await preparations.prepare("one", "Read", { path: "a" }, "parent", undefined, () => false);
+    preparations.cancelOwner();
+    await expect(preparations.drainCleanup()).rejects.toThrow("cleanup failed");
+    expect(preparations.hasCleanup).toBe(true);
+    await expect(preparations.prepare("one", "Read", { path: "a" }, "parent", undefined, () => false))
+      .rejects.toThrow("awaiting cleanup");
+    unavailable = false;
+    await preparations.drainCleanup();
+    expect(call).toHaveBeenLastCalledWith("tools.cancelPreparedFileCalls", { sessionId: "s", toolCallIds: ["one"] }, 10_000);
+    expect(preparations.hasCleanup).toBe(false);
+    await preparations.drainCleanup();
+    expect(call.mock.calls.filter(([method]) => method === "tools.cancelPreparedFileCalls")).toHaveLength(2);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds retries while the Host remains unavailable", async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === "tools.prepareFileCall") return { ticket: "ticket" };
+      throw new Error("timeout");
+    });
+    const preparations = new FileCallPreparation({ call } as RuntimeHost, "s", vi.fn());
+    await preparations.prepare("one", "Read", {}, "parent", undefined, () => false);
+    preparations.cancelOwner();
+    await expect(preparations.drainCleanup()).rejects.toThrow("cleanup failed");
+    await expect(preparations.drainCleanup()).rejects.toThrow("cleanup failed");
+    expect(call.mock.calls.filter(([method]) => method === "tools.cancelPreparedFileCalls")).toHaveLength(2);
+  });
+
+  it("retains a failed batch without losing later batches or retrying successful ones", async () => {
+    let attempts = 0;
+    const call = vi.fn(async (method: string, args: any) => {
+      if (method === "tools.prepareFileCall") return { ticket: `ticket-${args.toolCallId}` };
+      if (++attempts === 1) throw new Error("timeout");
+      return {};
+    });
+    const preparations = new FileCallPreparation({ call } as RuntimeHost, "s", vi.fn());
+    for (let i = 0; i < 130; i++) {
+      await preparations.prepare(`call-${i}`, "Read", {}, "parent", undefined, () => false);
+    }
+    preparations.cancelOwner();
+    await expect(preparations.drainCleanup()).rejects.toThrow("cleanup failed");
+    const batches = () => call.mock.calls.filter(([method]) => method === "tools.cancelPreparedFileCalls")
+      .map(([, args]) => args.toolCallIds);
+    expect(batches().map(ids => ids.length)).toEqual([64, 64, 2]);
+    await preparations.drainCleanup();
+    expect(batches()[3]).toEqual(batches()[0]);
+    expect(preparations.hasCleanup).toBe(false);
+  });
+
   it("drains cleanup added while an earlier cleanup RPC is settling", async () => {
     const gates = [deferred(), deferred()];
     const entered = [deferred(), deferred()];

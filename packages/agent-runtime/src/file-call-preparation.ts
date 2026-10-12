@@ -13,7 +13,8 @@ export class FileCallPreparation {
   private queuedCleanup = new Set<string>();
   private cleanupTail = Promise.resolve();
   private cleanupScheduled = false;
-  private cleanupFailed = false;
+  private failedCleanup = new Set<string>();
+  private unresolvedCleanup = new Set<string>();
   private cleanupPending = 0;
 
   constructor(
@@ -33,7 +34,9 @@ export class FileCallPreparation {
     if (!["Read", "Write", "Edit"].includes(toolName)) return;
     if (cancelled()) throw new Error("Operation aborted before file preparation");
     const pending: PendingCall = { owner, cancelled: false };
-    if (this.pending.has(toolCallId)) throw new Error("File call is already prepared");
+    if (this.pending.has(toolCallId) || this.unresolvedCleanup.has(toolCallId)) {
+      throw new Error("File call is already prepared or awaiting cleanup");
+    }
     this.pending.set(toolCallId, pending);
     try {
       const result = await this.host.call<{ ticket: string }>("tools.prepareFileCall", {
@@ -100,7 +103,10 @@ export class FileCallPreparation {
   }
 
   private enqueueCleanup(calls: string[]): void {
-    for (const id of calls) this.queuedCleanup.add(id);
+    for (const id of calls) {
+      this.queuedCleanup.add(id);
+      this.unresolvedCleanup.add(id);
+    }
     if (this.cleanupScheduled) return;
     this.cleanupScheduled = true;
     queueMicrotask(() => {
@@ -110,11 +116,18 @@ export class FileCallPreparation {
       this.cleanupPending += 1;
       this.cleanupTail = this.cleanupTail.then(async () => {
         for (let offset = 0; offset < ids.length; offset += 64) {
-          await this.cancelCalls(ids.slice(offset, offset + 64));
+          const batch = ids.slice(offset, offset + 64);
+          try {
+            await this.cancelCalls(batch);
+            for (const id of batch) {
+              this.failedCleanup.delete(id);
+              this.unresolvedCleanup.delete(id);
+            }
+          } catch {
+            for (const id of batch) this.failedCleanup.add(id);
+            this.onCleanupError();
+          }
         }
-      }).catch(() => {
-        this.cleanupFailed = true;
-        this.onCleanupError();
       }).finally(() => {
         this.cleanupPending -= 1;
       });
@@ -122,6 +135,9 @@ export class FileCallPreparation {
   }
 
   async drainCleanup(): Promise<void> {
+    // Retry previously failed identities once per drain, never indefinitely
+    // within a Stop/disposal request when the Host remains unavailable.
+    if (this.failedCleanup.size) this.enqueueCleanup([...this.failedCleanup]);
     // A late preparation response or execution failure can append cleanup while
     // an earlier RPC is settling. Drain the current lifecycle, not one tail
     // snapshot; each RPC already carries its own bounded transport deadline.
@@ -129,13 +145,13 @@ export class FileCallPreparation {
       await Promise.resolve();
       const tail = this.cleanupTail;
       await tail;
-      if (tail === this.cleanupTail && !this.hasCleanup) break;
+      if (tail === this.cleanupTail && !this.cleanupScheduled && this.cleanupPending === 0) break;
     }
-    if (this.cleanupFailed) throw new Error("Prepared file call cleanup failed");
+    if (this.failedCleanup.size) throw new Error("Prepared file call cleanup failed");
   }
 
   get hasCleanup(): boolean {
-    return this.cleanupScheduled || this.cleanupPending > 0;
+    return this.cleanupScheduled || this.cleanupPending > 0 || this.failedCleanup.size > 0;
   }
 
   private async cancelCalls(toolCallIds: string[]): Promise<void> {

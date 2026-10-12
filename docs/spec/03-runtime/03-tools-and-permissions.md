@@ -372,6 +372,10 @@ independent thirty-second cleanup sweep; claimed calls keep indefinite approval
 waits. Shutdown releases unclaimed registrations. Runtime cleanup requests are
 batched, serialized, bounded by ten-second transport deadlines, and drained on
 Stop/disposal and delegate settlement. Cleanup failures are reported explicitly.
+Failed call identities remain reserved until cleanup is confirmed. A later drain
+retries those identities once in bounded batches, including repeated Stop or
+disposal requests; successful cleanup clears the failure state. Persistent Host
+failures reject the drain without an unbounded retry loop.
 
 Ticketed mutations bypass the sidecar PathMutex to avoid ordering inversion;
 direct legacy invocations keep their existing lock. The follow-up Write stage

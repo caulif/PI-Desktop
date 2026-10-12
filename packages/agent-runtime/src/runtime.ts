@@ -8905,7 +8905,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
 
   async dispose(): Promise<void> {
     this.fileCalls.cancelOwner();
-    if (this.disposed) return;
+    if (this.disposed) {
+      await this.fileCalls.drainCleanup();
+      return;
+    }
     const runner = this.extensionRunner;
     this.extensionRunner = undefined;
     const closingExtensions = runner?.dispose();

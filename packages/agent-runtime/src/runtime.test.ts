@@ -11538,6 +11538,28 @@ describe("inline image placement", () => {
     }
   });
 });
+it.each(["abort", "dispose"] as const)("recovers file cleanup after a failed %s", async (operation) => {
+  let unavailable = true;
+  const host = { call: vi.fn(async (method: string) => {
+    if (method === "tools.prepareFileCall") return { ticket: "ticket" };
+    if (method === "tools.cancelPreparedFileCalls" && unavailable) throw new Error("HOST_OVERLOADED");
+    return {};
+  }) };
+  const runtime = createRuntime({ host });
+  const fileCalls = (runtime as any).fileCalls;
+  try {
+    await fileCalls.prepare("cleanup-recovery", "Read", { path: "file.ts" }, "parent", undefined, () => false);
+    await expect(runtime[operation]()).rejects.toThrow("cleanup failed");
+    unavailable = false;
+    await runtime[operation]();
+    expect(fileCalls.hasCleanup).toBe(false);
+    expect(host.call.mock.calls.filter(([method]) => method === "tools.cancelPreparedFileCalls")).toHaveLength(2);
+  } finally {
+    unavailable = false;
+    await runtime.dispose();
+  }
+});
+
 // The production pi loop must not let a later successful Edit response clear
 // recovery strikes before an earlier failed Edit response is processed.
 it("keeps Edit response processing in source order while Write becomes parallel", async () => {
