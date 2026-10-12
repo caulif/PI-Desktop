@@ -41,3 +41,5 @@ An unbounded control bypass permits uncontrolled task fan-out. Increasing the
 ordinary cap merely moves the same starvation threshold. Reserving tool permits
 for controls addresses the wrong layer because these operations release work
 without running a tool.
+
+Prepared file cancellation also uses the control lane. A saturated set of ordinary approval waits must not prevent tools.cancelPreparedFileCalls from revoking inactive registrations.

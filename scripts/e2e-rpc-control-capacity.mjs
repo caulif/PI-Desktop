@@ -16,6 +16,11 @@ try {
     await configureSession(host, session, "agent", "ask");
     const shell = (await host.call("commandShells.list")).effective;
     assert.ok(shell?.available, "an available command shell is required");
+    // Register inactive file work before ordinary RPC slots are exhausted.
+    await host.call("tools.prepareFileCall", {
+      sessionId: session.id, toolCallId: "prepared-read", toolName: "Read",
+      args: { path: "pending.txt" },
+    });
     const executions = [];
     const execute = (index) => host.call("tools.execute", {
       sessionId: session.id,
@@ -42,6 +47,9 @@ try {
     };
 
     await refill();
+    assert.equal((await host.call("tools.cancelPreparedFileCalls", {
+      sessionId: session.id, toolCallIds: ["prepared-read"],
+    }, 5_000)).cancelled, 1);
     // Reject an approval while every ordinary slot remains occupied. No process
     // is launched and no allow-session grant changes subsequent calls.
     const request = host.matchingNotifications("permissions.request")[0];

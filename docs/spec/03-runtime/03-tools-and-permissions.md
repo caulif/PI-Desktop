@@ -436,7 +436,7 @@ or other Host processes. There is no project-wide shell lock and no inferred
 command write-set. Hashline validation after a shell write remains unchanged.
 
 The stdio RPC dispatcher admits at most 32 ordinary requests and separately at
-most four control requests (`tools.abort`, `permissions.resolve`, `plans.abort`).
+most four control requests (`tools.abort`, `permissions.resolve`, `plans.abort`, `tools.cancelPreparedFileCalls`).
 This reserved lane keeps Stop and approval resolution reachable while ordinary
 requests are waiting for approval or execution capacity. Either saturated lane
 returns `HOST_OVERLOADED`; neither bypasses permissions, tool budgets, session
