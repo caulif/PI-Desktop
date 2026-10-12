@@ -5,12 +5,12 @@
 
 ## 0. Frozen policy summary
 
-### Fork experiment: parallel read batches
+### Fork experiment: coordinated parallel file batches
 
-Read, Glob, Grep and Task are the only parallel batch tools. Both parent and
+Read, Glob, Grep, coordinated Write and Task are the only parallel batch tools. Both parent and
 delegate loops use pi's parallel strategy; any sequential tool (including
-Write, Edit, Bash and unknown tools) makes its entire assistant batch sequential.
-Task may therefore overlap read/search calls in the same message. This is a
+Edit, Bash and unknown tools) makes its entire assistant batch sequential.
+Task may therefore overlap read/search/Write calls in the same message. This is a
 per-agent batch rule, not application-wide exclusion or a Shell safety lock.
 
 The pinned pi-agent-core 1.0.1 prepares all parallel calls in source order before
@@ -23,10 +23,10 @@ another according to preparation order, regardless of completion order.
 
 Permissions, Host capacities, mutation recovery, Hashline validation and tool
 result IDs remain authoritative. Completion events may arrive out of order;
-model tool results remain in source order. No directory snapshot or Read/write
-exclusion is promised by this first step. Stop skips unstarted calls; already
-started file RPCs drain through their existing Host lifecycle. Host file
-cancellation and resource coordination are separate follow-up work.
+model tool results remain in source order. Host admission coordinates participating
+Read/Write/Edit file conflicts; no directory snapshot is promised. Stop skips
+unstarted calls, cancels registered approval/admission waits, and drains already
+started file work through its real lifecycle before permits release.
 
 See [the fork ADR](../../adr/parallel-read-batches.md).
 
@@ -364,16 +364,16 @@ batched, serialized, bounded by ten-second transport deadlines, and drained on
 Stop/disposal and delegate settlement. Cleanup failures are reported explicitly.
 
 Ticketed mutations bypass the sidecar PathMutex to avoid ordering inversion;
-direct legacy invocations keep their existing lock. This stage keeps Write and
-Edit sequential and preserves the per-session mutation limit of one. In
-particular, file ordering alone does not order sidecar Edit recovery outcomes.
+direct legacy invocations keep their existing lock. The follow-up Write stage
+enables Write and raises per-session mutation capacity to two while preserving
+the global cap of two. Edit stays sequential: file ordering alone does not order
+sidecar Edit recovery outcomes.
 See [ordered-file-call-preparation](../../adr/ordered-file-call-preparation.md).
 
-`Write` and `Edit` are serialized within each session. Read/search tools may
-continue in parallel, and different sessions may mutate different roots
-concurrently, but a session never has two in-flight mutations. The host holds
-the per-session mutation permit before consuming a global mutation slot, so a
-queued mutation cannot reserve capacity while it waits for an earlier edit.
+Host can admit two distinct-file mutations in one session. Conflicting file
+accesses and source-ordered tickets still queue; queueing reserves no execution
+capacity. Runtime Edit batches remain sequential, while independent Write calls
+may overlap. Both the per-session and global mutation caps are two.
 
 `Edit` names positions and supplies new content only; it never matches existing
 text. Every call carries the whole-file `tag` minted by whichever tool last
@@ -413,9 +413,10 @@ the session's provenance, so the same `tag` retried unchanged applies. That
 retry is also the one grace `EDIT_LINES_UNSEEN` gets on the path, so a second
 one does count toward the guard.
 
-Serialization also protects the snapshot store, which both producers and `Edit`
-mutate: without the per-session permit, a concurrent record could land between a
-validation and its write.
+Exclusive file admission protects participating Read/Write/Edit validation and
+write intervals on the same file. Hashline store updates retain their existing
+short mutex; different-file operations can progress independently. Grep remains
+outside directory-tree exclusion and is not a snapshot guarantee.
 
 ## 5. Bash Rules
 
@@ -741,8 +742,10 @@ all grants, including grants not yet claimed. Admitted file work drains through
 review and bookkeeping before releasing resources; Stop is not a proof that a
 blocking file operation has already finished.
 
-The implementation preserves sidecar sequential Write/Edit and the per-session
-mutation limit of one. No directory-tree lock, Bash filesystem lock, snapshot
+The Write follow-up enables sidecar parallel Write and a per-session mutation
+limit of two, matching the unchanged global limit. Edit remains sequential.
+See [parallel-file-writes](../../adr/parallel-file-writes.md).
+No directory-tree lock, Bash filesystem lock, snapshot
 search guarantee, or cross-process filesystem transaction is introduced. A changed
 canonical path or conflicting replacement identity fails with FILE_RESOURCE_CHANGED.
 Existing hardlinks are coordinated using platform file identities; externally

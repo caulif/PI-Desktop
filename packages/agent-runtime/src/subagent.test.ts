@@ -28,7 +28,7 @@ const RUN_STATUSES: SubagentRunStatus[] = [
 ];
 
 describe("delegate execution policy", () => {
-  it("fails closed for mutations and unknown tools even when supplied a parallel hint", () => {
+  it("fails closed for Edit, Bash and unknown tools even when supplied a parallel hint", () => {
     const { run } = createRun({ tools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "plugin_unknown"].map((name) => ({
       name, label: name, description: name, parameters: Type.Object({}),
       executionMode: "parallel", execute: async () => ({ content: [], details: {} }),
@@ -36,7 +36,7 @@ describe("delegate execution policy", () => {
     expect(run.agent.toolExecution).toBe("parallel");
     expect(run.agent.state.tools.map((tool: any) => [tool.name, tool.executionMode])).toEqual([
       ["Read", "parallel"], ["Glob", "parallel"], ["Grep", "parallel"],
-      ["Write", "sequential"], ["Edit", "sequential"], ["Bash", "sequential"], ["plugin_unknown", "sequential"],
+      ["Write", "parallel"], ["Edit", "sequential"], ["Bash", "sequential"], ["plugin_unknown", "sequential"],
     ]);
     run.setSystemPrompt("child-only path rules");
     expect(run.agent.state.systemPrompt).toBe("child-only path rules");

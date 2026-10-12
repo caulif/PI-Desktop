@@ -222,8 +222,8 @@ function runtimeTool(runtime: DesktopAgentRuntime, name: string): AgentTool {
   return tool;
 }
 
-describe("ordered read preparation", () => {
-  it("prepares sibling instructions in order, overlaps execution and preserves result IDs", async () => {
+describe("ordered file preparation", () => {
+  it.each(["Read", "Write"])("prepares %s instructions in order, overlaps execution and preserves result IDs", async (toolName) => {
     const entered: string[] = [];
     const resolvers = new Map<string, (value: unknown) => void>();
     const requests: AgentMessage[][] = [];
@@ -248,7 +248,8 @@ describe("ordered read preparation", () => {
         const first = requests.length === 1;
         const message = assistantMessage({
           content: first
-            ? ["a", "b"].map((id) => ({ type: "toolCall", id, name: "Read", arguments: { path: `${id}/file.ts` } }))
+            ? ["a", "b"].map((id) => ({ type: "toolCall", id, name: toolName,
+              arguments: { path: `${id}/file.ts`, ...(toolName === "Write" ? { content: id } : {}) } }))
             : [{ type: "text", text: "done" }],
           stopReason: first ? "toolUse" : "stop",
         }) as AssistantMessage;
@@ -7718,13 +7719,13 @@ describe("DesktopAgentRuntime subagents", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("allows only Task and read/search tools to run in parallel", async () => {
+  it("allows only Task, read/search and coordinated Write tools to run in parallel", async () => {
     const runtime = createRuntime({ subagents: [explorer] });
     const catalog = (runtime as any).toolCatalog as Map<string, any>;
 
     expect(catalog.get("Task").executionMode).toBe("parallel");
     for (const [name, tool] of catalog) {
-      if (["Task", "Read", "Glob", "Grep"].includes(name)) {
+      if (["Task", "Read", "Glob", "Grep", "Write"].includes(name)) {
         expect(tool.executionMode).toBe("parallel");
         continue;
       }
@@ -11492,4 +11493,48 @@ describe("inline image placement", () => {
       await runtime.dispose();
     }
   });
+});
+// The production pi loop must not let a later successful Edit response clear
+// recovery strikes before an earlier failed Edit response is processed.
+it("keeps Edit response processing in source order while Write becomes parallel", async () => {
+  const entered: string[] = [];
+  const release = new Map<string, (value: unknown) => void>();
+  const host = { call: vi.fn(async (method: string, args: any) => {
+    if (method === "tools.prepareFileCall") return { ticket: `ticket:${args.toolCallId}` };
+    if (method !== "tools.execute") return undefined;
+    entered.push(args.toolCallId);
+    return new Promise((resolve) => release.set(args.toolCallId, resolve));
+  }) };
+  const runtime = createRuntime({ host });
+  const internal = runtime as any;
+  let requests = 0;
+  internal.models = { streamSimple: () => {
+    const first = ++requests === 1;
+    const message = assistantMessage({
+      content: first ? ["earlier-failure", "later-success"].map((id) => ({
+        type: "toolCall", id, name: "Edit", arguments: { path: "file.ts", tag: "ABCD", ops: "PUT >$:\n+updated" },
+      })) : [{ type: "text", text: "done" }], stopReason: first ? "toolUse" : "stop",
+    }) as AssistantMessage;
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => { stream.push({ type: "start", partial: message });
+      stream.push({ type: "done", reason: first ? "toolUse" : "stop", message }); stream.end(message); });
+    return stream;
+  } };
+  try {
+    const pending = runtime.prompt("Edit twice.", "edit-order-user", "edit-order-turn");
+    await vi.waitFor(() => expect(entered).toEqual(["earlier-failure"]));
+    // Keep the earlier Host response gated. A microtask flush cannot start the
+    // second execution; no fragile elapsed-time assertion is used.
+    await Promise.resolve();
+    expect(entered).toEqual(["earlier-failure"]);
+    release.get("earlier-failure")!({ ok: false, isError: true, errorCode: "EDIT_PARSE_FAILED", content: {} });
+    await vi.waitFor(() => expect(entered).toEqual(["earlier-failure", "later-success"]));
+    expect([...internal.mutationFailureCounts.values()]).toEqual([1]);
+    release.get("later-success")!({ ok: true, content: {} });
+    await pending;
+    expect(internal.mutationFailureCounts.size).toBe(0);
+  } finally {
+    for (const resolve of release.values()) resolve({ ok: true, content: {} });
+    await runtime.dispose();
+  }
 });

@@ -8,6 +8,20 @@
 
 ## 1. Goals
 
+### Fork E2E: coordinated Write parallelism
+
+- Runtime fixture emits two different-file Write calls. Gate both execution
+  entries, release responses in reverse order, and inspect source-order model
+  results and final path instructions. Add Edit/Bash: retain sequential batches.
+- Gate an earlier failed Edit response and verify a later successful Edit cannot
+  enter before it settles; failure count increments then clears in source order.
+- Host budget barriers hold two distinct-file permits in one session, queue a
+  third under the unchanged global cap, and prove same-file waiters leave the
+  spare slot usable. Real Host ordered-file/admission harnesses must still pass.
+- Coverage: runtime.test.ts, subagent.test.ts, tool_budget tests,
+  e2e-ordered-file-calls.mjs and e2e-file-resource-admission.mjs. Runtime fixtures
+  and budget barriers are not full Electron E2E or measured real-workload speedup.
+
 ### E2E-ORDERED-FILE-CALLS
 
 - **Preconditions:** Candidate-built Host selected by `PI_DESKTOP_HOST_BIN`,

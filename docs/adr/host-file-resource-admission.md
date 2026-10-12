@@ -3,6 +3,10 @@
 - Status: Implemented candidate (fork experiment, stage B)
 - Date: 2026-10-12
 
+Stage D amendment: [parallel-file-writes](parallel-file-writes.md) enables Write
+and raises per-session mutation capacity to two. Stage B's limits below describe
+its independently reviewable baseline; Edit remains sequential in the amendment.
+
 ## Context
 
 ToolBudget bounds tool execution but does not distinguish two sessions accessing

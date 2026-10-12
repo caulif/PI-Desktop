@@ -20,6 +20,7 @@ Each ADR includes:
 
 | ID | Title | Status |
 |---|---|---|
+| parallel-file-writes | [Enable coordinated parallel Write calls](parallel-file-writes.md) | Fork experiment |
 | parallel-read-batches | [Ordered preparation and parallel read batches](parallel-read-batches.md) | Fork experiment |
 | host-file-resource-admission | [Host file resource admission](host-file-resource-admission.md) | Implemented candidate (fork) |
 | ordered-file-call-preparation | [Ordered file call preparation](ordered-file-call-preparation.md) | Implemented candidate (fork) |

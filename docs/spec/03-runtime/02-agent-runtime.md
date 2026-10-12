@@ -1627,15 +1627,16 @@ Saves affect the next prompt without restarting the application.
 | `Task` calls in one assistant message | parallel; 10 running delegates per session (ADR 0089) |
 
 Tool concurrency is expressed through pi execution modes. In the fork experiment,
-`Task`, `Read`, `Glob` and `Grep` are parallel; all other catalog tools remain
+`Task`, `Read`, `Glob`, `Grep` and coordinated `Write` are parallel; all other catalog tools remain
 sequential. pi runs the whole batch sequentially as soon as it contains one
 sequential tool. Parent and delegate path instruction updates happen during
 ordered preparation before parallel execution, and mutate only their own prompt.
 Delegates issue
-host calls independently, and host-core's one-mutation-per-session admission
-keeps writes from tearing but leaves two same-path mutations unordered, so the
-sidecar serializes `Write`/`Edit` calls that target the same normalized path
-before they reach the host; calls on different paths never wait on each other.
+host calls independently. Host admits up to two mutations per session, with the
+unchanged global limit of two, while atomic file-resource admission excludes
+conflicting participating accesses. Ordered tickets preserve source preparation
+order. Legacy direct calls retain sidecar PathMutex; ticketed calls bypass it.
+Edit remains sequential to preserve response-side mutation-recovery ordering.
 This is what keeps the per-path edit-recovery rules of
 `03-tools-and-permissions.md` §4d meaningful under fan-out.
 

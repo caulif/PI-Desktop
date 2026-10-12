@@ -4,6 +4,7 @@ export function toolExecutionMode(name: string): "parallel" | "sequential" {
     case "Read":
     case "Glob":
     case "Grep":
+    case "Write":
     case "Task":
       return "parallel";
     default:
