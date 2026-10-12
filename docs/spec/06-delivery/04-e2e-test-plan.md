@@ -8,6 +8,20 @@
 
 ## 1. Goals
 
+### E2E-SIDECAR-FILE-CALLS
+
+- Run `node scripts/e2e-sidecar-file-calls.mjs` after the JS and Host builds,
+  with isolated temporary data and no model requests. CI runs it alongside the
+  existing cross-process acceptance suite.
+- Exercise the real `ParentHostProxy` -> `AgentSidecar` -> Host path, not only
+  direct Runtime/Host calls: register Write/Read in order, activate in reverse,
+  observe the created bytes, cancel unused tickets and verify zero capacity.
+- Ticket replay/mismatch, cancellation ownership, Plan-mode restrictions and
+  external-path permission denial must remain enforced by Host; unrelated
+  sensitive RPCs must remain blocked by Sidecar.
+- `sidecar-file-calls.test.ts` separately protects exact preparation/cancellation
+  argument forwarding and fail-closed rejection over real child stdio.
+
 ### Fork E2E: coordinated Write parallelism
 
 - Runtime fixture emits two different-file Write calls. Gate both execution

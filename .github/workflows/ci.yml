@@ -123,6 +123,9 @@ jobs:
       - name: Build host-core
         run: cargo build -p host-core --locked
 
+      - name: Test Sidecar file admission transport
+        run: node scripts/e2e-sidecar-file-calls.mjs
+
       - name: Run trusted extensions E2E
         env:
           DEBUG_E2E: "1"
