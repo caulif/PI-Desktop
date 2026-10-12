@@ -51,6 +51,8 @@ export type VendorAuthResolver = (input: {
 const HOST_PROXY_ALLOWED = new Set([
   "tools.execute",
   "tools.abort",
+  "tools.prepareFileCall",
+  "tools.cancelPreparedFileCalls",
   "tools.list",
   "session.get",
   "session.appendMessage",
