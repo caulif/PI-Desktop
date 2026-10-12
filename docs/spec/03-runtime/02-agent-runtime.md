@@ -45,6 +45,11 @@ The Node runtime normalizes text and image content from host tool results,
 including MCP `content` blocks and bare plugin content-block arrays. Well-formed
 image blocks are passed to vision-capable models and retained when tool history
 is restored; malformed image entries are ignored without failing the tool call.
+Embedded MCP text resources contribute their `resource.text`, and MCP resource
+links contribute a one-line `[resource link]` reference, to the model-visible
+text alongside sibling text blocks; binary resources are not inlined. When no
+text block is available, the JSON fallback likewise keeps image `data` and
+resource `blob` bytes out of the model-visible text.
 
 ## 4. Runtime API (package-level)
 
@@ -529,7 +534,9 @@ rejects. None of these values are configurable.
 **Estimate calibration (D606).** Every threshold above is compared against one
 number, corrected against observed request usage. The runtime estimator anchors
 on the last assistant usage and delegates provider-message estimation to
-pi-ai; desktop-only rows use the existing character heuristic. With no usage
+pi-ai, whose 1.1.0 text estimate is 3.5 characters per token; text truncation
+converts token budgets with the same ratio. Desktop-only rows keep the existing
+character heuristic. With no usage
 anchor, the budget also computes the output-cap estimator
 over non-system conversation messages plus the current system prompt and active
 tool schemas. System-transcript rows are chronological updates, already covered by that
@@ -587,8 +594,11 @@ fallback cannot be prepared, persisted, or kept below the safe budget, the user
 row and an assistant error remain durable and no provider request starts.
 Provider-reported context overflow is the last recovery layer: omit the failed
 assistant from model context, compact once, and retry once. A second overflow
-remains terminal. Bedrock's `prompt is too long: N tokens > M maximum` form
-maps to this path.
+remains terminal and is reported as `CONTEXT_TOO_LARGE`: the error classifier
+recognizes every overflow wording pi-ai's `isContextOverflow` recognizes, so a
+provider such as DashScope/Qwen or z.ai is not recovered as an overflow and then
+reported as a generic `PROVIDER_ERROR`. Bedrock's
+`prompt is too long: N tokens > M maximum` form maps to this path.
 
 Automatic protection is always enabled and is not user-configurable. The
 runtime still accepts a construction-time override that disables it, used by
@@ -765,7 +775,10 @@ criterion-by-criterion report of what was met and the evidence observed.
   deltas every 16ms, and flushes before tool/terminal/abort/error/retry
   boundaries. `message_end` is the authoritative snapshot (D412).
 - Restored assistant history reconstructs separate text and thinking blocks
-  before the next turn.
+  before the next turn. Assistant transport identity is `model.provider` /
+  `model.id` (same as live requests), not the account row id — including when
+  `seedDelegateMessages` rebuilds a Task(resume) history — so same-model
+  Completions reasoning stays in `reasoning_content` under a vendorKey binding.
 - Restored history also reconstructs tool call/result pairs from persisted
   tool rows (`toolCallId`/`toolArgs`/`toolResult`), so a recreated runtime
   keeps its full working context — file contents read, command output —
@@ -929,6 +942,13 @@ core set rather than the on-demand catalog of §7.1:
 - `TaskStop(delegationIds?)` — stops running delegations (defaults to all);
   waits for each abort to settle, then persists `status: "stopped"` with
   `completedAt` on `details.stopped[]`. Stopped delegations read as `stopped`.
+
+**Explicit desktop cancellation.** A running delegate can be stopped from its
+card or detail panel. The subagent group header also offers session-wide stop-all.
+These controls call the same cancellation routine as `TaskStop` without a model
+round trip. Cancellation is cooperative: the UI shows a pending state until
+termination is confirmed, preserving partial output and existing parent Stop
+semantics. A completed delegate is not relabeled by a late stop request.
 
 **Live settlement.** When a delegate settles, the runtime refreshes its original
 `Task` transcript row with the terminal delegation summary (`status`,
@@ -1133,7 +1153,9 @@ When a summary cannot be generated or installed below the hard limit, the run
 degrades: it keeps the original task brief plus the most recent message(s),
 discards the rest of its history, continues, and records that it was degraded,
 so the report and lifecycle details say the delegate lost history rather than
-presenting a complete answer. When even that does not fit, the run fails with
+presenting a complete answer. Empty or whitespace-only extracted summary text
+(including a thinking-only or output-limited reply with no text blocks) counts
+as "cannot be generated" — it must not install an empty successful checkpoint. When even that does not fit, the run fails with
 `SUBAGENT_CONTEXT_OVERFLOW` (not retriable) naming what the parent can change —
 narrow the task, delegate to a model with a larger window, read less at once —
 instead of forwarding the provider's overflow text.
@@ -1368,7 +1390,9 @@ model's provider identity and retain recorded model IDs. A different recorded
 account or model remains distinct. Legacy rows without identity retain the
 current-model fallback. Same-model Completions reasoning stays in its native
 reasoning field, never appended to visible answer text because of an account
-UUID/vendor-name mismatch.
+UUID/vendor-name mismatch. The same rule applies when `seedDelegateMessages`
+rebuilds a Task(resume) history: tag restored assistants and synthetic
+tool-call carriers with `model.provider` / `model.id`, not the account row id.
 
 ### 7.0.1 User custom system prompt files (issue #542)
 
@@ -1605,8 +1629,13 @@ All discovery stays within the session project root. A target path outside the
 project root, or the root path itself, resolves to the root's own chain instead
 of an empty result. File tools on attachments or other locations therefore
 keep the root chain (which may itself be empty). Empty, unreadable, and
-out-of-root files are skipped. The combined UTF-8 content is capped at 32 KiB
-and source paths are labelled under `# Project instructions`.
+out-of-root files are skipped. The global file and the combined project
+entries have independent 32 KiB UTF-8 budgets, so an oversized global file
+never removes project instructions. A file that exceeds its remaining budget is
+cut on a UTF-8 character boundary and followed by a
+`[PI-Desktop truncated <source>: loaded the first <n> of <total> bytes; ...]`
+notice; project files after a truncated one are not loaded. Source paths are
+labelled under `# Project instructions`.
 The sidecar never reads workspace instructions directly. A changed root chain
 recreates an idle runtime on its next prompt; nested instructions are resolved
 again when a relevant file tool runs. The resolver's timeout and fallback
@@ -1687,7 +1716,7 @@ with the original v3 `SessionManager`, Pi `ModelRuntime`, `SettingsManager`, and
 leaf, compaction, model/thinking changes, and context-bearing custom messages;
 it is never reconstructed from renderer `UiMessage` rows.
 
-The Pi 1.0.1 SDK also applies append-only `context_edit` entries to this model
+The Pi 1.1.0 SDK also applies append-only `context_edit` entries to this model
 projection. An edit can omit or replace an earlier message for later provider
 requests without rewriting its raw JSONL entry or the visible native history.
 Native Pi extensions use the SDK's boundary hooks; all entries they append,
@@ -1757,7 +1786,7 @@ and never triggers a provider transport rebuild. Protocol errors such as
 `EPROTO` keep their existing retry behavior. See
 [certificate trust ADR](../../adr/provider-system-certificates.md).
 
-## Pi 1.0.1 execution boundary
+## Pi 1.1.0 execution boundary
 
 Published model metadata and account entitlement come from one account-scoped
 Pi Models collection. Effective binding projection is shared by launch, delegates

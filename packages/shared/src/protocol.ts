@@ -2,7 +2,7 @@ export const PROTOCOL_VERSION = 11 as const;
 export const SCHEMA_VERSION = 16 as const;
 export const APP_ID = "net.aiuo.pi-desktop";
 export const APP_NAME = "PI-Desktop";
-export const APP_VERSION = "0.17.0";
+export const APP_VERSION = "0.18.0-beta.6";
 
 export const APP_MENU_COMMANDS = [
   "newTask",
@@ -115,6 +115,7 @@ export const IPC = {
     liveVoiceWidgetVisibility: "pi-desktop/voice/live/widget/visibility",
     agentCompact: "pi-desktop/agent/compact",
     agentAbort: "pi-desktop/agent/abort",
+    agentStopSubagents: "pi-desktop/agent/stop-subagents",
     agentStop: "pi-desktop/agent/stop",
     agentQueuePush: "pi-desktop/agent/queue/push",
     agentQueueList: "pi-desktop/agent/queue/list",
@@ -222,6 +223,13 @@ export const IPC = {
      * crosses this channel.
      */
     remoteHostBootstrap: "pi-desktop/remoteHost/bootstrap",
+    remoteHostReconnect: "pi-desktop/remoteHost/reconnect",
+    remoteHostProjects: "pi-desktop/remoteHost/projects",
+    remoteHostBrowseProjects: "pi-desktop/remoteHost/browseProjects",
+    remoteHostRegisterProject: "pi-desktop/remoteHost/registerProject",
+    remoteHostSessions: "pi-desktop/remoteHost/sessions",
+    remoteHostCreateSession: "pi-desktop/remoteHost/createSession",
+    remoteHostSyncProviders: "pi-desktop/remoteHost/syncProviders",
     providersList: "pi-desktop/providers/list",
     providersReorder: "pi-desktop/providers/reorder",
     providersCreate: "pi-desktop/providers/create",
@@ -416,6 +424,7 @@ export const IPC = {
     traySessionActivated: "pi-desktop/tray/event/sessionActivated",
     notificationChanged: "pi-desktop/notification/event/changed",
     sessionsChanged: "pi-desktop/session/event/changed",
+    remoteInteractions: "pi-desktop/remote/event/interactions",
     notificationActivated: "pi-desktop/notification/event/activated",
     notificationSound: "pi-desktop/notification/event/sound",
     plansChanged: "pi-desktop/plans/event/changed",

@@ -119,7 +119,12 @@ before it is ever sent to the UI:
   the selected one; leaving the theme restores the host background, because the
   appearance is derived from the live catalog rather than remembered. macOS
   keeps `vibrancy` and its native corner behavior; Linux retains native corner
-  behavior; Windows defaults to the global 12 DIP `--radius-md` token
+  behavior. Windows defaults to a 12 DIP corner request. On Windows 11 (build
+  22000+), radius 0 requests square corners and positive values use the same
+  system-rounded preference, while the OS chooses the actual radius; alpha
+  backgrounds are composited over the resolved built-in theme color to keep the
+  top-level window opaque. Earlier Windows builds retain the requested DIP
+  radius
 - The CSS is read from disk at load time and delivered whole over IPC; the
   renderer injects it into a single dedicated `<style>` element appended after
   the app's own stylesheets, so it can override tokens but never inject markup.
@@ -344,9 +349,11 @@ outbound path the host owns answers to it.
   `window.open`, which would otherwise mint a window outside the filtered session
 - **`pi.net.fetch`.** Checks the allowlist and follows redirects by hand, because
   an allowed host that 30x-es to an undeclared one would carry the request out.
-  The runtime's hop loop is the only fetch path: Electron main supplies no
-  alternative `fetch` service, so nothing can follow a redirect without the
-  per-hop re-check
+  The host's shared hop loop owns both default and injected single-hop
+  transports. `redirect: "error"` rejects 3xx without visiting the target;
+  `manual` returns the original response. The default remains `follow`, with
+  the per-hop re-check. See the [API contract](03-plugin-api.md#net) for
+  capability detection and error codes.
 - **Remote MCP endpoints.** Answer to the same list, not to their permission alone.
   HTTP endpoints may be on a trusted LAN, but plain HTTP is unencrypted and is
   called out during configuration or plugin permission review. The MCP client
@@ -410,7 +417,8 @@ manifest did not name:
   disabled.
   Stopping the calling session cancels that session's in-flight MCP request and
   sends `notifications/cancelled` to the server. A shared server connection and
-  calls owned by other sessions remain active.
+  calls owned by other sessions remain active. A request that times out is
+  cancelled the same way; `initialize` is never cancelled.
 
 ## 8.2 Desktop control and device access
 

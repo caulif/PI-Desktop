@@ -730,7 +730,7 @@ controls.
 | Project close | removes retained tab only; durable project/sessions remain |
 | Project delete | row-menu danger action behind a second confirmation that names the project and the number of its sessions; refused with a message while any of those sessions is running and leaves group membership unchanged; removes the durable project row, those sessions, their transcripts, and its project memory; never deletes the folder on disk; deleting a root of a multi-folder project group detaches it as part of deletion, promotes the first remaining root when the primary is deleted, and removes the group record when its last root is deleted. A path the host no longer knows is still removed from the list. Detaching a root with chats through Edit project preserves them under a standalone project |
 | Project memory | row-menu editor reads and saves a compact list of titled or untitled memory cards for the exact project path; cards can be added, edited, and removed, the context is available in later chats, and it is never a higher-priority instruction |
-| Session list | exact-path matches only; no basename grouping |
+| Session list | exact-path matches only; no basename grouping; the latest ten unpinned sessions appear initially, Load more reveals the remaining history, and collapsing the project clears that expanded-list state so the next expansion returns to the initial ten |
 | Active group | exactly one group reflects the selected host workspace |
 | Task state | In-progress, selected, completed, and failed indicators update by session without replacing the visible transcript; precedence is in-progress, selected, then terminal outcome |
 
@@ -1890,7 +1890,8 @@ Single message render — either user (plaintext) or assistant (markdown streami
   capacity, used/window counts, turn total, and provider
   input/output/cache/reasoning/hit-rate are that turn's newest usage-bearing
   assistant message (the last model request), using
-  `input + output + reasoning + cacheRead + cacheWrite` (D355). They are not
+  `input + output + cacheRead + cacheWrite` (D355; `output` already carries the
+  reasoning tokens, so `reasoningTokens` is never added again). They are not
   the sum of every model call in the visual tool-loop. It is hidden until that
   usage exists. The trigger keeps a small capacity ring beside the
   percentage and omits the redundant `Context` label; the leading figure
@@ -2568,6 +2569,12 @@ as a conversation:
   state (`running`, `error`, `denied`, `success`). Clicking the node expands the
   existing brief/report/counters and nested rows; the report remains printed
   exactly once.
+- Local Desktop running nodes with a delegation handle expose a separate Stop
+  button; the delegate detail panel exposes the same action. The group header
+  offers Stop all subagents for the current session. These actions do not open
+  a model turn or stop the coordinator. Pending cancellation disables duplicate
+  submission and reads Stopping; terminal nodes have no Stop action. Existing
+  output remains readable, including partial output from stopped delegates.
 - A topology that first appears while the turn is active opens once so progress
   is visible, then closes when its activity settles if the user has not
   interacted with the card. Reloaded history remains collapsed by default. A
