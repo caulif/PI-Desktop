@@ -136,7 +136,7 @@
   compaction, and terminal Task snapshots through the real React rendering.
   The headless command does not replace the rendered Electron check above.
 
-### E2E-TOOLS-parallel-read-batches: ordered preparation and parallel reads
+### E2E-TOOLS-parallel-read-batches: ordered preparation and parallel file batches
 
 - Isolate data/project paths; never run against production profiles.
 - A local provider fixture emits two Read calls. Gate real tool-execution
@@ -144,8 +144,15 @@
   follow-up model request: results must retain source toolCallId order and final
   sibling rules must follow preparation order. Repeat with a delegated reader
   and verify parent instructions and permission scope are isolated.
-- Add Bash or Edit to the batch: all tools must execute sequentially. Stop
-  before execution must skip unstarted calls; running file calls must drain.
+- Add Bash to the batch: all tools must execute sequentially. Add Write or
+  Edit instead: calls are ordered by resource conflicts. `[Read a, Write b,
+  Read c]` must dispatch all three to Host before any response returns, write
+  b's content and keep source-order results; `[Read a, Edit a]`, with the tag of
+  a real Read, must reach Host as `read:start`, `read:end`, `edit:start` and
+  succeed. Two same-batch Writes to different files must each leave a review
+  snapshot that rolls back its own file; in ask mode both must await approval
+  together and denying one must not affect the other. Stop before execution
+  must skip unstarted calls; running file calls must drain.
 - Add Task with a delegate that edits a fixture file alongside a parent Read;
   the batch must stay sequential, Task keeps reporting a started delegation
   (ADR 0089), and the parent Read must not enter Host until the writable
@@ -153,7 +160,10 @@
   fan out.
 - Automated coverage: runtime.test.ts uses the production Runtime and pi loop
   with deterministic Host response barriers, including mixed Bash/Write/Edit
-  batches and Stop, plus the mixed Task/read regression in both model orders:
+  batches and Stop, conflict-ordered file batches for the parent and a real
+  delegate loop, calls that fail argument checks or the mode guard while still
+  releasing their successors, mixed Task/Write batches in both orders, and the
+  mixed Task/read regression in both model orders:
   the Task result stays a started notice, the parent read waits for the writable
   shared-workspace delegate's mutation to settle before entering Host, and a
   failed delegate still releases the batch. `scripts/e2e-task-read-batches.mjs`
@@ -165,9 +175,11 @@
 - Run `node scripts/e2e-parallel-read-batches.mjs` after building agent-runtime,
   shared and host-core. Set `PI_DESKTOP_HOST_BIN` when reusing a shared target.
   It uses a local HTTP provider, real parent/delegate loops and a real Host in
-  temporary directories. A gated response proves overlapping Read dispatch;
-  actual Read/Glob/Grep results, source-order model results and parent prompt
-  isolation are checked. This does not measure blocking filesystem-body overlap,
+  temporary directories. A gated response proves overlapping Read dispatch and
+  overlapping `[Read, Write, Read]` dispatch; actual Read/Glob/Grep results,
+  source-order model results, parent prompt isolation, the `[Read a, Edit a]`
+  Host order with a real tag, two-Write rollback and concurrent ask-mode
+  approvals are checked. This does not measure blocking filesystem-body overlap,
   production throughput or Electron UI behavior. UI-only project-edit E2E is
   not evidence for agent Edit scheduling.
 - Run `node scripts/e2e-task-read-batches.mjs` under the same build and
