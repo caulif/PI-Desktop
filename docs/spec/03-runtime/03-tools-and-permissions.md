@@ -5,35 +5,83 @@
 
 ## 0. Frozen policy summary
 
-### Parallel read batches
+### Parallel file batches
 
-Read, Glob and Grep are the first parallel batch candidates. Task-only batches
-retain their existing parallel fan-out; a batch that mixes Task with Read, Glob
-or Grep is kept sequential: a read ordered before Task finishes before the
-delegate starts, and a read ordered after a writable Task waits for that
-delegate to settle before dispatching to Host. Task keeps its ADR 0089 contract
-inside that batch: it reports a started delegation and the parent converges with
-TaskWait. Any other sequential tool (including Write, Edit, Bash and unknown
-tools) makes its entire assistant batch sequential. This is a per-agent batch
-rule, not application-wide exclusion or a Shell safety lock. Only the selected
-builtin executor receives this allowlist and native path preparation. Same-name
-dynamic tools remain sequential. Delegates retain their startup catalog's policy
-and provenance across later parent catalog rebuilds.
+Read, Glob, Grep, Write and Edit are parallel batch candidates. Task-only
+batches retain their existing parallel fan-out; a batch that mixes Task with
+Read, Glob, Grep, Write or Edit is kept sequential: a file call ordered before
+Task finishes before the delegate starts, and a Read, Glob or Grep ordered after
+a writable Task waits for that delegate to settle before dispatching to Host. A
+Write or Edit ordered after Task only runs after the Task call returns; it does
+not wait for the delegate to settle. Task keeps its ADR 0089 contract inside
+that batch: it reports a started delegation and the parent converges with
+TaskWait. Any other sequential tool (including Bash, TodoWrite, plugin/MCP and
+unknown tools) makes its entire assistant batch sequential. This is a per-agent
+batch rule, not application-wide exclusion or a Shell safety lock. Only the
+selected builtin executor receives this allowlist, native path preparation and
+resource claims. Same-name dynamic tools remain sequential. Delegates retain
+their startup catalog's policy and provenance across later parent catalog
+rebuilds.
+
+Inside a parallel batch, calls are ordered by the resources they claim. Each
+builtin file call records its claims at the end of the runtime's
+`beforeToolCall` preparation, after every runtime check that can block it. At
+execution it waits only for earlier calls of the same assistant message whose
+claims conflict; the batch does not hold back any other call.
+
+| Tool | Claim |
+|---|---|
+| Read | shared on its `path`; shared on the whole workspace without a `path` |
+| Glob, Grep | shared on the whole workspace |
+| Write | exclusive on its `path`; exclusive on the whole workspace without a `path` |
+| Edit | exclusive on its `path`; exclusive on the whole workspace when an `ops` line starts (after optional whitespace) with `MV` or `REM`, when a `CUT` or `PUT` header names an `@register`, or without a `path` |
+
+Two shared claims never conflict. Any exclusive claim conflicts with a
+whole-workspace claim and with a path claim on the same file. So Glob and Grep
+keep source order against every Write and Edit in the batch, and an Edit with
+`MV`, `REM` or a named register keeps source order against every other file call
+in the batch. Named registers are kept per session by host-core, so a `CUT @x`
+and a later `PUT @x` on another file must not reorder.
+For example, `[Read a, Edit a, Read b, Write c]` starts Read a, Read b and
+Write c together, and Edit a starts after Read a ends.
+
+Path keys are lexical and never touch the filesystem: backslashes become `/`,
+a relative path is joined to the session's workspace root (the project path
+unless the session is isolated), `.` and `..` segments collapse, a trailing
+`/` is dropped and the key is lowercased. Two keys also name the same file when
+their file names match: this basename fallback is deliberately conservative,
+because aliases a lexical key cannot see (symbolic links, a delegate's worktree
+spelling) would otherwise overlap a read with a non-atomic Host write.
+Same-named files in different directories only lose overlap.
+
+A call that fails, is rejected (for example by the mode guard after a
+mid-turn mode switch) or is aborted still releases the calls ordered behind it;
+failure does not cascade. A call still waiting for its turn when the user stops
+fails with `TOOL_ABORTED` before reaching Host. Claims order calls only inside
+one assistant message; they are not a cross-agent lock.
 
 The pinned pi-agent-core prepares all parallel calls in source order before
 launching their execution bodies. Path instruction resolution and prompt updates
 occur during that preparation, after existing parent mode/extension checks.
 Execution consumes the same normalized arguments. Direct internal invocations
-retain preflight. Child preflight updates the child's system transcript only;
-it never replaces parent instructions. Sibling instruction chains replace one
-another according to preparation order, regardless of completion order.
+retain preflight and are not ordered by claims. Child preflight updates the
+child's system transcript only; it never replaces parent instructions. Sibling
+instruction chains replace one another according to preparation order,
+regardless of completion order.
 
 Permissions, Host capacities, mutation recovery, Hashline validation and tool
-result IDs remain authoritative. Completion events may arrive out of order;
-model tool results remain in source order. Alongside the mixed Task/read batch
-barrier, `PathMutex` coordinates shared reads against exclusive `Write`/`Edit`
-calls on the same normalized workspace path so a parent `Read` does not overlap
-an in-flight delegate mutation on that file. Stop skips unstarted calls; already
+result IDs remain authoritative. Host still admits one mutation per session at
+a time, so non-conflicting Writes and Edits of one batch queue in Host and may
+run in a different order than the model wrote them; a call that waits in that
+queue longer than the Host's 30-second admission timeout fails with
+`HOST_OVERLOADED`.
+Permission approval happens before admission, so several same-batch calls can
+await approval together and each decision applies only to its own call.
+Completion events may arrive out of order; model tool results remain in source
+order. Alongside the mixed Task batch barrier, `PathMutex` coordinates shared
+reads against exclusive `Write`/`Edit` calls on the same normalized workspace
+path across the parent and its delegates, so a parent `Read` does not overlap an
+in-flight delegate mutation on that file. Stop skips unstarted calls; already
 started file RPCs drain through their existing Host lifecycle. Host file
 cancellation and resource coordination are separate follow-up work.
 
