@@ -28,6 +28,8 @@ pub mod hashline;
 pub mod ignore_rules;
 mod image_dimensions;
 pub mod shell;
+#[cfg(windows)]
+mod windows_process_tree;
 
 pub use hashline::{HashlineContext, HashlineStore};
 
@@ -192,12 +194,29 @@ impl ProcessOwnership {
     }
 
     #[cfg(windows)]
-    fn terminate(&self, _pid: u32) -> Result<(), String> {
+    fn terminate(&self, pid: u32) -> Result<(), String> {
         let Some(job) = self.job else {
             return Err("shell runner process ownership is unavailable".into());
         };
-        if unsafe { TerminateJobObject(job, 1) == 0 } {
-            Err("TerminateJobObject failed for the shell runner".into())
+        let mut job_error = if unsafe { TerminateJobObject(job, 1) == 0 } {
+            Some("TerminateJobObject failed for the shell runner".to_string())
+        } else {
+            None
+        };
+
+        // When a shell is spawned on Windows, child processes created by the
+        // shell (and their descendants) might escape the Job Object if they
+        // were spawned before or concurrently with AssignProcessToJobObject.
+        // To guarantee clean termination of the entire tree, take a snapshot of
+        // processes and explicitly terminate any descendants of `pid`.
+        let tree_error = if pid != 0 {
+            terminate_windows_process_tree(pid).err()
+        } else {
+            None
+        };
+
+        if let Some(err) = job_error.take().or(tree_error) {
+            Err(err)
         } else {
             Ok(())
         }
@@ -263,6 +282,11 @@ impl Drop for ProcessOwnership {
     fn drop(&mut self) {
         self.close_now();
     }
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(root_pid: u32) -> Result<(), String> {
+    windows_process_tree::terminate_tree(root_pid)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

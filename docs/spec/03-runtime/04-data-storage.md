@@ -1,4 +1,4 @@
-# 04. Data Storage (Schema v26)
+# 04. Data Storage (Schema v27)
 
 
 ### Lossless tool-image storage (#1868)
@@ -634,6 +634,8 @@ CREATE TABLE sessions (
                                           'high', 'xhigh', 'max', 'omit')),
   permission_mode TEXT NOT NULL DEFAULT 'inherit' -- D115: inherit follows settings
                 CHECK (permission_mode IN ('inherit', 'ask', 'accept-edits', 'auto')),
+  fast_mode   INTEGER NOT NULL DEFAULT 0       -- ADR 0334: session /fast switch
+               CHECK (fast_mode IN (0, 1)),
   source      TEXT,                            -- import origin: claude-code | codex | opencode | pi
   deleted_at  INTEGER,                         -- plugin trash marker; null means active
   pinned      INTEGER NOT NULL DEFAULT 0,
@@ -1616,7 +1618,7 @@ truncating at a guessed position.
 - JSON columns are read blind on hot paths (shipped to the renderer as-is);
   anything filtered or summed is a promoted column by rule.
 
-## 7. Versioning, v7 reset, and v8-to-v23 migration
+## 7. Versioning, v7 reset, and v8-to-v27 migration
 
 - `PRAGMA user_version` stays the schema authority; future structural changes
   add ordered Rust migration fns again, each in one transaction, with a
@@ -1627,7 +1629,7 @@ truncating at a guessed position.
   Sessions, providers, and settings from the old file are not carried over;
   the archive remains for manual recovery. All pre-v7 migration code
   (v1 `settings.sqlite` import, v2→v6 chain) is deleted.
-- Fresh installs run the full v25 DDL directly.
+- Fresh installs run the full v27 DDL directly.
 - **Schema v7 first reaches v8, then uses the guarded path.** The v7→v8
   migration is followed by the same guarded v8→v15 migration; schema-v9 and
   schema-v10 databases take the same guarded path and receive an exact readable
@@ -1691,6 +1693,19 @@ truncating at a guessed position.
 - **Schema v23 is additive.** It adds `sessions.title_source` with default
   `legacy`. Pre-existing v22 titles remain `legacy`, safely protecting deliberate
   renames from automatic replacement. The migration keeps a v22 backup.
+- **Schema v24 is additive.** It adds the `worktrees` registry and
+  `projects.worktree_setup_command` for isolated sessions (ADR 0329). The
+  migration keeps a v23 backup.
+- **Schema v25 is additive.** It adds nullable `models.discovery_state` (§ 4).
+  The migration keeps a v24 backup.
+- **Schema v26 is additive.** It marks the storage-private lossless tool-image
+  envelope (#1868). It is a version-only migration with a v25 backup: it stops
+  older applications from misreading an encoded transcript file, without
+  altering user configuration or rewriting transcripts at startup.
+- **Schema v27 is additive.** It adds `sessions.fast_mode` (ADR 0334), the
+  session `/fast` switch, defaulting to `0` for every existing session. Forks
+  copy it; scheduled runs and delegated workers start at `0`. The migration
+  keeps a v26 backup.
 - **Schema v14 is additive.** It adds nullable `sessions.deleted_at`, the
   partial deletion index, and `session_import_origins`. Existing sessions stay
   active and have no origin rows. The migration runs in the same guarded

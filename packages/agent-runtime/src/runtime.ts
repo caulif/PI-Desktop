@@ -5,7 +5,8 @@ import {
 } from "./mutation-recovery.js";
 import { DESKTOP_AGENT_IDENTITY } from "./agent-identity.js";
 import { resolveMcpToolSelection } from "./mcp-tool-selection.js";
-import { toolExecutionMode, withDynamicTaskExecutionMode } from "./tool-execution-policy.js";
+import { BatchPlanner, withBatchTurn } from "./batch-planner.js";
+import { TOOL_EXECUTION_SPECS, toolExecutionMode, withDynamicTaskExecutionMode } from "./tool-execution-policy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { TOOL_ACTIVATION_SECTION, toolDeclarationPolicy, toolActivationSection, restoredToolActivation, syncToolActivation, type ToolDeclarationPolicy } from "./fixed-tool-declarations.js";
 import { orderSystemRows, SystemTranscriptJournal } from "./system-transcript-journal.js";
@@ -250,6 +251,7 @@ import {
   openCodeEndpointFromProvider,
   withOpenCodeSessionHeaders,
 } from "./opencode-session-headers.js";
+import { withFastModeOptions } from "./fast-mode.js";
 import { withSessionAffinityOptions } from "./session-affinity.js";
 import { withCompactionRequestHeaders } from "./compaction-request.js";
 import type { CompactionRequestShape } from "./compaction-diagnostics.js";
@@ -992,6 +994,11 @@ export type AgentRuntimeOptions = {
   thinkingLevel: SessionThinkingLevel;
   /** Persisted opt-in for retrying transient provider failures until success. */
   infiniteProviderRetry?: boolean;
+  /**
+   * Fast mode for main turns, already resolved by the launcher from the
+   * session `/fast` switch and the model binding's opt-in (ADR 0334).
+   */
+  fastMode?: boolean;
   /** TypeSafe Jev credential, resolved by Electron main only when enabled. */
   jevApiKey?: string;
   systemPrompt?: string;
@@ -1915,6 +1922,8 @@ export class DesktopAgentRuntime {
   private delegateWorktrees = new Map<string, string>();
   /** Serializes same-path mutations across the parent and its delegates. */
   private writeLocks = new PathMutex();
+  /** Orders one parallel batch's calls by the resources they claim. */
+  private batchPlanner = new BatchPlanner();
   /** Complete tool registry; only the active subset is sent to the provider. */
   private toolCatalog = new Map<string, AgentTool>();
   /** Tools intentionally omitted from the initial provider request. */
@@ -1991,6 +2000,7 @@ export class DesktopAgentRuntime {
   private providerRateLimitRetryAttempt = 0;
   /** Opt-in mode removes only the retry-count ceiling; abort and backoff stay intact. */
   private infiniteProviderRetry = false;
+  private fastMode = false;
   private jevApiKey?: string;
   private activeProviderRetryAttempt = 0;
   private providerRetryInProgress = false;
@@ -2101,6 +2111,7 @@ export class DesktopAgentRuntime {
     this.provider = opts.provider;
     this.thinkingLevel = clampThinkingLevel(opts.provider, opts.thinkingLevel);
     this.infiniteProviderRetry = opts.infiniteProviderRetry === true;
+    this.fastMode = opts.fastMode === true;
     this.jevApiKey = opts.jevApiKey;
     this.host = opts.host;
     this.onDiagnostic = opts.onDiagnostic ?? (() => undefined);
@@ -2272,14 +2283,20 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           ),
           m.api,
         );
-        const hookedOptions = withSessionAffinityOptions(
-          this.withExtensionProviderHooks(requestOptions, m),
-          {
-            provider: this.provider,
-            api: m.api,
-            baseUrl: m.baseUrl,
-            sessionId: this.sessionId,
-          },
+        // Only main turns ask for the priority tier: subagents, compaction and
+        // one-shot requests build their own options and keep the default.
+        const hookedOptions = withFastModeOptions(
+          withSessionAffinityOptions(
+            this.withExtensionProviderHooks(requestOptions, m),
+            {
+              provider: this.provider,
+              api: m.api,
+              baseUrl: m.baseUrl,
+              sessionId: this.sessionId,
+            },
+          ),
+          m.api,
+          this.fastMode,
         );
         // The watchdog must be able to *stop* what it abandons. It wraps the
         // retry adapter, so draining alone would let the adapter wake from its
@@ -2420,6 +2437,12 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   setInfiniteProviderRetry(enabled: boolean): void {
     if (this.disposed) throw new Error("runtime disposed");
     this.infiniteProviderRetry = enabled;
+  }
+
+  /** Apply the session `/fast` switch to the next turn of a reused runtime. */
+  setFastMode(enabled: boolean): void {
+    if (this.disposed) throw new Error("runtime disposed");
+    this.fastMode = enabled;
   }
 
   /** Refresh catalog instructions without changing the running session owner. */
@@ -2698,6 +2721,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       const blocked = await this.extensionToolCall(context);
       if (blocked?.block) return blocked;
       await this.preparePathToolCall(context);
+      this.registerBatchCall(context);
       return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
@@ -2860,6 +2884,12 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   }
 
   private applyExtensionAgent(agent: RegisteredTrustedExtensionAgent, model: Model<Api>): void {
+    // `/fast` was authorized for the model the session launched with: Main only
+    // sends it when that binding has `fastModeAllowed` (ADR 0334). An extension
+    // model has no such opt-in, so switching to it must not carry the priority
+    // tier along. The next launch re-applies the switch from the session's
+    // stored model through `setFastMode`.
+    this.fastMode = false;
     this.provider = this.extensionProviderFor(agent, model);
     this.model = model;
     this.models = createExtensionAgentModels({
@@ -4124,14 +4154,17 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       // every tool, so the session agent and a delegated `Task` run send the
       // same declaration (#864).
       const builtin = this.builtinTools.has(tool);
+      const guarded = withModeExecutionGuard(
+        withExplicitRequired({
+          ...tool,
+          executionMode: builtin ? toolExecutionMode(tool.name) : "sequential",
+        }),
+        () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
+      );
+      // Batch ordering wraps the mode guard: a call the guard rejects must
+      // still release the calls ordered behind it in its batch.
       const catalogTool = withDynamicTaskExecutionMode(
-        withModeExecutionGuard(
-          withExplicitRequired({
-            ...tool,
-            executionMode: builtin ? toolExecutionMode(tool.name) : "sequential",
-          }),
-          () => this.isToolAllowedInMode(tool.name) ? undefined : modeToolDenial(tool.name, this.mode),
-        ),
+        builtin && TOOL_EXECUTION_SPECS[tool.name]?.claims ? withBatchTurn(guarded, this.batchPlanner) : guarded,
         () => this.agent?.state.messages.at(-1),
       );
       if (builtin) this.builtinTools.add(catalogTool);
@@ -5078,8 +5111,10 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             tools: scopedTools,
             beforeToolCall: async (context) => {
               await this.preparePathToolCall(context, applyInstructions, builtinToolNames);
+              this.registerBatchCall(context, builtinToolNames);
               return undefined;
             },
+            onTurnEnd: (message) => this.batchPlanner.settleBatch(message),
             onEvent: (envelope) => {
               this.noteDelegationActivity(record, envelope);
               this.onEvent(envelope);
@@ -6352,6 +6387,30 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       });
       return;
     }
+  }
+
+  /**
+   * Records what a prepared builtin call will touch so the batch can order it
+   * (`withBatchTurn`). Runs after every check that can block the call. Tools
+   * without claims are sequential, or Task, whose mixed batches pi already
+   * runs sequentially.
+   */
+  private registerBatchCall(
+    context: BeforeToolCallContext,
+    builtinToolNames?: ReadonlySet<string>,
+  ): void {
+    const name = context.toolCall.name;
+    const claims = TOOL_EXECUTION_SPECS[name]?.claims;
+    if (!claims) return;
+    const selected = context.context?.tools?.find((tool) => tool.name === name);
+    const builtin = builtinToolNames ? builtinToolNames.has(name) : selected && this.builtinTools.has(selected);
+    const batch: unknown = context.assistantMessage;
+    if (!builtin || !isRecord(context.args) || !isRecord(batch)) return;
+    this.batchPlanner.register(
+      batch,
+      context.args,
+      claims(normalizeToolParams(name, context.args), this.workspaceRoot ?? this.projectPath ?? ""),
+    );
   }
 
   private async preparePathToolCall(
@@ -8767,6 +8826,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
         }
         break;
       case "turn_end":
+        this.batchPlanner.settleBatch(event.message);
         if (
           this.suppressOverflowRunEnd ||
           this.suppressProviderRetryRunEnd ||
