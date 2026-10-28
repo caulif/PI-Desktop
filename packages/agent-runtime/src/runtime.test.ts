@@ -423,6 +423,246 @@ describe("ordered read preparation", () => {
   });
 });
 
+describe("parallel file batches", () => {
+  /** Host that gates every `tools.execute` until the test releases it. */
+  function gatedRuntime(calls: () => unknown[], subagents?: unknown[]) {
+    const entered: string[] = [];
+    const releases = new Map<string, (result: unknown) => void>();
+    const requests: AgentMessage[][] = [];
+    const host = {
+      call: vi.fn(async (method: string, args: any) => {
+        if (method === "project.instructions.resolve") return { entries: [] };
+        if (method !== "tools.execute") return undefined;
+        entered.push(args.toolCallId);
+        return new Promise((resolve) => releases.set(args.toolCallId, resolve));
+      }),
+    };
+    const runtime = createRuntime({ host, ...(subagents ? { subagents: subagents as any } : {}) });
+    const internal = runtime as any;
+    let served = false;
+    internal.models = {
+      streamSimple: (_model: unknown, context: { messages: AgentMessage[] }) => {
+        requests.push([...context.messages]);
+        const first = !served;
+        served = true;
+        const message = assistantMessage({
+          content: first ? calls() : [{ type: "text", text: "done" }],
+          stopReason: first ? "toolUse" : "stop",
+        }) as AssistantMessage;
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          stream.push({ type: "start", partial: message });
+          stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
+          stream.end(message);
+        });
+        return stream;
+      },
+    };
+    return { runtime, internal, host, entered, releases, requests };
+  }
+
+  const read = (id: string, path: string) =>
+    ({ type: "toolCall", id, name: "Read", arguments: { path } });
+  const write = (id: string, path: string) =>
+    ({ type: "toolCall", id, name: "Write", arguments: { path, content: "fixture" } });
+  const edit = (id: string, path: string, ops = "PUT >$:\n+fixture") =>
+    ({ type: "toolCall", id, name: "Edit", arguments: { path, tag: "ABCD", ops } });
+
+  it("starts a read/write batch together and submits results in source order", async () => {
+    const { runtime, entered, releases, requests } = gatedRuntime(() => [
+      read("ra", "a.txt"),
+      read("rb", "b.txt"),
+      read("rc", "c.txt"),
+      edit("ed", "d.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Run the file batch.");
+      await vi.waitFor(() => expect([...entered].sort()).toEqual(["ed", "ra", "rb", "rc"]));
+      for (const id of ["ed", "rc", "rb", "ra"]) releases.get(id)!({ ok: true, content: id });
+      await pending;
+      expect(requests[1].filter((message) => message.role === "toolResult")
+        .map((message: any) => message.toolCallId)).toEqual(["ra", "rb", "rc", "ed"]);
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("holds an edit behind a read of the same file and starts the unrelated calls", async () => {
+    const { runtime, entered, releases } = gatedRuntime(() => [
+      read("ra", "a.txt"),
+      edit("ea", "a.txt"),
+      read("rb", "b.txt"),
+      write("wc", "c.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Run the file batch.");
+      await vi.waitFor(() => expect([...entered].sort()).toEqual(["ra", "rb", "wc"]));
+      releases.get("ra")!({ ok: true, content: "A" });
+      await vi.waitFor(() => expect(entered).toContain("ea"));
+      for (const id of ["ea", "rb", "wc"]) releases.get(id)!({ ok: true, content: id });
+      await pending;
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("keeps a search behind an earlier write of any file", async () => {
+    const { runtime, entered, releases } = gatedRuntime(() => [
+      write("wx", "x.txt"),
+      { type: "toolCall", id: "gr", name: "Grep", arguments: { pattern: "fixture" } },
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Write then search.");
+      await vi.waitFor(() => expect(entered).toEqual(["wx"]));
+      releases.get("wx")!({ ok: true, content: "X" });
+      await vi.waitFor(() => expect(entered).toContain("gr"));
+      releases.get("gr")!({ ok: true, content: "match" });
+      await pending;
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("keeps a read behind an earlier rename", async () => {
+    const { runtime, entered, releases } = gatedRuntime(() => [
+      edit("ea", "a.txt", "MV b.txt"),
+      read("rb", "b.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Rename then read.");
+      await vi.waitFor(() => expect(entered).toEqual(["ea"]));
+      releases.get("ea")!({ ok: true, content: "E" });
+      await vi.waitFor(() => expect(entered).toContain("rb"));
+      releases.get("rb")!({ ok: true, content: "B" });
+      await pending;
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("keeps a write behind a read of the same file spelled as an absolute path", async () => {
+    const { runtime, entered, releases } = gatedRuntime(() => [
+      read("ra", "/elsewhere/a.txt"),
+      write("wa", "a.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Read then write.");
+      await vi.waitFor(() => expect(entered).toEqual(["ra"]));
+      releases.get("ra")!({ ok: true, content: "A" });
+      await vi.waitFor(() => expect(entered).toContain("wa"));
+      releases.get("wa")!({ ok: true, content: "W" });
+      await pending;
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("never starts the call ordered behind a stopped read", async () => {
+    const { runtime, internal, entered, releases } = gatedRuntime(() => [
+      read("ra", "a.txt"),
+      edit("ea", "a.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Read then edit.");
+      await vi.waitFor(() => expect(entered).toEqual(["ra"]));
+      const aborting = runtime.abort();
+      releases.get("ra")!({ ok: true, content: "A" });
+      await aborting;
+      await pending;
+      expect(entered).toEqual(["ra"]);
+      const results = internal.agent.state.messages.filter((message: any) => message.role === "toolResult");
+      expect(results.map((message: any) => message.toolCallId)).toEqual(["ra", "ea"]);
+      expect(results.every((message: any) => message.isError)).toBe(true);
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("still runs the edit when the read it waited for failed", async () => {
+    const { runtime, entered, releases } = gatedRuntime(() => [
+      read("ra", "a.txt"),
+      edit("ea", "a.txt"),
+    ]);
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      pending = runtime.prompt("Read then edit.");
+      await vi.waitFor(() => expect(entered).toEqual(["ra"]));
+      releases.get("ra")!({ ok: false, error: "missing" });
+      await vi.waitFor(() => expect(entered).toContain("ea"));
+      releases.get("ea")!({ ok: true, content: "E" });
+      await pending;
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+
+  it("orders a delegate batch on its own message, not the parent's", async () => {
+    const { runtime, internal, entered, releases } = gatedRuntime(
+      () => [read("p-read", "a.txt")],
+      [{ name: "editor", description: "Edit", tools: ["Read", "Edit", "Write"], prompt: "Edit", source: "builtin" }],
+    );
+    subagentRuns.calls.length = 0;
+    let pending: ReturnType<DesktopAgentRuntime["prompt"]> | undefined;
+    try {
+      // The parent's read stays registered and unfinished for the whole test: a
+      // child call on the same path must not queue behind it.
+      await internal.beforeToolCall({
+        assistantMessage: assistantMessage({ content: [read("p-read", "a.txt")] }),
+        toolCall: { name: "Read", id: "p-read" },
+        args: { path: "a.txt" },
+        context: { tools: internal.agent.state.tools },
+      });
+      await runtimeTool(runtime, "Task").execute("task-batch", { agent: "editor", task: "Edit the child file." });
+      const child = subagentRuns.calls[0];
+      const message = assistantMessage({
+        content: [read("c-read", "b.txt"), edit("c-edit", "b.txt"), write("c-write", "a.txt")],
+      });
+      const readArgs = { path: "b.txt" };
+      const editArgs = { path: "b.txt", tag: "ABCD", ops: "PUT >$:\n+child" };
+      const writeArgs = { path: "a.txt", content: "child" };
+      await child.beforeToolCall({ assistantMessage: message, toolCall: { name: "Read", id: "c-read" }, args: readArgs });
+      await child.beforeToolCall({ assistantMessage: message, toolCall: { name: "Edit", id: "c-edit" }, args: editArgs });
+      await child.beforeToolCall({ assistantMessage: message, toolCall: { name: "Write", id: "c-write" }, args: writeArgs });
+
+      const running = [
+        child.tools.find((tool: AgentTool) => tool.name === "Read").execute("c-read", readArgs),
+        child.tools.find((tool: AgentTool) => tool.name === "Edit").execute("c-edit", editArgs),
+        child.tools.find((tool: AgentTool) => tool.name === "Write").execute("c-write", writeArgs),
+      ];
+      await vi.waitFor(() => expect([...entered].sort()).toEqual(["c-read", "c-write"]));
+      releases.get("c-read")!({ ok: true, content: "B" });
+      await vi.waitFor(() => expect(entered).toContain("c-edit"));
+      releases.get("c-edit")!({ ok: true, content: "E" });
+      releases.get("c-write")!({ ok: true, content: "W" });
+      await Promise.all(running);
+    } finally {
+      for (const release of releases.values()) release({ ok: true, content: "cleanup" });
+      await pending;
+      await runtime.dispose();
+    }
+  });
+});
+
 /** Minimal pi-ai assistant message; overrides carry the shape under test. */
 function assistantMessage(overrides: {
   content: unknown[];
@@ -449,7 +689,7 @@ function assistantMessage(overrides: {
   };
 }
 
-describe("Task/read batch execution policy", () => {
+describe("Task/file batch execution policy", () => {
   const message = (...names: string[]) => assistantMessage({
     content: names.map((name, index) => ({
       type: "toolCall",
@@ -463,9 +703,13 @@ describe("Task/read batch execution policy", () => {
     [["Task", "Read"], "sequential"],
     [["Task", "Glob"], "sequential"],
     [["Task", "Grep"], "sequential"],
+    [["Task", "Write"], "sequential"],
+    [["Edit", "Task"], "sequential"],
     [["Task", "Task"], undefined],
     [["Read", "Read"], undefined],
     [["Read", "Glob", "Grep"], undefined],
+    [["Read", "Write"], undefined],
+    [["Write", "Edit"], undefined],
   ] as const)("resolves %j to %s", (names, expected) => {
     expect(resolveBatchExecutionMode(message(...names))).toBe(expected);
   });
@@ -8878,13 +9122,13 @@ describe("DesktopAgentRuntime subagents", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("allows only Task and read/search tools to run in parallel", async () => {
+  it("allows only Task and file tools to run in parallel", async () => {
     const runtime = createRuntime({ subagents: [explorer] });
     const catalog = (runtime as any).toolCatalog as Map<string, any>;
 
     expect(catalog.get("Task").executionMode).toBe("parallel");
     for (const [name, tool] of catalog) {
-      if (["Task", "Read", "Glob", "Grep"].includes(name)) {
+      if (["Task", "Read", "Glob", "Grep", "Write", "Edit"].includes(name)) {
         expect(tool.executionMode).toBe("parallel");
         continue;
       }

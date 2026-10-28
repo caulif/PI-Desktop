@@ -5,7 +5,8 @@ import {
 } from "./mutation-recovery.js";
 import { DESKTOP_AGENT_IDENTITY } from "./agent-identity.js";
 import { resolveMcpToolSelection } from "./mcp-tool-selection.js";
-import { toolExecutionMode, withDynamicTaskExecutionMode } from "./tool-execution-policy.js";
+import { BatchPlanner } from "./batch-planner.js";
+import { TOOL_EXECUTION_SPECS, toolExecutionMode, withDynamicTaskExecutionMode } from "./tool-execution-policy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { TOOL_ACTIVATION_SECTION, toolDeclarationPolicy, toolActivationSection, restoredToolActivation, syncToolActivation, type ToolDeclarationPolicy } from "./fixed-tool-declarations.js";
 import { orderSystemRows, SystemTranscriptJournal } from "./system-transcript-journal.js";
@@ -1915,6 +1916,8 @@ export class DesktopAgentRuntime {
   private delegateWorktrees = new Map<string, string>();
   /** Serializes same-path mutations across the parent and its delegates. */
   private writeLocks = new PathMutex();
+  /** Orders one batch's parallel calls by the resources they claim. */
+  private batchPlanner = new BatchPlanner();
   /** Complete tool registry; only the active subset is sent to the provider. */
   private toolCatalog = new Map<string, AgentTool>();
   /** Tools intentionally omitted from the initial provider request. */
@@ -2698,6 +2701,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       const blocked = await this.extensionToolCall(context);
       if (blocked?.block) return blocked;
       await this.preparePathToolCall(context);
+      this.registerBatchCall(context);
       return undefined;
     }
     const enterKind = enterToolKind(context.toolCall.name);
@@ -3917,25 +3921,33 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             : normalizeToolParams(toolName, rawParams);
           if (prepared) this.preparedPathToolArgs.delete(rawParams as object);
           requireAliasedParams(toolName, params);
-          if (READ_ONLY_CORE_TOOLS.has(toolName)) {
-            await this.waitForBatchWritableDelegations(toolCallId, signal);
+          try {
+            await this.batchPlanner.waitForTurn(rawParams as object, signal);
+            if (READ_ONLY_CORE_TOOLS.has(toolName)) {
+              await this.waitForBatchWritableDelegations(toolCallId, signal);
+            }
+            // Direct/internal invocations retain preflight. pi invocations have
+            // already committed instructions in the ordered preparation phase.
+            if (!prepared) await this.loadPathInstructions(toolName, params, this.instructionExecution.getStore());
+            if (PATH_MUTATING_TOOLS.has(toolName)) {
+              return await this.writeLocks.run(
+                this.pathLockKey(toolCallId, params),
+                () => run(toolCallId, params, signal, onUpdate),
+              );
+            }
+            if (toolName === "Read") {
+              return await this.writeLocks.read(
+                this.pathLockKey(toolCallId, params),
+                () => run(toolCallId, params, signal, onUpdate),
+              );
+            }
+            return await run(toolCallId, params, signal, onUpdate);
+          } finally {
+            // `return` without `await` runs this block as soon as the call is
+            // started, which would release the calls ordered behind it too
+            // early. A failed call still releases them.
+            this.batchPlanner.settle(rawParams as object);
           }
-          // Direct/internal invocations retain preflight. pi invocations have
-          // already committed instructions in the ordered preparation phase.
-          if (!prepared) await this.loadPathInstructions(toolName, params, this.instructionExecution.getStore());
-          if (PATH_MUTATING_TOOLS.has(toolName)) {
-            return this.writeLocks.run(
-              this.pathLockKey(toolCallId, params),
-              () => run(toolCallId, params, signal, onUpdate),
-            );
-          }
-          if (toolName === "Read") {
-            return this.writeLocks.read(
-              this.pathLockKey(toolCallId, params),
-              () => run(toolCallId, params, signal, onUpdate),
-            );
-          }
-          return run(toolCallId, params, signal, onUpdate);
         },
       };
     };
@@ -5078,6 +5090,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             tools: scopedTools,
             beforeToolCall: async (context) => {
               await this.preparePathToolCall(context, applyInstructions, builtinToolNames);
+              this.registerBatchCall(context, builtinToolNames);
               return undefined;
             },
             onEvent: (envelope) => {
@@ -6352,6 +6365,35 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
       });
       return;
     }
+  }
+
+  /**
+   * Record what this call will touch so `execute` can order it against the rest
+   * of its batch. Only tools that declare claims are registered; a tool without
+   * them is either sequential (pi never starts it in parallel) or a Task, whose
+   * mixed-batch rule keeps the whole message sequential.
+   */
+  private registerBatchCall(
+    context: BeforeToolCallContext,
+    builtinToolNames?: ReadonlySet<string>,
+  ): void {
+    const name = context.toolCall.name;
+    const claims = TOOL_EXECUTION_SPECS[name]?.claims;
+    if (!claims) return;
+    const selected = context.context?.tools?.find((tool) => tool.name === name);
+    const builtin = builtinToolNames ? builtinToolNames.has(name) : selected && this.builtinTools.has(selected);
+    if (!builtin) return;
+    const args = context.args;
+    if (typeof args !== "object" || args === null) return;
+    // A direct invocation has no pi batch, so there is nothing to order it
+    // against and `waitForTurn` stays a no-op.
+    const batch = context.assistantMessage;
+    if (typeof batch !== "object" || batch === null) return;
+    this.batchPlanner.register(
+      batch,
+      args,
+      claims(normalizeToolParams(name, args), this.workspaceRoot ?? this.projectPath ?? ""),
+    );
   }
 
   private async preparePathToolCall(

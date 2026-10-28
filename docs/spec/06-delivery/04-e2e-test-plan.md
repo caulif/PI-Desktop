@@ -136,7 +136,7 @@
   compaction, and terminal Task snapshots through the real React rendering.
   The headless command does not replace the rendered Electron check above.
 
-### E2E-TOOLS-parallel-read-batches: ordered preparation and parallel reads
+### E2E-TOOLS-parallel-read-batches: ordered preparation, parallel file batches
 
 - Isolate data/project paths; never run against production profiles.
 - A local provider fixture emits two Read calls. Gate real tool-execution
@@ -144,8 +144,13 @@
   follow-up model request: results must retain source toolCallId order and final
   sibling rules must follow preparation order. Repeat with a delegated reader
   and verify parent instructions and permission scope are isolated.
-- Add Bash or Edit to the batch: all tools must execute sequentially. Stop
-  before execution must skip unstarted calls; running file calls must drain.
+- Add Bash or an unknown tool to the batch: all tools must execute sequentially.
+  Write and Edit join the parallel candidates, but only a conflicting pair is
+  ordered: with a Write and a Read of the same file in one batch, the Read must
+  wait for the Write to return while a Read of another file overlaps it, and the
+  waiting Read must observe the finished write. A rename (`MV`/`REM`) Edit and
+  Glob/Grep order against every mutation in the batch. Stop before execution
+  must skip unstarted calls; running file calls must drain.
 - Add Task with a delegate that edits a fixture file alongside a parent Read;
   the batch must stay sequential, Task keeps reporting a started delegation
   (ADR 0089), and the parent Read must not enter Host until the writable
@@ -167,9 +172,12 @@
   It uses a local HTTP provider, real parent/delegate loops and a real Host in
   temporary directories. A gated response proves overlapping Read dispatch;
   actual Read/Glob/Grep results, source-order model results and parent prompt
-  isolation are checked. This does not measure blocking filesystem-body overlap,
-  production throughput or Electron UI behavior. UI-only project-edit E2E is
-  not evidence for agent Edit scheduling.
+  isolation are checked. Its second turn adds a Write plus two Reads in one
+  batch: the Write's Host result is held, the unrelated Read must be dispatched
+  while it is held, the same-file Read must not be, and once released that Read
+  must return the rewritten content. This does not measure blocking
+  filesystem-body overlap, production throughput or Electron UI behavior.
+  UI-only project-edit E2E is not evidence for agent Edit scheduling.
 - Run `node scripts/e2e-task-read-batches.mjs` under the same build and
   `PI_DESKTOP_HOST_BIN` preconditions. Against the pre-fix implementation it
   fails with `read:start` before `write:start`, which is the regression the
