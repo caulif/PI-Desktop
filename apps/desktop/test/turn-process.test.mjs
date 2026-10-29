@@ -504,6 +504,40 @@ test("a failed child never turns a completed turn into failed or stopped", () =>
   );
 });
 
+test("an idle turn whose rows never settled is not reported as completed", () => {
+  // A sidecar crash or a lost host leaves the last rows streaming forever: the
+  // idle turn must not claim an outcome the transcript never recorded (#1923).
+  const streamingAnswer = {
+    kind: "message",
+    message: message("t1", "assistant", "", { status: "streaming" }),
+  };
+  assert.deepEqual(
+    turnProcessPhase({ parts: [streamingAnswer], isActive: false, failed: false }),
+    { kind: "unsettled" },
+  );
+  // A tool that never answered reads the same way while nothing drives it.
+  const hungTool = {
+    kind: "activity",
+    items: [{ kind: "tool", message: message("tool1", "tool", "", { toolName: "Bash", status: "streaming" }) }],
+  };
+  assert.deepEqual(
+    turnProcessPhase({ parts: [hungTool], isActive: false, failed: false }),
+    { kind: "unsettled" },
+  );
+  // While the turn is live the same rows are just work in progress.
+  assert.deepEqual(
+    turnProcessPhase({ parts: [streamingAnswer], isActive: true, failed: false }),
+    { kind: "running", phase: undefined },
+  );
+  // Rows recorded before statuses existed carry no signal either way: a
+  // settled turn stays completed rather than rewriting history.
+  const legacy = { kind: "message", message: message("t2", "assistant", "done") };
+  assert.deepEqual(
+    turnProcessPhase({ parts: [legacy], isActive: false, failed: false }),
+    { kind: "completed" },
+  );
+});
+
 test("the header count comes from the production activity summary", () => {
   const entry = turn([
     message("user", "user", "Run"),

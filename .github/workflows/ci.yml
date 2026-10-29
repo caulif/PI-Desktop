@@ -180,6 +180,9 @@ jobs:
       - name: Run transcript rendering and disclosure E2E
         run: xvfb-run --auto-servernum sh -c 'node scripts/e2e-transcript-render.mjs && node scripts/e2e-transcript-disclosure-anchor.mjs'
 
+      - name: Run transcript turn-completion E2E
+        run: xvfb-run --auto-servernum sh -c 'openbox >/dev/null 2>&1 & exec node scripts/e2e-transcript-turn-completion.mjs'
+
       - name: Run trusted extensions E2E
         env:
           DEBUG_E2E: "1"

@@ -339,7 +339,7 @@ Settings is a **full-window page** that replaces the app sidebar + main chrome (
   standard 240px field-column cap. Labels stay on one line; when space is
   insufficient, the control moves below the title and whole options wrap
   within the available pane width without horizontal overflow.
-- **Radial context menu** is a card in AI after Defaults with one switch
+- **Radial context menu** is a card in General after Sidebar with one switch
   (**Enable on the transcript background**) and four direction pickers
   (**Up**, **Right**, **Down**, **Left**). The switch is off when
   `AppSettings.radialMenu.enabled` is absent or false, which keeps the vertical

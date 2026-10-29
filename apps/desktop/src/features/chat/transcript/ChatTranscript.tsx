@@ -310,7 +310,7 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconCopy size={18} />,
+            icon: <IconCopy size={16} />,
             disabled: !copyable,
             onSelect: () => void copyConversation(),
           };
@@ -318,7 +318,7 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconTextSelect size={18} />,
+            icon: <IconTextSelect size={16} />,
             onSelect: () => selectText(contentRef.current),
           };
         case "copy-last-answer": {
@@ -326,7 +326,7 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconChat size={18} />,
+            icon: <IconChat size={16} />,
             disabled: !lastAnswer,
             onSelect: () => void copyText(lastAnswer),
           };
@@ -335,14 +335,14 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconArrowUp size={18} />,
+            icon: <IconArrowUp size={16} />,
             onSelect: () => scrollRef.current?.scrollTo({ top: 0 }),
           };
         case "scroll-bottom":
           return {
             id,
             label,
-            icon: <IconArrowDown size={18} />,
+            icon: <IconArrowDown size={16} />,
             onSelect: () => {
               onReturnToLatest?.();
               jumpToLatest();
@@ -352,7 +352,7 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconBrowser size={18} />,
+            icon: <IconBrowser size={16} />,
             disabled: !sessionId || isRemoteSession(sessionSummary),
             onSelect: () => openWorkPanelTab(browserPluginTab()),
           };
@@ -364,7 +364,7 @@ function TranscriptBody({
             label: workPanelOpen
               ? t("chat.radialMenuCloseWorkPanel")
               : label,
-            icon: <IconPanel size={18} />,
+            icon: <IconPanel size={16} />,
             disabled: !sessionId || isRemoteSession(sessionSummary),
             onSelect: () => (workPanelOpen ? collapseWorkPanel() : openWorkPanel()),
           };
@@ -373,7 +373,7 @@ function TranscriptBody({
           return {
             id,
             label,
-            icon: <IconFolder size={18} />,
+            icon: <IconFolder size={16} />,
             disabled: !path || isRemoteSession(sessionSummary),
             onSelect: () => {
               if (!path) return;
@@ -387,7 +387,7 @@ function TranscriptBody({
           };
         }
         default:
-          return { id, label, icon: <IconChat size={18} />, disabled: true, onSelect: () => {} };
+          return { id, label, icon: <IconChat size={16} />, disabled: true, onSelect: () => {} };
       }
     });
   };

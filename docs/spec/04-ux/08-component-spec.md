@@ -858,6 +858,11 @@ reading surface of the workstation.
   collapses when the draft clears, indicator rows mount or unmount — are
   re-baselined and never cancel follow, so a pinned send stays at the latest
   turn even when the bottom reserve changes mid-turn
+- Transcript and delegated scrollers cancel browser-owned smooth navigation
+  only for input they own. Button Space activation, select keys and input
+  consumed by a nested scroller do not request ancestor cancellation. Normal
+  turn-completion prompt navigation retains its smooth motion when follow is
+  released after starting it (interaction patterns §2.2).
 - The tail runtime status owns one reserved lane. The transcript reserves the
   height of a single `Working…` / planning / run-activity row for the whole
   running turn, so the status appearing between two tool rows, or clearing when

@@ -25,7 +25,48 @@
   deterministic regression does not claim to recover that missing evidence.
 
 
+### Windows background process snapshot clock
+
+- **Preconditions:** Isolated Windows Host and a synthetic background task.
+- **Steps:** Start a child and grandchild after Host startup, exercise stopping
+  through the production process-tree helper, and observe both owned processes.
+- **Expected:** Children created before the snapshot are not rejected as recycled
+  PIDs merely because they started after the Host. Descendants terminate before
+  their parent; unrelated/newer processes remain excluded and failures surface.
+- **Coverage:** `windows_process_tree` unit tests, including a real owned child
+  creation-time check; `e2e-background-tasks-host.mjs` for the Host workflow.
+- **Qualification:** A foreign-API fixture and Windows target compilation are
+  separate from native Windows execution; record which actually ran.
+
 ## 1. Goals
+
+### E2E-TRANSCRIPT-scroll-interruption
+
+- **Preconditions:** Real Chromium with the production transcript scroll hook;
+  a scrollable transcript, manual disclosure reading, and normal motion.
+- **Steps:** Start a smooth navigation toward earlier history. Deliver
+  transcript-owned wheel input before yielding to its first animation frame.
+  Observe subsequent animation frames and run the long-history streaming probe.
+- **Expected:** Input stops the old browser animation at the current offset;
+  later frames cannot move the reader toward its stale destination. Streaming,
+  disclosure anchoring, pinned follow, and long-history work budgets still pass.
+- Repeat owned wheel, scroll-key, scrollbar-surface and touch inputs in the
+  main and delegated scrollers. Observe real browser calls to distinguish
+  application cancellation from Chromium's own pointer behavior. Button Space,
+  button presses, select arrows and nested wheel input must not request an
+  ancestor cancellation. Button Space must allow the original navigation to
+  finish. `e2e-transcript-turn-completion.mjs` also verifies normal completed-turn
+  prompt navigation and a reader's manually retained position.
+  Start smooth navigation immediately before toggling a real disclosure in
+  both main and delegated scrollers; its clicked title must keep its offset.
+- **Coverage:** `node scripts/e2e-transcript-disclosure-anchor.mjs` and
+  `node scripts/e2e-transcript-render.mjs`, plus
+  `node scripts/e2e-transcript-turn-completion.mjs`. CI runs the completion
+  probe in a visible window under Xvfb/Openbox: never-shown Linux windows can
+  throttle animation frames despite `backgroundThrottling: false`.
+- **Specs:** Interaction patterns §2.2. **Milestone:** Maintenance.
+- **Status:** Automated browser regression; the interruption assertion fails
+  without explicit cancellation of the browser-owned smooth navigation.
 
 ### E2E model discovery membership
 
@@ -136,7 +177,7 @@
   compaction, and terminal Task snapshots through the real React rendering.
   The headless command does not replace the rendered Electron check above.
 
-### E2E-TOOLS-parallel-read-batches: ordered preparation and parallel reads
+### E2E-TOOLS-parallel-read-batches: ordered preparation and parallel file batches
 
 - Isolate data/project paths; never run against production profiles.
 - A local provider fixture emits two Read calls. Gate real tool-execution
@@ -144,8 +185,15 @@
   follow-up model request: results must retain source toolCallId order and final
   sibling rules must follow preparation order. Repeat with a delegated reader
   and verify parent instructions and permission scope are isolated.
-- Add Bash or Edit to the batch: all tools must execute sequentially. Stop
-  before execution must skip unstarted calls; running file calls must drain.
+- Add Bash to the batch: all tools must execute sequentially. Add Write or
+  Edit instead: calls are ordered by resource conflicts. `[Read a, Write b,
+  Read c]` must dispatch all three to Host before any response returns, write
+  b's content and keep source-order results; `[Read a, Edit a]`, with the tag of
+  a real Read, must reach Host as `read:start`, `read:end`, `edit:start` and
+  succeed. Two same-batch Writes to different files must each leave a review
+  snapshot that rolls back its own file; in ask mode both must await approval
+  together and denying one must not affect the other. Stop before execution
+  must skip unstarted calls; running file calls must drain.
 - Add Task with a delegate that edits a fixture file alongside a parent Read;
   the batch must stay sequential, Task keeps reporting a started delegation
   (ADR 0089), and the parent Read must not enter Host until the writable
@@ -153,7 +201,10 @@
   fan out.
 - Automated coverage: runtime.test.ts uses the production Runtime and pi loop
   with deterministic Host response barriers, including mixed Bash/Write/Edit
-  batches and Stop, plus the mixed Task/read regression in both model orders:
+  batches and Stop, conflict-ordered file batches for the parent and a real
+  delegate loop, calls that fail argument checks or the mode guard while still
+  releasing their successors, mixed Task/Write batches in both orders, and the
+  mixed Task/read regression in both model orders:
   the Task result stays a started notice, the parent read waits for the writable
   shared-workspace delegate's mutation to settle before entering Host, and a
   failed delegate still releases the batch. `scripts/e2e-task-read-batches.mjs`
@@ -165,9 +216,11 @@
 - Run `node scripts/e2e-parallel-read-batches.mjs` after building agent-runtime,
   shared and host-core. Set `PI_DESKTOP_HOST_BIN` when reusing a shared target.
   It uses a local HTTP provider, real parent/delegate loops and a real Host in
-  temporary directories. A gated response proves overlapping Read dispatch;
-  actual Read/Glob/Grep results, source-order model results and parent prompt
-  isolation are checked. This does not measure blocking filesystem-body overlap,
+  temporary directories. A gated response proves overlapping Read dispatch and
+  overlapping `[Read, Write, Read]` dispatch; actual Read/Glob/Grep results,
+  source-order model results, parent prompt isolation, the `[Read a, Edit a]`
+  Host order with a real tag, two-Write rollback and concurrent ask-mode
+  approvals are checked. This does not measure blocking filesystem-body overlap,
   production throughput or Electron UI behavior. UI-only project-edit E2E is
   not evidence for agent Edit scheduling.
 - Run `node scripts/e2e-task-read-batches.mjs` under the same build and
@@ -5357,25 +5410,32 @@ window; opening a normal panel afterward must still work.
 
 #### E2E-CHAT-radial-background-menu: Radial menu on the empty transcript background
 
-- **Preconditions**: Settings → AI → Radial context menu is available. A
+- **Preconditions**: Settings → General → Radial context menu is available. A
   session has a completed user prompt, a completed assistant answer, and enough
   history to scroll.
 - **Steps**: 1) With the switch off, right-click empty space below the last
   turn and confirm the vertical conversation menu. 2) Turn the switch on and
-  right-click the same space; inspect the four sectors. 3) Move the pointer
-  through each sector and click Copy conversation. 4) Set Up to Copy last
+  right-click the same space; inspect the four sectors and their at-rest
+  icon-and-label stacks. 3) Move the pointer through each sector and click
+  Copy conversation; reopen, press the right button over a sector and release
+  it there, and confirm the action runs. 4) Set Up to Copy last
   answer and Right to Leave empty, then reopen the ring. 5) Click the hub
   without moving, then reopen and press Escape; repeat with an outside click,
-  a scroll, and a window resize. 6) Reopen with Shift+F10, walk the sectors
-  with the arrow keys, and run one with Enter. 7) Restart the app, confirm the
-  switch and the four directions persist, then write an unknown action for one
-  direction into the settings file and confirm that direction resolves to its
-  default.
+  a scroll, and a window resize; reopen and right-press on a sector, then
+  release over the hub and confirm nothing runs. 6) Reopen with Shift+F10, walk
+  the sectors with the arrow keys, and run one with Enter. 7) Restart the app,
+  confirm the switch and the four directions persist, then write an unknown
+  action for one direction into the settings file and confirm that direction
+  resolves to its default.
 - **Expected**: With the switch off the vertical menu opens unchanged. With it
   on, a four-sector ring centred on the pointer replaces it and stays fully
-  inside the window near an edge. Each sector highlights under the pointer;
-  clicking runs that action, closes the ring, and shows the usual toast where
-  the action copies. A **Leave empty** direction renders a disabled sector and
+  inside the window near an edge. Every sector shows its action's icon and
+  label before any hover; the sector under the pointer highlights as a filled
+  sector, with no focus rectangle over it. Clicking runs that action, closes
+  the ring, and shows the usual toast where the action copies. A right-press
+  started while the ring is open runs the sector it is released on; releasing
+  over the hub dismisses without running, and the release trailing the
+  right-click that opened the ring runs nothing. A **Leave empty** direction renders a disabled sector and
   runs nothing; Copy last answer is disabled until an answer exists.
   Open browser reveals the work panel on a blank browser tab, the work panel
   direction toggles — it reads Open work panel while the panel is collapsed and
@@ -5393,8 +5453,9 @@ window; opening a normal panel afterward must still work.
 - **Acceptance**: C (chat stream), Quality
 - **Milestone**: M5
 - **Status**: Chromium component check (`node scripts/e2e-radial-menu.mjs`:
-  sector labels, pointer highlight, click/hub/disabled/Escape paths, arrow-key
-  focus, and viewport clamping) plus unit coverage (`radial-menu.test.mjs`,
+  at-rest sector labels, pointer highlight, click/hub/disabled/Escape paths,
+  the right-press marking release paths, arrow-key focus, and viewport
+  clamping) plus unit coverage (`radial-menu.test.mjs`,
   `settings-roundtrip.test.mjs`); full desktop journey Draft
 
 ### E2E-CHAT-delete-turn-preserves-other-live-outputs
@@ -8440,6 +8501,35 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   production main persistence and renderer projections with an isolated
   3,484-message transcript, three follow-up turns, restart, and a revision
   round trip. Set `PI_DESKTOP_HOST_BIN` to a host built from the candidate.
+
+#### E2E-REVIEW-append-state: Rolling back a historical tool card does not rewrite its session
+
+- **Preconditions**: An isolated real Host process, a temporary workspace with
+  a file changed by `Write`, and a transcript with 16 MiB of synthetic retained
+  tool output after the review-owning message. Use `--large` for 384 MiB.
+- **Steps**: Run `review.rollback`, compare the transcript prefix hash and
+  appended bytes, read the review with a one-message `messageAround` window,
+  read the tail, restart the Host, and retry the same rollback.
+- **Expected**: Workspace bytes are restored. The original transcript prefix
+  is unchanged and fewer than 256 bytes are appended. The selected card reads
+  `rolledBack` before and after restart, its original position and the last
+  message remain correct, and message count is unchanged. Retrying returns
+  `alreadyRolledBack` without appending another state record.
+- **Specs linked**: `03-runtime/04-data-storage.md` §2.0; ADR
+  [append-only-review-state](../../adr/append-only-review-state.md).
+- **Acceptance**: C (conversation), F (persistence), Quality.
+- **Milestone**: M6.
+- **Status**: Automated by `pnpm test:e2e:review-state`; set
+  `PI_DESKTOP_HOST_BIN` to the candidate Host binary. No provider or user data
+  is used. `transcripts::review_state_tests` additionally covers duplicate IDs,
+  snapshot isolation, disk cache reuse, intentional rewrites and torn appends.
+  `equal_length_state_appends_replay_in_file_order_across_cached_reads` pins
+  file-order precedence for equal-sized state appends through warm and cold
+  layouts. `truncate_from_folds_review_state_into_the_retained_prefix` verifies
+  that a later truncate removes the state log while retaining the effective
+  state in the surviving canonical tool message.
+  This validates the review-state trigger in #1836; it does not assert Windows
+  UI timing or eliminate full rewrites for deliberate history replacement.
 
 #### E2E-246: Retrying a large session truncates without a whole-transcript RPC
 
@@ -16435,24 +16525,34 @@ plugin-form fixtures in an isolated temporary directory at runtime.
   and at least one slash entry exists (builtin alias, template, plugin command,
   or Skill).
 - **Steps**:
-  1. With the draft empty, type `、` and inspect the composer.
+  1. With the draft empty, compose `、`, inspect the pre-edit text, then commit.
   2. Continue typing a command name and accept the highlighted row.
   3. Type a draft that contains `、` between other characters.
   4. Send a draft whose first character was typed as `、` without accepting any
      row.
+  5. Cancel a composition, then type `/` again. Also delete text after a
+     dropped `compositionend` and confirm the slash menu still reopens.
 - **Expected**: The committed `、` is rewritten to `/` in place, the ordinary
   slash menu opens with the same filtering and keyboard behavior as a typed
   `/`, and the caret stays after the substituted character. A `、` anywhere
   later in the draft stays untouched text, and the `@` file menu never reacts
-  to the mark.
+  to the mark. Pre-edit `、` remains unchanged until commit; the result is `/`,
+  never `/、`. Ordinary Chinese composition and punctuation in existing drafts
+  remain unchanged. Cancelling leaves a blank draft, and replacing the draft
+  releases the old composition's empty-draft origin.
 - **Specs linked**: `04-ux/04-builtin-commands.md` (§9),
   `04-ux/08-component-spec.md` (§11), `08-meta/decisions-log.md` (D405),
   ADR 0024, ADR 0231
 - **Acceptance**: C (conversation & stream), Localization, Quality
 - **Milestone**: M2
-- **Status**: Unit-covered (`packages/shared/src/composer-trigger.test.ts`,
-  `apps/desktop/test/composer-ime.test.mjs`); rendered desktop journey Draft
-  (run only in a capable environment when this surface changes)
+- **Status**: Partially automated. Unit coverage:
+  `packages/shared/src/composer-trigger.test.ts`,
+  `apps/desktop/test/composer-ime.test.mjs`. Rendered Electron coverage:
+  `node scripts/e2e-composer-ime-stack.mjs` mounts the production input, draft,
+  and completion components, drives Chromium composition through CDP, and
+  covers alias commit, ordinary Chinese text, cancellation, draft replacement,
+  completion acceptance, and lost-end recovery. Sending and a physical OS IME
+  candidate window remain manual checks.
 
 #### E2E-256: Empty-home project name switches among sidebar projects
 
@@ -18950,6 +19050,42 @@ host-created files. The full app's file-preview viewer is covered separately.
   `ui.view` gating, panel-bridge channel) and the wiring contract in
   `apps/desktop/test/main-wiring-contract.test.mjs`; the interactive Electron
   scenario remains a manual validation run.
+
+### E2E-FAST-MODE: `/fast` asks for the priority tier only on an allowed model
+
+- **Preconditions**: A ChatGPT subscription (Codex) account and a Responses
+  API-key provider, each with two configured models. No real provider is
+  required for the automated path; the manual path uses a capturing local
+  endpoint or the user's authorized account.
+- **Steps**:
+  1. In Settings → Models, check **Fast mode** on one model of each provider.
+     Confirm the checkbox is disabled on a Chat Completions provider.
+  2. Start a new task on the allowed Codex model, type `/fast`, send a prompt.
+  3. Send `/fast` again, then send another prompt.
+  4. Switch the session to the model without the opt-in and send `/fast`.
+  5. Fork the session while Fast is on; restart the app and reopen both.
+- **Expected**: Step 1 persists `fastModeAllowed` on the binding only. Step 2
+  shows the Fast mark on the model chip and the request body carries
+  `service_tier: "priority"`; a Responses API-key model shows the per-token
+  price toast instead. Step 3 clears the mark and the field. Step 4 refuses
+  with the model-settings hint and stores nothing. Step 5 keeps the switch on
+  the fork and across restart. Subagent and compaction requests never carry
+  the field. Remote sessions refuse `/fast`. A trusted extension that switches
+  the session to its own Responses model sends its next request without the
+  field.
+- **Specs linked**: `03-runtime/11-provider-model-system.md`,
+  `03-runtime/04-data-storage.md` (v27), `04-ux/04-builtin-commands.md`,
+  ADR 0334, issue #1657.
+- **Status**: Automated coverage: `apps/desktop/test/fast-mode-command.test.mjs`
+  (draft → created session, toggle, refusals, remote, chip),
+  `apps/desktop/test/fast-mode-session-launch.test.mjs` (launch resolution),
+  `packages/agent-runtime/src/fast-mode.test.ts` (request body through the real
+  pi-ai Responses and Completions adapters),
+  `packages/agent-runtime/src/fast-mode-reuse.test.ts` (mid-session switch on a
+  reused runtime; an extension model switch drops the tier), host-core
+  migration, RPC and fork
+  tests. The full settings → `/fast` → captured request path is a manual
+  validation scenario.
 
 ### E2E-PROVIDER-optional-client-certificate
 
