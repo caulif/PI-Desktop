@@ -38,7 +38,46 @@ jobs:
           node-version: 24
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @pi-desktop/agent-runtime... build
-      - run: cargo build -p host-core --locked
+      - id: host-build
+        run: cargo build -p host-core --locked
       - name: Original session background jobs E2E
         timeout-minutes: 5
         run: node scripts/e2e-session-background-jobs.mjs
+      - name: Trace process-group termination after a failed baseline
+        if: failure() && steps.host-build.outcome == 'success'
+        timeout-minutes: 8
+        env:
+          DEBUG_HOST: 1
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("crates/host-core/src/tools/mod.rs")
+          s = p.read_text()
+          needle = "let result = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };"
+          assert s.count(needle) == 1
+          s = s.replace(needle, needle + '''
+                if result == 0 { eprintln!("group-trace kill pgid={pid} ok"); }
+          ''')
+          needle = "if error.raw_os_error() == Some(libc::ESRCH)"
+          assert s.count(needle) == 1
+          s = s.replace(needle, '''
+                eprintln!("group-trace kill pgid={pid} errno={:?}", error.raw_os_error());
+                let rows = std::process::Command::new("/bin/ps")
+                    .args(["-axo", "pid=,ppid=,pgid=,uid=,stat="]).output().unwrap();
+                for row in String::from_utf8_lossy(&rows.stdout).lines() {
+                    if row.split_whitespace().nth(2).and_then(|s| s.parse::<u32>().ok()) == Some(pid) {
+                        eprintln!("group-trace pid ppid pgid uid state: {row}");
+                    }
+                }
+                let probe = unsafe { libc::killpg(pid as libc::pid_t, 0) };
+                let errno = if probe == 0 { None } else { io::Error::last_os_error().raw_os_error() };
+                eprintln!("group-trace probe pgid={pid} result={probe} errno={errno:?}");
+                ''' + needle)
+          p.write_text(s)
+          p = Path("scripts/e2e-session-background-jobs.mjs")
+          s = p.read_text()
+          assert s.count("quiet: true") == 1
+          p.write_text(s.replace("quiet: true","quiet: false"))
+          PY
+          cargo build -p host-core --locked
+          node scripts/e2e-session-background-jobs.mjs
