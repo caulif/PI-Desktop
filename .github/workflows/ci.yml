@@ -69,9 +69,14 @@ jobs:
                         eprintln!("group-trace pid ppid pgid uid state: {row}");
                     }
                 }
-                let probe = unsafe { libc::killpg(pid as libc::pid_t, 0) };
-                let errno = if probe == 0 { None } else { io::Error::last_os_error().raw_os_error() };
-                eprintln!("group-trace probe pgid={pid} result={probe} errno={errno:?}");
+                let started = std::time::Instant::now();
+                for delay in [0, 10, 40, 200, 750] {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    let probe = unsafe { libc::killpg(pid as libc::pid_t, 0) };
+                    let errno = if probe == 0 { None } else { io::Error::last_os_error().raw_os_error() };
+                    eprintln!("group-trace probe pgid={pid} elapsed={:?} result={probe} errno={errno:?}", started.elapsed());
+                    if errno == Some(libc::ESRCH) { break; }
+                }
                 ''' + needle)
           p.write_text(s)
           p = Path("scripts/e2e-session-background-jobs.mjs")
